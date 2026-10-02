@@ -4,9 +4,9 @@
 
 use std::{thread, time::Duration};
 
-use crate::bridge::{PanelUpdate, XrInput};
+use crate::bridge::{PanelReceiver, PanelUpdate, XrInput};
 use crate::gpu::{self, SharedImage};
-use crate::panel::{PanelGeometry, Ray3};
+use crate::panel::{PanelGeometry, PanelLimits, Ray3};
 use anyhow::{Context, Result, ensure};
 use ash::{
     Entry as VkEntry,
@@ -15,11 +15,48 @@ use ash::{
 use openxr as xr;
 use smithay::backend::allocator::Buffer;
 
-type PanelImages = std::collections::HashMap<u64, (SharedImage, crate::panel::PanelPose)>;
+struct XrPanel {
+    shared: SharedImage,
+    geometry: PanelGeometry,
+    swapchain: xr::Swapchain<xr::Vulkan>,
+    images: Vec<u64>,
+}
+
+impl XrPanel {
+    fn new(
+        session: &xr::Session<xr::Vulkan>,
+        format: vk::Format,
+        shared: SharedImage,
+        geometry: PanelGeometry,
+    ) -> Result<Self> {
+        let size = shared.dmabuf.size();
+        let swapchain = session
+            .create_swapchain(&xr::SwapchainCreateInfo {
+                create_flags: xr::SwapchainCreateFlags::EMPTY,
+                usage_flags: xr::SwapchainUsageFlags::TRANSFER_DST
+                    | xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
+                format: format.as_raw() as _,
+                sample_count: 1,
+                width: size.w as u32,
+                height: size.h as u32,
+                face_count: 1,
+                array_size: 1,
+                mip_count: 1,
+            })
+            .context("create window swapchain")?;
+        let images = swapchain.enumerate_images()?;
+        Ok(Self {
+            shared,
+            geometry,
+            swapchain,
+            images,
+        })
+    }
+}
+
+type PanelImages = std::collections::BTreeMap<u64, XrPanel>;
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
-const PANEL_WIDTH: u32 = 512;
-const PANEL_HEIGHT: u32 = 512;
 
 fn panel_swapchain_format(formats: &[u32]) -> Result<vk::Format> {
     let format = vk::Format::R8G8B8A8_SRGB;
@@ -34,10 +71,7 @@ fn panel_swapchain_format(formats: &[u32]) -> Result<vk::Format> {
 ///
 /// It submits captured Wayland panel pixels as independent quad layers and
 /// forwards the right-hand aim/select controller actions to the compositor.
-pub fn run(
-    frames: calloop::channel::Channel<PanelUpdate>,
-    input: calloop::channel::SyncSender<XrInput>,
-) -> Result<()> {
+pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) -> Result<()> {
     let xr_entry = unsafe { xr::Entry::load(&()) }.context("load OpenXR loader")?;
     let available = xr_entry
         .enumerate_extensions()
@@ -190,26 +224,49 @@ pub fn run(
     .context("create OpenXR session")?;
     let (session, mut frame_waiter, mut frame_stream) = xr_session;
 
+    let graphics = instance.system_properties(system)?.graphics_properties;
+    let device_limit = unsafe { vk_instance.get_physical_device_properties(physical_device) }
+        .limits
+        .max_image_dimension2_d;
+    let cap = std::env::var("SPACETOP_MAX_PANEL_SIZE")
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .context("SPACETOP_MAX_PANEL_SIZE must be a positive integer")
+        })
+        .unwrap_or(Ok(4096))?;
+    let limits = PanelLimits {
+        max_width: graphics
+            .max_swapchain_image_width
+            .min(device_limit)
+            .min(cap)
+            .min(i32::MAX as u32),
+        max_height: graphics
+            .max_swapchain_image_height
+            .min(device_limit)
+            .min(cap)
+            .min(i32::MAX as u32),
+        max_layers: graphics.max_layer_count,
+    };
+    ensure!(
+        limits.max_width > 0 && limits.max_height > 0 && limits.max_layers > 0,
+        "invalid OpenXR panel limits or zero SPACETOP_MAX_PANEL_SIZE"
+    );
+    eprintln!(
+        "OpenXR panel limits: {}x{}, {} window layers",
+        limits.max_width, limits.max_height, limits.max_layers
+    );
     let formats = session.enumerate_swapchain_formats()?;
     let format = panel_swapchain_format(&formats)?;
     let render_node = gpu::render_node(&vk_instance, physical_device)
         .context("GPU sharing requires a DRM render node for the runtime-selected Vulkan GPU")?;
     input
-        .send(XrInput::GpuDevice { render_node })
+        .send(XrInput::GpuDevice {
+            render_node,
+            limits,
+        })
         .context("request GPU compositing")?;
     let gpu_cursor = gpu::GpuCursor::new(&vk_instance, &device, physical_device)?;
-    let mut swapchain = session.create_swapchain(&xr::SwapchainCreateInfo {
-        create_flags: xr::SwapchainCreateFlags::EMPTY,
-        usage_flags: xr::SwapchainUsageFlags::TRANSFER_DST,
-        format: format.as_raw() as _,
-        sample_count: 1,
-        width: PANEL_WIDTH,
-        height: PANEL_HEIGHT,
-        face_count: 1,
-        array_size: 1,
-        mip_count: 1,
-    })?;
-    let images = swapchain.enumerate_images()?;
     let space =
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
     let action_set = instance.create_action_set("spacetop", "Spacetop input", 0)?;
@@ -280,23 +337,47 @@ pub fn run(
             }
         }
         // Drain compositor-to-XR panel snapshots without blocking the XR frame loop.
-        while let Ok(command) = frames.try_recv() {
+        let updates = frames.drain();
+        for update in &updates {
+            if let PanelUpdate::Removed { panel_id } = update {
+                panel_frames.remove(panel_id);
+            }
+        }
+        for command in updates {
             match command {
                 PanelUpdate::GpuFrame {
                     panel_id,
                     dmabuf,
-                    pose,
-                } => match SharedImage::import(&vk_instance, &device, physical_device, dmabuf) {
-                    Ok(image) => {
-                        panel_frames.insert(panel_id, (image, pose));
+                    geometry,
+                } => {
+                    let size = dmabuf.size();
+                    ensure!(
+                        size.w > 0
+                            && size.h > 0
+                            && size.w as u32 <= limits.max_width
+                            && size.h as u32 <= limits.max_height,
+                        "window image exceeds negotiated OpenXR limits"
+                    );
+                    let shared =
+                        SharedImage::import(&vk_instance, &device, physical_device, dmabuf)
+                            .context("mandatory GPU DMA-BUF import failed")?;
+                    if let Some(panel) = panel_frames.get_mut(&panel_id)
+                        && panel.shared.dmabuf.size() == size
+                    {
+                        panel.shared = shared;
+                        panel.geometry = geometry;
+                    } else {
+                        ensure!(
+                            panel_frames.contains_key(&panel_id)
+                                || panel_frames.len() < limits.max_layers as usize,
+                            "OpenXR supports at most {} mapped window layers",
+                            limits.max_layers
+                        );
+                        panel_frames
+                            .insert(panel_id, XrPanel::new(&session, format, shared, geometry)?);
                     }
-                    Err(error) => {
-                        return Err(error.context("mandatory GPU DMA-BUF import failed"));
-                    }
-                },
-                PanelUpdate::Removed { panel_id } => {
-                    panel_frames.remove(&panel_id);
                 }
+                PanelUpdate::Removed { .. } => {}
             }
         }
         if exit {
@@ -357,13 +438,12 @@ pub fn run(
             continue;
         }
 
-        let image_index = swapchain.acquire_image()?;
-        swapchain.wait_image(xr::Duration::INFINITE)?;
-        let image = vk::Image::from_raw(
-            *images
-                .get(image_index as usize)
-                .context("bad swapchain index")? as _,
-        );
+        let cursor_hit = cursor_ray.and_then(|ray| {
+            panel_frames
+                .iter()
+                .filter_map(|(id, panel)| panel.geometry.intersect(ray).map(|hit| (*id, hit)))
+                .min_by(|(_, first), (_, second)| first.distance_m.total_cmp(&second.distance_m))
+        });
         unsafe {
             device.wait_for_fences(&[fence], true, u64::MAX)?;
             device.reset_fences(&[fence])?;
@@ -379,88 +459,71 @@ pub fn run(
                 .level_count(1)
                 .base_array_layer(0)
                 .layer_count(1);
-            let begin_barrier = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image)
-                .subresource_range(range);
-            let panel = panel_frames
-                .iter()
-                .min_by_key(|(id, _)| *id)
-                .map(|(_, (frame, pose))| (frame, pose));
-            device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[begin_barrier],
-            );
-            device.cmd_clear_color_image(
-                command_buffer,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &vk::ClearColorValue {
-                    float32: [0.08, 0.12, 0.20, 1.0],
-                },
-                &[range],
-            );
-            if panel.is_some() {
-                let barrier = vk::MemoryBarrier::default()
+            for (panel_id, panel) in &mut panel_frames {
+                let image_index = panel.swapchain.acquire_image()?;
+                panel.swapchain.wait_image(xr::Duration::INFINITE)?;
+                let image = vk::Image::from_raw(
+                    *panel
+                        .images
+                        .get(image_index as usize)
+                        .context("bad window swapchain index")? as _,
+                );
+                let begin_barrier = vk::ImageMemoryBarrier::default()
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(range);
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[begin_barrier],
+                );
+                panel
+                    .shared
+                    .copy_to(&device, command_buffer, image, queue_family);
+                if let Some((hit_id, hit)) = cursor_hit
+                    && hit_id == *panel_id
+                {
+                    let size = panel.shared.dmabuf.size();
+                    gpu_cursor.draw(
+                        command_buffer,
+                        image,
+                        size,
+                        (
+                            (hit.uv[0] * size.w as f32).round() as i32,
+                            (hit.uv[1] * size.h as f32).round() as i32,
+                        ),
+                    );
+                }
+                let end_barrier = vk::ImageMemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+                    .dst_access_mask(
+                        vk::AccessFlags::COLOR_ATTACHMENT_READ
+                            | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    )
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(range);
                 device.cmd_pipeline_barrier(
                     command_buffer,
                     vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                     vk::DependencyFlags::empty(),
-                    &[barrier],
                     &[],
                     &[],
+                    &[end_barrier],
                 );
             }
-            if let Some((shared, pose)) = panel {
-                shared.copy_to(&device, command_buffer, image, queue_family);
-                if let Some(ray) = cursor_ray {
-                    let size = shared.dmabuf.size();
-                    let geometry = PanelGeometry {
-                        pose: *pose,
-                        logical_size: (size.w, size.h).into(),
-                    };
-                    if let Some(hit) = geometry.intersect(ray) {
-                        gpu_cursor.draw(
-                            command_buffer,
-                            image,
-                            size,
-                            (
-                                hit.surface_px.x.round() as i32,
-                                hit.surface_px.y.round() as i32,
-                            ),
-                        );
-                    }
-                }
-            }
-            let end_barrier = vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::MEMORY_READ)
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image)
-                .subresource_range(range);
-            device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[end_barrier],
-            );
             device.end_command_buffer(command_buffer)?;
             device.queue_submit(
                 queue,
@@ -469,18 +532,15 @@ pub fn run(
             )?;
             device.wait_for_fences(&[fence], true, u64::MAX)?;
         }
-        swapchain.release_image()?;
+        for panel in panel_frames.values_mut() {
+            panel.swapchain.release_image()?;
+        }
 
-        let panels = panel_frames
-            .iter()
-            // Until each panel gets its own swapchain, the Vulkan upload target
-            // can display only one independent window image.
-            .take(1)
-            .map(|(id, (frame, pose))| (*id, frame, *pose))
-            .collect::<Vec<_>>();
-        let quads = panels
-            .iter()
-            .map(|(_, frame, pose)| {
+        let quads = panel_frames
+            .values()
+            .map(|panel| {
+                let pose = panel.geometry.pose;
+                let frame = &panel.shared;
                 let orientation = glam::Quat::from_rotation_y(pose.yaw);
                 let size = xr::Rect2Di {
                     offset: xr::Offset2Di { x: 0, y: 0 },
@@ -494,7 +554,7 @@ pub fn run(
                     .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
                     .sub_image(
                         xr::SwapchainSubImage::new()
-                            .swapchain(&swapchain)
+                            .swapchain(&panel.swapchain)
                             .image_array_index(0)
                             .image_rect(size),
                     )
@@ -513,8 +573,8 @@ pub fn run(
                     })
                     .size(xr::Extent2Df {
                         width: pose.width_m,
-                        height: pose.width_m * frame.dmabuf.size().h as f32
-                            / frame.dmabuf.size().w.max(1) as f32,
+                        height: pose.width_m * panel.geometry.logical_size.h as f32
+                            / panel.geometry.logical_size.w.max(1) as f32,
                     })
             })
             .collect::<Vec<_>>();
@@ -527,15 +587,12 @@ pub fn run(
             xr::EnvironmentBlendMode::OPAQUE,
             &layers,
         )?;
-
-        // Input actions/controller poses are not yet created; `input` is the
-        // channel used by the later tracked-ray/action integration.
-        let _ = &input;
     }
 
     unsafe {
         device.device_wait_idle()?;
         panel_frames.clear();
+        drop((aim_space, space, frame_waiter, frame_stream, session));
         drop(gpu_cursor);
         device.destroy_fence(fence, None);
         device.destroy_command_pool(command_pool, None);

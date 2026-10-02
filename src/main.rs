@@ -1,7 +1,6 @@
 use std::{process::Command, sync::Arc, thread, time::Instant};
 
 use anyhow::Context;
-use glam::Vec3;
 mod bridge;
 mod gpu;
 mod panel;
@@ -54,6 +53,7 @@ impl ClientData for ClientState {
 
 struct ToplevelPanel {
     surface: ToplevelSurface,
+    pose: PanelPose,
     geometry: Option<PanelGeometry>,
     id: u64,
 }
@@ -72,7 +72,8 @@ struct Compositor {
     dmabuf_state: DmabufState,
     dmabuf_global: Option<DmabufGlobal>,
     next_panel_id: u64,
-    frame_sender: calloop::channel::SyncSender<PanelUpdate>,
+    frame_sender: bridge::PanelSender,
+    panel_limits: panel::PanelLimits,
     active_panel: Option<u64>,
     fatal_error: Option<anyhow::Error>,
     started_at: Instant,
@@ -96,7 +97,13 @@ impl Compositor {
                 self.dispatch_button(pressed, time_ms);
                 Ok(())
             }
-            XrInput::GpuDevice { render_node } => self.configure_gpu(&render_node),
+            XrInput::GpuDevice {
+                render_node,
+                limits,
+            } => {
+                self.panel_limits = limits;
+                self.configure_gpu(&render_node)
+            }
             XrInput::FatalError { message } => Err(anyhow::anyhow!(message)),
         };
         if let Err(error) = result {
@@ -110,10 +117,7 @@ impl Compositor {
         }
     }
 
-    fn new(
-        display_handle: DisplayHandle,
-        frame_sender: calloop::channel::SyncSender<PanelUpdate>,
-    ) -> Self {
+    fn new(display_handle: DisplayHandle, frame_sender: bridge::PanelSender) -> Self {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
@@ -157,6 +161,7 @@ impl Compositor {
             dmabuf_global: None,
             next_panel_id: 1,
             frame_sender,
+            panel_limits: panel::PanelLimits::default(),
             active_panel: None,
             fatal_error: None,
             started_at: Instant::now(),
@@ -174,22 +179,27 @@ impl Compositor {
             })
             .flatten();
 
-        let count = self.panels.len();
-        self.panels[index].geometry = logical_size.map(|logical_size| {
-            let panel_index = index as f32;
-            PanelGeometry {
-                pose: PanelPose {
-                    center: Vec3::new(
-                        panel_index * 0.65 - (count.saturating_sub(1) as f32 * 0.325),
-                        0.0,
-                        -1.6,
-                    ),
-                    yaw: (panel_index - (count.saturating_sub(1) as f32 / 2.0)) * 0.12,
-                    width_m: 1.0,
-                },
-                logical_size,
-            }
+        let was_mapped = self.panels[index].geometry.is_some();
+        if logical_size.is_none() && was_mapped {
+            self.frame_sender.publish(PanelUpdate::Removed {
+                panel_id: self.panels[index].id,
+            });
+        }
+        self.panels[index].geometry = logical_size.map(|logical_size| PanelGeometry {
+            pose: self.panels[index].pose,
+            logical_size,
         });
+        if self.active_panel == Some(self.panels[index].id) && logical_size.is_none() && was_mapped
+        {
+            let next = self
+                .panels
+                .iter()
+                .find(|panel| panel.geometry.is_some())
+                .map(|panel| panel.id);
+            self.set_panel_active(next, SERIAL_COUNTER.next_serial());
+        } else if self.active_panel.is_none() && logical_size.is_some() {
+            self.set_panel_active(Some(self.panels[index].id), SERIAL_COUNTER.next_serial());
+        }
         Some(index)
     }
 
@@ -238,39 +248,42 @@ impl Compositor {
 
     fn capture_panel(&mut self, index: usize) -> anyhow::Result<()> {
         let surface = self.panels[index].surface.wl_surface().clone();
-        let Some(logical_size) =
+        let panel_id = self.panels[index].id;
+        let Some((logical_size, buffer_scale)) =
             smithay::backend::renderer::utils::with_renderer_surface_state(&surface, |state| {
-                state.surface_size()
+                state
+                    .surface_size()
+                    .map(|size| (size, state.buffer_scale()))
             })
             .flatten()
         else {
             return Ok(());
         };
 
-        let scale = (512.0 / logical_size.w as f64)
-            .min(512.0 / logical_size.h as f64)
-            .min(1.0);
-        let size = Size::<i32, smithay::utils::Buffer>::from((
-            (logical_size.w as f64 * scale).round().max(1.0) as i32,
-            (logical_size.h as f64 * scale).round().max(1.0) as i32,
-        ));
         let Some(renderer) = self.gpu_renderer.as_mut() else {
             return Ok(());
         };
+        anyhow::ensure!(
+            self.panels
+                .iter()
+                .filter(|panel| panel.geometry.is_some())
+                .count()
+                <= self.panel_limits.max_layers as usize,
+            "OpenXR supports at most {} mapped window layers",
+            self.panel_limits.max_layers
+        );
+        let (size, scale) = self.panel_limits.capture_size(logical_size, buffer_scale);
         let dmabuf = renderer
             .capture(&surface, size, scale)
             .context("mandatory GPU panel capture failed")?;
-        let panel_id = self.panels[index].id;
-        let Some(pose) = self.panels[index].geometry.map(|geometry| geometry.pose) else {
+        let Some(geometry) = self.panels[index].geometry else {
             return Ok(());
         };
-        if let Err(error) = self.frame_sender.try_send(PanelUpdate::GpuFrame {
+        self.frame_sender.publish(PanelUpdate::GpuFrame {
             panel_id,
             dmabuf,
-            pose,
-        }) {
-            eprintln!("XR panel frame dropped: {error}");
-        }
+            geometry,
+        });
         self.complete_frame_callbacks(&surface);
         Ok(())
     }
@@ -305,13 +318,10 @@ impl Compositor {
     }
 
     fn dispatch_ray(&mut self, ray: Ray3, time_ms: u32) -> bool {
-        // The Vulkan bridge currently draws one swapchain texture per panel
-        // layer index 0. Keep hit testing on the same visible panel.
-        let displayed_panel_id = self.panels.iter().map(|panel| panel.id).min();
         let hit = self
             .panels
             .iter()
-            .filter(|panel| panel.surface.alive() && Some(panel.id) == displayed_panel_id)
+            .filter(|panel| panel.surface.alive())
             .filter_map(|panel| {
                 let hit = panel.geometry?.intersect(ray)?;
                 Some((panel.surface.wl_surface().clone(), hit))
@@ -435,8 +445,13 @@ impl XdgShellHandler for Compositor {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         self.output.enter(surface.wl_surface());
         let panel_id = self.next_panel_id;
+        let pose = (0..=self.panels.len())
+            .map(PanelPose::for_slot)
+            .find(|pose| self.panels.iter().all(|panel| panel.pose != *pose))
+            .expect("an unused panel placement exists");
         self.panels.push(ToplevelPanel {
             surface: surface.clone(),
+            pose,
             geometry: None,
             id: panel_id,
         });
@@ -476,9 +491,18 @@ impl XdgShellHandler for Compositor {
         self.panels
             .retain(|panel| panel.surface.wl_surface() != surface.wl_surface());
         for panel_id in removed {
-            let _ = self
-                .frame_sender
-                .try_send(PanelUpdate::Removed { panel_id });
+            self.frame_sender.publish(PanelUpdate::Removed { panel_id });
+        }
+        if self
+            .active_panel
+            .is_some_and(|active| self.panels.iter().all(|panel| panel.id != active))
+        {
+            let next = self
+                .panels
+                .iter()
+                .find(|panel| panel.geometry.is_some())
+                .map(|panel| panel.id);
+            self.set_panel_active(next, SERIAL_COUNTER.next_serial());
         }
     }
 }

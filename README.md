@@ -12,7 +12,7 @@ Aim with the right controller and use its trigger to click.
 
 GPU sharing is mandatory and uses the OpenXR runtime's Vulkan GPU.
 Smithay composites app buffers using GLES into linear RGBA DMA-BUF images.
-Vulkan imports those images and copies them into the OpenXR swapchain without
+Vulkan imports those images and copies them into per-window OpenXR swapchains without
 reading panel pixels back to the CPU. The targeting cross uses a tiny persistent
 GPU buffer instead of modifying panel pixels.
 
@@ -35,11 +35,28 @@ import failures stop the compositor with an error. There is no CPU renderer,
 panel readback/upload fallback, or renderer-selection environment variable.
 App redraws wait for GPU setup to complete.
 
+Each mapped toplevel gets an independent quad and swapchain. Windows occupy
+stable, nonoverlapping positions, starting in the center and alternating right
+and left. Commits and resizing do not move other windows; closed-window positions
+can be reused. Unmapping or closing removes the quad, and remapping restores it.
+The targeting cross and pointer select the nearest intersected window, and
+clicking transfers keyboard focus. Closing or unmapping the active window hands
+focus to another mapped window.
+
+Images use the window's logical size and buffer scale, rather than a fixed
+512-pixel texture. Large windows are scaled proportionally to fit the runtime's
+swapchain limits, the Vulkan device limit, and a default 4096-pixel per-dimension
+cap. Set `SPACETOP_MAX_PANEL_SIZE` to a positive integer to change that cap.
+Startup logs report the negotiated image size and composition-layer capacity.
+Exceeding the runtime's mapped-window layer limit stops the compositor with a
+clear error; windows are not silently hidden.
+
 This is not yet a fully pipelined renderer: each app update allocates a fresh
 shared image, producer completion is waited on by the CPU, and Vulkan waits for
-copies before releasing swapchain images. Panels remain limited to 512 pixels
-per dimension, and only one window is displayed. Buffer pooling, explicit GPU
-semaphore handoff, higher resolution, and multi-panel swapchains are follow-ups.
+copies before releasing swapchain images. Pending updates coalesce to the latest
+image per window without dropping unmap/close notifications. Buffer pooling and
+explicit GPU semaphore handoff remain follow-ups. Popup/menu rendering and
+window movement/resizing controls are not implemented yet.
 
 ## Tests
 
@@ -50,7 +67,9 @@ cargo clippy --all-targets -- -D warnings
 
 An opt-in hardware test creates a real Wayland app, composites through GLES,
 imports into Vulkan, checks image-copy and cursor pixels, exercises GPU-backed
-client buffers, and verifies deferred GPU setup, focus, clicks, and redraws.
+client buffers, and verifies deferred GPU setup, multiwindow focus and nearest
+hits, clicks, redraws, 1600x800 capture, resize, unmap/remap, close, placement reuse,
+update coalescing, and layer-limit enforcement.
 Test-only readback verifies pixels; the running compositor never reads panel
 images back to the CPU:
 
