@@ -5,39 +5,29 @@
 use std::{thread, time::Duration};
 
 use crate::bridge::{PanelUpdate, XrInput};
-use crate::panel::{PanelFrame, PanelGeometry, Ray3};
+use crate::gpu::{self, SharedImage};
+use crate::panel::{PanelGeometry, Ray3};
 use anyhow::{Context, Result, ensure};
 use ash::{
     Entry as VkEntry,
     vk::{self, Handle},
 };
 use openxr as xr;
+use smithay::backend::allocator::Buffer;
 
-type PanelImages = std::collections::HashMap<u64, (PanelFrame, crate::panel::PanelPose)>;
+type PanelImages = std::collections::HashMap<u64, (SharedImage, crate::panel::PanelPose)>;
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const PANEL_WIDTH: u32 = 512;
 const PANEL_HEIGHT: u32 = 512;
 
 fn panel_swapchain_format(formats: &[u32]) -> Result<vk::Format> {
-    [vk::Format::R8G8B8A8_SRGB, vk::Format::R8G8B8A8_UNORM]
-        .into_iter()
-        .find(|format| formats.contains(&(format.as_raw() as u32)))
-        .context("runtime lacks RGBA8 swapchain format")
-}
-
-fn linearize_panel_colors(frame: &mut PanelFrame) {
-    for pixel in frame.bytes.as_chunks_mut::<4>().0 {
-        for channel in &mut pixel[..3] {
-            let srgb = *channel as f32 / 255.0;
-            let linear = if srgb <= 0.04045 {
-                srgb / 12.92
-            } else {
-                ((srgb + 0.055) / 1.055).powf(2.4)
-            };
-            *channel = (linear * 255.0).round() as u8;
-        }
-    }
+    let format = vk::Format::R8G8B8A8_SRGB;
+    ensure!(
+        formats.contains(&(format.as_raw() as u32)),
+        "GPU sharing requires an RGBA8 sRGB OpenXR swapchain"
+    );
+    Ok(format)
 }
 
 /// Run the OpenXR client loop until the runtime requests session/application exit.
@@ -89,13 +79,20 @@ pub fn run(
     );
 
     let requirements = instance.graphics_requirements::<xr::Vulkan>(system)?;
-    let vk_api_version = vk::make_api_version(
+    let mut vk_api_version = vk::make_api_version(
         0,
         requirements.min_api_version_supported.major() as u32,
         requirements.min_api_version_supported.minor() as u32,
         requirements.min_api_version_supported.patch(),
     );
     let vk_entry = unsafe { VkEntry::load() }.context("load Vulkan loader")?;
+    let loader_version =
+        unsafe { vk_entry.try_enumerate_instance_version() }?.unwrap_or(vk::API_VERSION_1_0);
+    if loader_version >= vk::API_VERSION_1_1
+        && requirements.max_api_version_supported >= xr::Version::new(1, 1, 0)
+    {
+        vk_api_version = vk_api_version.max(vk::API_VERSION_1_1);
+    }
     let vk_app_info = vk::ApplicationInfo::default().api_version(vk_api_version);
     let vk_instance_info = vk::InstanceCreateInfo::default().application_info(&vk_app_info);
 
@@ -129,7 +126,14 @@ pub fn run(
     let queue_info = [vk::DeviceQueueCreateInfo::default()
         .queue_family_index(queue_family)
         .queue_priorities(&queue_priorities)];
-    let device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queue_info);
+    ensure!(
+        gpu::sharing_supported(&vk_instance, physical_device, vk_api_version)?,
+        "GPU sharing requires Vulkan 1.1 and DMA-BUF external-memory, DRM-modifier, DRM-device, image-format-list, and foreign-queue-family support"
+    );
+    let sharing_extensions = gpu::SHARING_EXTENSIONS.map(|extension| extension.as_ptr());
+    let device_info = vk::DeviceCreateInfo::default()
+        .queue_create_infos(&queue_info)
+        .enabled_extension_names(&sharing_extensions);
     #[allow(clippy::missing_transmute_annotations)]
     let raw_device = unsafe {
         instance.create_vulkan_device(
@@ -188,6 +192,12 @@ pub fn run(
 
     let formats = session.enumerate_swapchain_formats()?;
     let format = panel_swapchain_format(&formats)?;
+    let render_node = gpu::render_node(&vk_instance, physical_device)
+        .context("GPU sharing requires a DRM render node for the runtime-selected Vulkan GPU")?;
+    input
+        .send(XrInput::GpuDevice { render_node })
+        .context("request GPU compositing")?;
+    let gpu_cursor = gpu::GpuCursor::new(&vk_instance, &device, physical_device)?;
     let mut swapchain = session.create_swapchain(&xr::SwapchainCreateInfo {
         create_flags: xr::SwapchainCreateFlags::EMPTY,
         usage_flags: xr::SwapchainUsageFlags::TRANSFER_DST,
@@ -272,13 +282,18 @@ pub fn run(
         // Drain compositor-to-XR panel snapshots without blocking the XR frame loop.
         while let Ok(command) = frames.try_recv() {
             match command {
-                PanelUpdate::Frame {
+                PanelUpdate::GpuFrame {
                     panel_id,
-                    frame,
+                    dmabuf,
                     pose,
-                } => {
-                    panel_frames.insert(panel_id, (frame, pose));
-                }
+                } => match SharedImage::import(&vk_instance, &device, physical_device, dmabuf) {
+                    Ok(image) => {
+                        panel_frames.insert(panel_id, (image, pose));
+                    }
+                    Err(error) => {
+                        return Err(error.context("mandatory GPU DMA-BUF import failed"));
+                    }
+                },
                 PanelUpdate::Removed { panel_id } => {
                     panel_frames.remove(&panel_id);
                 }
@@ -375,93 +390,6 @@ pub fn run(
                 .iter()
                 .min_by_key(|(id, _)| *id)
                 .map(|(_, (frame, pose))| (frame, pose));
-            let panel_blit = if let Some((source_frame, pose)) = panel {
-                let mut upload_frame = source_frame.clone();
-                if let Some(ray) = cursor_ray {
-                    let geometry = PanelGeometry {
-                        pose: *pose,
-                        logical_size: smithay::utils::Size::from((
-                            source_frame.size.w,
-                            source_frame.size.h,
-                        )),
-                    };
-                    if let Some(hit) = geometry.intersect(ray) {
-                        let (width, height) =
-                            (upload_frame.size.w as usize, upload_frame.size.h as usize);
-                        let center_x = hit.surface_px.x.round() as i32;
-                        let center_y = hit.surface_px.y.round() as i32;
-                        for offset in -10_i32..=10 {
-                            for (x, y) in
-                                [(center_x + offset, center_y), (center_x, center_y + offset)]
-                            {
-                                if x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height
-                                {
-                                    let at = y as usize * upload_frame.stride + x as usize * 4;
-                                    upload_frame.bytes[at..at + 4]
-                                        .copy_from_slice(&[255, 245, 0, 255]);
-                                }
-                            }
-                        }
-                    }
-                }
-                if format == vk::Format::R8G8B8A8_UNORM {
-                    linearize_panel_colors(&mut upload_frame);
-                }
-                let frame = &upload_frame;
-                let width = frame.size.w as u32;
-                let height = frame.size.h as u32;
-                let byte_len = frame
-                    .stride
-                    .checked_mul(height as usize)
-                    .context("panel staging-buffer size overflow")?;
-                ensure!(
-                    frame.bytes.len() >= byte_len,
-                    "panel snapshot is shorter than its stride/height"
-                );
-                let staging_info = vk::BufferCreateInfo::default()
-                    .size(byte_len as u64)
-                    .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE);
-                let staging = device.create_buffer(&staging_info, None)?;
-                let requirements = device.get_buffer_memory_requirements(staging);
-                let memory_properties =
-                    vk_instance.get_physical_device_memory_properties(physical_device);
-                let memory_type = (0..memory_properties.memory_type_count)
-                    .find(|index| {
-                        let type_supported = requirements.memory_type_bits & (1 << index) != 0;
-                        let flags = memory_properties.memory_types[*index as usize].property_flags;
-                        type_supported
-                            && flags.contains(
-                                vk::MemoryPropertyFlags::HOST_VISIBLE
-                                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-                            )
-                    })
-                    .context("no host-coherent Vulkan memory for panel upload")?;
-                let staging_memory = device.allocate_memory(
-                    &vk::MemoryAllocateInfo::default()
-                        .allocation_size(requirements.size)
-                        .memory_type_index(memory_type),
-                    None,
-                )?;
-                device.bind_buffer_memory(staging, staging_memory, 0)?;
-                let mapped = device.map_memory(
-                    staging_memory,
-                    0,
-                    byte_len as u64,
-                    vk::MemoryMapFlags::empty(),
-                )?;
-                std::ptr::copy_nonoverlapping(frame.bytes.as_ptr(), mapped.cast::<u8>(), byte_len);
-                device.unmap_memory(staging_memory);
-                Some((
-                    staging,
-                    staging_memory,
-                    width,
-                    height,
-                    (frame.stride / 4) as u32,
-                ))
-            } else {
-                None
-            };
             device.cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
@@ -480,27 +408,40 @@ pub fn run(
                 },
                 &[range],
             );
-            if let Some((staging, _, width, height, row_length)) = panel_blit {
-                device.cmd_copy_buffer_to_image(
+            if panel.is_some() {
+                let barrier = vk::MemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+                device.cmd_pipeline_barrier(
                     command_buffer,
-                    staging,
-                    image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[vk::BufferImageCopy::default()
-                        .buffer_row_length(row_length)
-                        .buffer_image_height(height)
-                        .image_subresource(vk::ImageSubresourceLayers {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            mip_level: 0,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        })
-                        .image_extent(vk::Extent3D {
-                            width,
-                            height,
-                            depth: 1,
-                        })],
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[barrier],
+                    &[],
+                    &[],
                 );
+            }
+            if let Some((shared, pose)) = panel {
+                shared.copy_to(&device, command_buffer, image, queue_family);
+                if let Some(ray) = cursor_ray {
+                    let size = shared.dmabuf.size();
+                    let geometry = PanelGeometry {
+                        pose: *pose,
+                        logical_size: (size.w, size.h).into(),
+                    };
+                    if let Some(hit) = geometry.intersect(ray) {
+                        gpu_cursor.draw(
+                            command_buffer,
+                            image,
+                            size,
+                            (
+                                hit.surface_px.x.round() as i32,
+                                hit.surface_px.y.round() as i32,
+                            ),
+                        );
+                    }
+                }
             }
             let end_barrier = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -527,10 +468,6 @@ pub fn run(
                 fence,
             )?;
             device.wait_for_fences(&[fence], true, u64::MAX)?;
-            if let Some((staging, staging_memory, _, _, _)) = panel_blit {
-                device.destroy_buffer(staging, None);
-                device.free_memory(staging_memory, None);
-            }
         }
         swapchain.release_image()?;
 
@@ -548,8 +485,8 @@ pub fn run(
                 let size = xr::Rect2Di {
                     offset: xr::Offset2Di { x: 0, y: 0 },
                     extent: xr::Extent2Di {
-                        width: frame.size.w,
-                        height: frame.size.h,
+                        width: frame.dmabuf.size().w,
+                        height: frame.dmabuf.size().h,
                     },
                 };
                 xr::CompositionLayerQuad::new()
@@ -576,7 +513,8 @@ pub fn run(
                     })
                     .size(xr::Extent2Df {
                         width: pose.width_m,
-                        height: pose.width_m * frame.size.h as f32 / frame.size.w.max(1) as f32,
+                        height: pose.width_m * frame.dmabuf.size().h as f32
+                            / frame.dmabuf.size().w.max(1) as f32,
                     })
             })
             .collect::<Vec<_>>();
@@ -597,6 +535,8 @@ pub fn run(
 
     unsafe {
         device.device_wait_idle()?;
+        panel_frames.clear();
+        drop(gpu_cursor);
         device.destroy_fence(fence, None);
         device.destroy_command_pool(command_pool, None);
         device.destroy_device(None);
@@ -610,7 +550,7 @@ mod color_tests {
     use super::*;
 
     #[test]
-    fn prefers_srgb_and_supports_linear_fallback() {
+    fn requires_srgb_swapchain() {
         let srgb = vk::Format::R8G8B8A8_SRGB;
         let linear = vk::Format::R8G8B8A8_UNORM;
         assert_eq!(
@@ -619,23 +559,7 @@ mod color_tests {
                 .as_raw(),
             srgb.as_raw()
         );
-        assert_eq!(
-            panel_swapchain_format(&[linear.as_raw() as u32])
-                .unwrap()
-                .as_raw(),
-            linear.as_raw()
-        );
+        assert!(panel_swapchain_format(&[linear.as_raw() as u32]).is_err());
         assert!(panel_swapchain_format(&[]).is_err());
-    }
-
-    #[test]
-    fn linear_fallback_corrects_midtones_without_changing_alpha() {
-        let mut frame = PanelFrame {
-            size: smithay::utils::Size::from((2, 1)),
-            stride: 8,
-            bytes: vec![0, 128, 255, 255, 10, 64, 192, 127],
-        };
-        linearize_panel_colors(&mut frame);
-        assert_eq!(frame.bytes, [0, 55, 255, 255, 1, 13, 134, 127]);
     }
 }

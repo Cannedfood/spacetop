@@ -1,31 +1,24 @@
 use std::{process::Command, sync::Arc, thread, time::Instant};
 
+use anyhow::Context;
 use glam::Vec3;
 mod bridge;
+mod gpu;
 mod panel;
 mod xr;
 
 use bridge::{PanelUpdate, XrInput};
-use panel::{PanelFrame, PanelGeometry, PanelPose, Ray3};
+use panel::{PanelGeometry, PanelPose, Ray3};
 use smithay::{
-    backend::{
-        allocator::Fourcc,
-        input::ButtonState,
-        renderer::{
-            Bind, ExportMem, Frame, Offscreen, Renderer,
-            element::{
-                Kind,
-                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
-            },
-            pixman::PixmanRenderer,
-            utils::draw_render_elements,
-        },
-    },
-    delegate_compositor, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell,
+    backend::input::ButtonState,
+    delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
+    delegate_xdg_shell,
     input::{Seat, SeatHandler, SeatState, keyboard::XkbConfig},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
-        calloop::{EventLoop, Interest, Mode as PollMode, PostAction, generic::Generic},
+        calloop::{
+            EventLoop, Interest, LoopSignal, Mode as PollMode, PostAction, generic::Generic,
+        },
         wayland_server::{
             Client, Display, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason},
@@ -39,6 +32,7 @@ use smithay::{
             CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
             TraversalAction, get_parent, with_surface_tree_downward,
         },
+        dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::{OutputHandler, OutputManagerState},
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
@@ -61,7 +55,6 @@ impl ClientData for ClientState {
 struct ToplevelPanel {
     surface: ToplevelSurface,
     geometry: Option<PanelGeometry>,
-    frame: Option<PanelFrame>,
     id: u64,
 }
 
@@ -75,15 +68,42 @@ struct Compositor {
     seat: Seat<Self>,
     output: Output,
     panels: Vec<ToplevelPanel>,
-    renderer: PixmanRenderer,
+    gpu_renderer: Option<gpu::GpuRenderer>,
+    dmabuf_state: DmabufState,
+    dmabuf_global: Option<DmabufGlobal>,
     next_panel_id: u64,
     frame_sender: calloop::channel::SyncSender<PanelUpdate>,
     active_panel: Option<u64>,
-    cursor_hit: Option<(u64, i32, i32)>,
+    fatal_error: Option<anyhow::Error>,
     started_at: Instant,
 }
 
 impl Compositor {
+    fn finish_dispatch(&mut self, signal: &LoopSignal) {
+        self.flush_clients();
+        if self.fatal_error.is_some() {
+            signal.stop();
+        }
+    }
+
+    fn handle_xr_input(&mut self, command: XrInput) {
+        let result = match command {
+            XrInput::Ray { ray, time_ms } => {
+                self.dispatch_ray(ray, time_ms);
+                Ok(())
+            }
+            XrInput::Button { pressed, time_ms } => {
+                self.dispatch_button(pressed, time_ms);
+                Ok(())
+            }
+            XrInput::GpuDevice { render_node } => self.configure_gpu(&render_node),
+            XrInput::FatalError { message } => Err(anyhow::anyhow!(message)),
+        };
+        if let Err(error) = result {
+            self.fatal_error = Some(error);
+        }
+    }
+
     fn flush_clients(&mut self) {
         if let Err(error) = self.display_handle.flush_clients() {
             eprintln!("failed to flush Wayland events: {error}");
@@ -132,11 +152,13 @@ impl Compositor {
             seat,
             output,
             panels: Vec::new(),
-            renderer: PixmanRenderer::new().expect("Pixman renderer initializes"),
+            gpu_renderer: None,
+            dmabuf_state: DmabufState::new(),
+            dmabuf_global: None,
             next_panel_id: 1,
             frame_sender,
             active_panel: None,
-            cursor_hit: None,
+            fatal_error: None,
             started_at: Instant::now(),
         }
     }
@@ -171,82 +193,32 @@ impl Compositor {
         Some(index)
     }
 
-    fn capture_panel(&mut self, index: usize) -> anyhow::Result<()> {
-        let surface = self.panels[index].surface.wl_surface().clone();
-        let Some(logical_size) =
-            smithay::backend::renderer::utils::with_renderer_surface_state(&surface, |state| {
-                state.surface_size()
-            })
-            .flatten()
-        else {
-            self.panels[index].frame = None;
-            return Ok(());
-        };
-
-        // Keep snapshots bounded for CPU readback and later Vulkan upload.
-        let scale = (512.0 / logical_size.w as f64)
-            .min(512.0 / logical_size.h as f64)
-            .min(1.0);
-        let size = Size::<i32, smithay::utils::Buffer>::from((
-            (logical_size.w as f64 * scale).round().max(1.0) as i32,
-            (logical_size.h as f64 * scale).round().max(1.0) as i32,
-        ));
-        let physical_size = Size::<i32, Physical>::from((size.w, size.h));
-        let damage = [smithay::utils::Rectangle::from_size(physical_size)];
-        let elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> =
-            render_elements_from_surface_tree(
-                &mut self.renderer,
-                &surface,
-                smithay::utils::Point::<i32, Physical>::from((0, 0)),
-                scale,
-                1.0,
-                Kind::Unspecified,
+    fn configure_gpu(&mut self, render_node: &std::path::Path) -> anyhow::Result<()> {
+        let renderer = gpu::GpuRenderer::new(render_node)
+            .context("mandatory GPU compositor initialization failed")?;
+        let feedback = renderer.feedback(render_node)?;
+        self.gpu_renderer = Some(renderer);
+        if self.dmabuf_global.is_none() {
+            self.dmabuf_global = Some(
+                self.dmabuf_state
+                    .create_global_with_default_feedback::<Self>(&self.display_handle, &feedback),
             );
-        let mut image = self.renderer.create_buffer(Fourcc::Abgr8888, size)?;
-        let mut framebuffer = self.renderer.bind(&mut image)?;
-        let sync = {
-            let mut frame = self.renderer.render(
-                &mut framebuffer,
-                physical_size,
-                smithay::utils::Transform::Normal,
-            )?;
-            // Opaque backdrop avoids premultiplied-alpha ambiguity in the Vulkan
-            // upload path. Individual Wayland clients are still composited over it.
-            frame.clear(
-                smithay::backend::renderer::Color32F::new(0.08, 0.11, 0.16, 1.0),
-                &damage,
-            )?;
-            draw_render_elements::<PixmanRenderer, _, _>(&mut frame, scale, &elements, &damage)?;
-            frame.finish()?
-        };
-        self.renderer.wait(&sync)?;
-        let mapping = self.renderer.copy_framebuffer(
-            &framebuffer,
-            smithay::utils::Rectangle::from_size(size),
-            Fourcc::Abgr8888,
-        )?;
-        let bytes = self.renderer.map_texture(&mapping)?.to_vec();
-        let stride = bytes.len() / size.h as usize;
-        let frame = PanelFrame {
-            size,
-            stride,
-            bytes,
-        };
-        self.panels[index].frame = Some(frame.clone());
-        let panel_id = self.panels[index].id;
-        let Some(pose) = self.panels[index].geometry.map(|geometry| geometry.pose) else {
-            return Ok(());
-        };
-        if let Err(error) = self.frame_sender.try_send(PanelUpdate::Frame {
-            panel_id,
-            frame,
-            pose,
-        }) {
-            eprintln!("XR panel frame dropped: {error}");
         }
+        eprintln!("GPU panel compositing enabled on {}", render_node.display());
+        self.refresh_panels()
+    }
+
+    fn refresh_panels(&mut self) -> anyhow::Result<()> {
+        for index in 0..self.panels.len() {
+            self.capture_panel(index)?;
+        }
+        Ok(())
+    }
+
+    fn complete_frame_callbacks(&self, surface: &WlSurface) {
         let time_ms = self.started_at.elapsed().as_millis() as u32;
         with_surface_tree_downward(
-            &surface,
+            surface,
             (),
             |_, _, &()| TraversalAction::DoChildren(()),
             |_, states, &()| {
@@ -262,42 +234,45 @@ impl Compositor {
             },
             |_, _, &()| true,
         );
-        Ok(())
     }
 
-    /// Inject an XR-space controller/gaze ray as a Wayland pointer motion.
-    fn publish_panel_cursor(&self, panel_index: usize, cursor: Option<(i32, i32)>) {
-        let Some(panel) = self.panels.get(panel_index) else {
-            return;
+    fn capture_panel(&mut self, index: usize) -> anyhow::Result<()> {
+        let surface = self.panels[index].surface.wl_surface().clone();
+        let Some(logical_size) =
+            smithay::backend::renderer::utils::with_renderer_surface_state(&surface, |state| {
+                state.surface_size()
+            })
+            .flatten()
+        else {
+            return Ok(());
         };
-        let Some(frame) = panel.frame.as_ref() else {
-            return;
+
+        let scale = (512.0 / logical_size.w as f64)
+            .min(512.0 / logical_size.h as f64)
+            .min(1.0);
+        let size = Size::<i32, smithay::utils::Buffer>::from((
+            (logical_size.w as f64 * scale).round().max(1.0) as i32,
+            (logical_size.h as f64 * scale).round().max(1.0) as i32,
+        ));
+        let Some(renderer) = self.gpu_renderer.as_mut() else {
+            return Ok(());
         };
-        let Some(pose) = panel.geometry.map(|geometry| geometry.pose) else {
-            return;
+        let dmabuf = renderer
+            .capture(&surface, size, scale)
+            .context("mandatory GPU panel capture failed")?;
+        let panel_id = self.panels[index].id;
+        let Some(pose) = self.panels[index].geometry.map(|geometry| geometry.pose) else {
+            return Ok(());
         };
-        let mut preview = frame.clone();
-        if let Some((cx, cy)) = cursor {
-            let (width, height) = (preview.size.w as usize, preview.size.h as usize);
-            let (cx, cy) = (
-                cx.clamp(0, width as i32 - 1),
-                cy.clamp(0, height as i32 - 1),
-            );
-            // Bright yellow crosshair, drawn into the transmitted preview frame.
-            for offset in -8_i32..=8 {
-                for (x, y) in [(cx + offset, cy), (cx, cy + offset)] {
-                    if x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height {
-                        let pixel = y as usize * preview.stride + x as usize * 4;
-                        preview.bytes[pixel..pixel + 4].copy_from_slice(&[255, 245, 0, 255]);
-                    }
-                }
-            }
-        }
-        let _ = self.frame_sender.try_send(PanelUpdate::Frame {
-            panel_id: panel.id,
-            frame: preview,
+        if let Err(error) = self.frame_sender.try_send(PanelUpdate::GpuFrame {
+            panel_id,
+            dmabuf,
             pose,
-        });
+        }) {
+            eprintln!("XR panel frame dropped: {error}");
+        }
+        self.complete_frame_callbacks(&surface);
+        Ok(())
     }
 
     fn set_panel_active(&mut self, panel_id: Option<u64>, serial: smithay::utils::Serial) {
@@ -342,7 +317,6 @@ impl Compositor {
                 Some((panel.surface.wl_surface().clone(), hit))
             })
             .min_by(|a, b| a.1.distance_m.total_cmp(&b.1.distance_m));
-        let previous_cursor = self.cursor_hit;
         let Some(pointer) = self.seat.get_pointer() else {
             return false;
         };
@@ -365,29 +339,6 @@ impl Compositor {
             },
         );
         pointer.frame(self);
-        let cursor_hit = hit.as_ref().and_then(|(surface, hit)| {
-            let index = self
-                .panels
-                .iter()
-                .position(|panel| panel.surface.wl_surface() == surface)?;
-            let frame = self.panels[index].frame.as_ref()?;
-            let logical = self.panels[index].geometry?.logical_size;
-            let x = (hit.surface_px.x * frame.size.w as f32 / logical.w as f32).round() as i32;
-            let y = (hit.surface_px.y * frame.size.h as f32 / logical.h as f32).round() as i32;
-            Some((index, self.panels[index].id, x, y))
-        });
-        let next_cursor = cursor_hit.map(|(_, id, x, y)| (id, x, y));
-        if previous_cursor != next_cursor {
-            if let Some((old_id, _, _)) = previous_cursor
-                && let Some(index) = self.panels.iter().position(|panel| panel.id == old_id)
-            {
-                self.publish_panel_cursor(index, None);
-            }
-            if let Some((index, _, x, y)) = cursor_hit {
-                self.publish_panel_cursor(index, Some((x, y)));
-            }
-            self.cursor_hit = next_cursor;
-        }
         hit.is_some()
     }
 
@@ -411,14 +362,12 @@ impl Compositor {
         pointer.frame(self);
         if pressed {
             let focused = pointer.current_focus();
-            let panel_id = focused
-                .and_then(|surface| {
-                    self.panels
-                        .iter()
-                        .find(|panel| panel.surface.wl_surface() == &surface)
-                        .map(|panel| panel.id)
-                })
-                .or_else(|| self.cursor_hit.map(|(panel_id, _, _)| panel_id));
+            let panel_id = focused.and_then(|surface| {
+                self.panels
+                    .iter()
+                    .find(|panel| panel.surface.wl_surface() == &surface)
+                    .map(|panel| panel.id)
+            });
             self.set_panel_active(panel_id, SERIAL_COUNTER.next_serial());
         }
     }
@@ -443,13 +392,35 @@ impl CompositorHandler for Compositor {
         if let Some(index) = self.update_panel_from_commit(&root)
             && let Err(error) = self.capture_panel(index)
         {
-            eprintln!("failed to capture Wayland panel: {error:#}");
+            self.fatal_error = Some(error);
         }
     }
 }
 
 impl BufferHandler for Compositor {
     fn buffer_destroyed(&mut self, _buffer: &WlBuffer) {}
+}
+impl DmabufHandler for Compositor {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        if self
+            .gpu_renderer
+            .as_mut()
+            .is_some_and(|renderer| renderer.import_dmabuf(&dmabuf))
+        {
+            let _ = notifier.successful::<Self>();
+        } else {
+            notifier.failed();
+        }
+    }
 }
 impl ShmHandler for Compositor {
     fn shm_state(&self) -> &ShmState {
@@ -467,7 +438,6 @@ impl XdgShellHandler for Compositor {
         self.panels.push(ToplevelPanel {
             surface: surface.clone(),
             geometry: None,
-            frame: None,
             id: panel_id,
         });
         self.next_panel_id = self.next_panel_id.saturating_add(1);
@@ -524,6 +494,7 @@ impl SeatHandler for Compositor {
 impl OutputHandler for Compositor {}
 
 delegate_compositor!(Compositor);
+delegate_dmabuf!(Compositor);
 delegate_shm!(Compositor);
 delegate_xdg_shell!(Compositor);
 delegate_seat!(Compositor);
@@ -546,11 +517,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (frame_sender, frame_receiver) = bridge::panel_channel();
     let (input_sender, input_receiver) = bridge::input_channel();
     let xr_input_sender = input_sender.clone();
+    let xr_error_sender = input_sender.clone();
     thread::Builder::new()
         .name("spacetop-openxr".into())
         .spawn(move || {
             if let Err(error) = xr::run(frame_receiver, xr_input_sender) {
-                eprintln!("OpenXR client stopped: {error:#}");
+                let _ = xr_error_sender.send(XrInput::FatalError {
+                    message: format!("OpenXR client stopped: {error:#}"),
+                });
             }
         })?;
     let mut compositor = Compositor::new(display_handle.clone(), frame_sender);
@@ -581,14 +555,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .handle()
         .insert_source(input_receiver, |event, _, compositor| {
             if let calloop::channel::Event::Msg(command) = event {
-                match command {
-                    XrInput::Ray { ray, time_ms } => {
-                        compositor.dispatch_ray(ray, time_ms);
-                    }
-                    XrInput::Button { pressed, time_ms } => {
-                        compositor.dispatch_button(pressed, time_ms);
-                    }
-                }
+                compositor.handle_xr_input(command);
             }
         })?;
     event_loop.handle().insert_source(
@@ -601,7 +568,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(PostAction::Continue)
         },
     )?;
-    event_loop.run(None, &mut compositor, Compositor::flush_clients)?;
+    let signal = event_loop.get_signal();
+    event_loop.run(None, &mut compositor, |compositor| {
+        compositor.finish_dispatch(&signal)
+    })?;
+    if let Some(error) = compositor.fatal_error {
+        return Err(error.into());
+    }
     Ok(())
 }
 

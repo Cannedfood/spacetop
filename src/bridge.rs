@@ -1,20 +1,23 @@
 //! Bounded channels between Smithay's compositor/event-loop thread and the OpenXR client thread.
 
 use calloop::channel::{self, Channel, SyncSender};
+use smithay::backend::allocator::dmabuf::Dmabuf;
 
-use crate::panel::{PanelFrame, PanelPose, Ray3};
+use crate::panel::{PanelPose, Ray3};
 
 #[derive(Debug)]
 pub enum XrInput {
     Ray { ray: Ray3, time_ms: u32 },
     Button { pressed: bool, time_ms: u32 },
+    GpuDevice { render_node: std::path::PathBuf },
+    FatalError { message: String },
 }
 
 #[derive(Debug)]
 pub enum PanelUpdate {
-    Frame {
+    GpuFrame {
         panel_id: u64,
-        frame: PanelFrame,
+        dmabuf: Dmabuf,
         pose: PanelPose,
     },
     Removed {

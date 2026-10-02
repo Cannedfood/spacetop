@@ -1,0 +1,1 @@
+- Use `cargo clippy` instead of `cargo check`

@@ -8,6 +8,9 @@ use wayland_client::{
         wl_shm, wl_shm_pool, wl_surface,
     },
 };
+use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+    zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
+};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 use super::{ClientState, Compositor, Display, Ray3, bridge};
@@ -18,6 +21,7 @@ struct TestClient {
     shm: Option<wl_shm::WlShm>,
     shell: Option<xdg_wm_base::XdgWmBase>,
     pointer: Option<wl_pointer::WlPointer>,
+    dmabuf: Option<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1>,
     syncs: usize,
     frames: usize,
     pointer_frames: usize,
@@ -48,6 +52,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for TestClient {
                 }
                 "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                 "xdg_wm_base" => state.shell = Some(registry.bind(name, 1, qh, ())),
+                "zwp_linux_dmabuf_v1" => state.dmabuf = Some(registry.bind(name, 3, qh, ())),
                 "wl_seat" => {
                     let seat: wl_seat::WlSeat = registry.bind(name, version.min(5), qh, ());
                     state.pointer = Some(seat.get_pointer(qh, ()));
@@ -137,6 +142,8 @@ delegate_noop!(TestClient: ignore wl_buffer::WlBuffer);
 delegate_noop!(TestClient: ignore wl_seat::WlSeat);
 delegate_noop!(TestClient: ignore xdg_wm_base::XdgWmBase);
 delegate_noop!(TestClient: ignore xdg_toplevel::XdgToplevel);
+delegate_noop!(TestClient: ignore zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1);
+delegate_noop!(TestClient: ignore zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1);
 
 fn pump(
     display: &mut Display<Compositor>,
@@ -156,11 +163,52 @@ fn pump(
 }
 
 #[test]
-fn mapped_app_receives_focus_frames_and_controller_pointer_events() {
+fn app_waits_for_gpu_setup_and_receives_pointer_events() {
+    exercise_wayland_app(None);
+}
+
+#[test]
+fn gpu_and_xr_failures_are_fatal() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in [
+        super::XrInput::GpuDevice {
+            render_node: directory.path().join("missing-render-node"),
+        },
+        super::XrInput::FatalError {
+            message: "mandatory GPU DMA-BUF import failed".into(),
+        },
+    ] {
+        let display = Display::<Compositor>::new().unwrap();
+        let (sender, receiver) = bridge::panel_channel();
+        let mut compositor = Compositor::new(display.handle(), sender);
+        compositor.handle_xr_input(command);
+        assert!(compositor.fatal_error.is_some());
+        assert!(compositor.gpu_renderer.is_none());
+        assert!(receiver.try_recv().is_err());
+        let mut event_loop =
+            smithay::reexports::calloop::EventLoop::<Compositor>::try_new().unwrap();
+        let signal = event_loop.get_signal();
+        event_loop
+            .run(
+                Some(std::time::Duration::ZERO),
+                &mut compositor,
+                |compositor| compositor.finish_dispatch(&signal),
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires a DRM render node and Vulkan DMA-BUF import support"]
+fn gpu_shared_app_preserves_pixels_focus_and_input() {
+    exercise_wayland_app(Some(super::gpu::test_support::Vulkan::new().unwrap()));
+}
+
+fn exercise_wayland_app(vulkan: Option<super::gpu::test_support::Vulkan>) {
     use std::os::fd::AsFd;
 
     let mut display = Display::<Compositor>::new().unwrap();
-    let (sender, _receiver) = bridge::panel_channel();
+    let (sender, receiver) = bridge::panel_channel();
     let mut compositor = Compositor::new(display.handle(), sender);
     let (server_socket, client_socket) = UnixStream::pair().unwrap();
     display
@@ -196,7 +244,15 @@ fn mapped_app_receives_focus_frames_and_controller_pointer_events() {
     );
 
     let mut pixels = tempfile::tempfile().unwrap();
-    pixels.write_all(&[255; 100 * 50 * 4]).unwrap();
+    let mut content = vec![0_u8; 100 * 50 * 4];
+    for (index, pixel) in content.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        *pixel = if index / 100 < 25 {
+            [0, 0, 255, 255]
+        } else {
+            [255, 0, 0, 255]
+        };
+    }
+    pixels.write_all(&content).unwrap();
     let pool = client
         .shm
         .as_ref()
@@ -215,18 +271,103 @@ fn mapped_app_receives_focus_frames_and_controller_pointer_events() {
         &connection,
     );
     assert_eq!(
-        client.frames, 1,
-        "capturing a panel must unblock client redraws"
+        client.frames, 0,
+        "redraws must wait until GPU setup completes"
     );
+    assert!(receiver.try_recv().is_err());
+    if let Some(vulkan) = vulkan.as_ref() {
+        compositor.configure_gpu(&vulkan.render_node).unwrap();
+        pump(
+            &mut display,
+            &mut compositor,
+            &mut queue,
+            &mut client,
+            &connection,
+        );
+        assert_eq!(client.frames, 1, "GPU setup must resume pending redraws");
+    }
     assert!(
         client.keyboard_entered,
         "the initial active app must receive keyboard focus"
     );
-    assert!(
-        compositor.panels[0].frame.as_ref().unwrap().bytes[..4]
-            .iter()
-            .all(|byte| *byte == 255)
-    );
+    if let Some(vulkan) = vulkan.as_ref() {
+        let super::PanelUpdate::GpuFrame { dmabuf, .. } = receiver.try_recv().unwrap() else {
+            panic!("GPU capture must publish a DMA-BUF, not a CPU snapshot");
+        };
+        let shared = super::gpu::SharedImage::import(
+            &vulkan.instance,
+            &vulkan.device,
+            vulkan.physical_device,
+            dmabuf,
+        )
+        .unwrap();
+        let pixels = vulkan.readback(&shared, None).unwrap();
+        assert_eq!(&pixels[..4], &[255, 0, 0, 255], "top row must remain red");
+        assert_eq!(
+            &pixels[49 * 100 * 4..49 * 100 * 4 + 4],
+            &[0, 0, 255, 255],
+            "bottom row must remain blue"
+        );
+        let cursor_pixels = vulkan.readback(&shared, Some((50, 25))).unwrap();
+        assert_eq!(
+            &cursor_pixels[(25 * 100 + 50) * 4..(25 * 100 + 50) * 4 + 4],
+            &[255, 245, 0, 255]
+        );
+        assert_eq!(
+            &cursor_pixels[(30 * 100 + 30) * 4..(30 * 100 + 30) * 4 + 4],
+            &[0, 0, 255, 255]
+        );
+
+        let params = client
+            .dmabuf
+            .as_ref()
+            .expect("GPU compositor must advertise linux-dmabuf")
+            .create_params(&qh, ());
+        params.add(
+            shared.dmabuf.handles().next().unwrap(),
+            0,
+            shared.dmabuf.offsets().next().unwrap(),
+            shared.dmabuf.strides().next().unwrap(),
+            0,
+            0,
+        );
+        let gpu_buffer = params.create_immed(
+            100,
+            50,
+            smithay::backend::allocator::Fourcc::Abgr8888 as u32,
+            zwp_linux_buffer_params_v1::Flags::empty(),
+            &qh,
+            (),
+        );
+        surface.attach(Some(&gpu_buffer), 0, 0);
+        surface.damage(0, 0, 100, 50);
+        surface.frame(&qh, true);
+        surface.commit();
+        pump(
+            &mut display,
+            &mut compositor,
+            &mut queue,
+            &mut client,
+            &connection,
+        );
+        assert_eq!(client.frames, 2);
+        let super::PanelUpdate::GpuFrame { dmabuf, .. } = receiver.try_recv().unwrap() else {
+            panic!("GPU-backed app buffers must remain on the shared path");
+        };
+        let imported = super::gpu::SharedImage::import(
+            &vulkan.instance,
+            &vulkan.device,
+            vulkan.physical_device,
+            dmabuf,
+        )
+        .unwrap();
+        assert_eq!(vulkan.readback(&imported, None).unwrap(), pixels);
+    } else {
+        assert!(
+            receiver.try_recv().is_err(),
+            "rendering must wait for GPU setup"
+        );
+    }
 
     for (step, x) in [0.0, 0.1].into_iter().enumerate() {
         assert!(compositor.dispatch_ray(
@@ -266,5 +407,9 @@ fn mapped_app_receives_focus_frames_and_controller_pointer_events() {
         &mut client,
         &connection,
     );
-    assert_eq!(client.frames, 2, "subsequent redraws must also complete");
+    assert_eq!(
+        client.frames,
+        if vulkan.is_some() { 3 } else { 0 },
+        "subsequent redraws must also complete"
+    );
 }

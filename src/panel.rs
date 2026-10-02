@@ -1,7 +1,7 @@
 //! Spatial panel geometry, independent of Smithay's 2D desktop abstractions.
 
 use glam::{Vec2, Vec3};
-use smithay::utils::{Buffer, Size};
+use smithay::utils::Size;
 
 /// A ray in the OpenXR reference space selected by the client.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,14 +26,6 @@ pub struct PanelPose {
 pub struct PanelGeometry {
     pub pose: PanelPose,
     pub logical_size: Size<i32, smithay::utils::Logical>,
-}
-
-/// Owned, premultiplied RGBA snapshot of a mapped Wayland surface tree.
-#[derive(Debug, Clone)]
-pub struct PanelFrame {
-    pub size: Size<i32, Buffer>,
-    pub stride: usize,
-    pub bytes: Vec<u8>,
 }
 
 /// A hit on a panel, with top-left-origin Wayland surface coordinates.
