@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::panel::{PanelGeometry, PanelLimits, Ray3};
+use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3};
 
 #[derive(Debug)]
 pub enum XrInput {
@@ -20,6 +20,10 @@ pub enum XrInput {
     Button {
         pressed: bool,
         time_ms: u32,
+    },
+    MovePanel {
+        panel_id: u64,
+        pose: PanelPose,
     },
     GpuDevice {
         render_node: std::path::PathBuf,

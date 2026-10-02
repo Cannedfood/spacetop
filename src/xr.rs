@@ -6,7 +6,7 @@ use std::{thread, time::Duration};
 
 use crate::bridge::{PanelReceiver, PanelUpdate, XrInput};
 use crate::gpu::{self, SharedImage};
-use crate::panel::{PanelGeometry, PanelLimits, Ray3};
+use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3};
 use anyhow::{Context, Result, ensure};
 use ash::{
     Entry as VkEntry,
@@ -274,36 +274,63 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
     let aim_action =
         action_set.create_action::<xr::Posef>("aim_pose", "Aim pose", &[right_hand])?;
     let trigger_action = action_set.create_action::<bool>("trigger", "Trigger", &[right_hand])?;
+    let grip_action = action_set.create_action::<bool>("grip", "Grip", &[right_hand])?;
+    let stick_action =
+        action_set.create_action::<xr::Vector2f>("stick", "Thumbstick", &[right_hand])?;
     let aim_path = instance.string_to_path("/user/hand/right/input/aim/pose")?;
-    for (profile, button) in [
+    for (profile, button, grip, stick) in [
         (
             "/interaction_profiles/khr/simple_controller",
             "select/click",
+            None,
+            None,
         ),
         (
             "/interaction_profiles/oculus/touch_controller",
             "trigger/value",
+            Some("squeeze/value"),
+            Some("thumbstick"),
         ),
         (
             "/interaction_profiles/valve/index_controller",
             "trigger/click",
+            Some("squeeze/value"),
+            Some("thumbstick"),
         ),
-        ("/interaction_profiles/htc/vive_controller", "trigger/click"),
+        (
+            "/interaction_profiles/htc/vive_controller",
+            "trigger/click",
+            Some("squeeze/click"),
+            Some("trackpad"),
+        ),
         (
             "/interaction_profiles/microsoft/motion_controller",
             "trigger/value",
+            Some("squeeze/click"),
+            Some("thumbstick"),
         ),
     ] {
-        instance.suggest_interaction_profile_bindings(
-            instance.string_to_path(profile)?,
-            &[
-                xr::Binding::new(&aim_action, aim_path),
-                xr::Binding::new(
-                    &trigger_action,
-                    instance.string_to_path(&format!("/user/hand/right/input/{button}"))?,
-                ),
-            ],
-        )?;
+        let mut bindings = vec![
+            xr::Binding::new(&aim_action, aim_path),
+            xr::Binding::new(
+                &trigger_action,
+                instance.string_to_path(&format!("/user/hand/right/input/{button}"))?,
+            ),
+        ];
+        if let Some(grip) = grip {
+            bindings.push(xr::Binding::new(
+                &grip_action,
+                instance.string_to_path(&format!("/user/hand/right/input/{grip}"))?,
+            ));
+        }
+        if let Some(stick) = stick {
+            bindings.push(xr::Binding::new(
+                &stick_action,
+                instance.string_to_path(&format!("/user/hand/right/input/{stick}"))?,
+            ));
+        }
+        instance
+            .suggest_interaction_profile_bindings(instance.string_to_path(profile)?, &bindings)?;
     }
     session.attach_action_sets(&[&action_set])?;
     let aim_space = aim_action.create_space(&session, right_hand, xr::Posef::IDENTITY)?;
@@ -312,6 +339,9 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
     let mut exit = false;
     let mut panel_frames = PanelImages::new();
     let mut cursor_ray: Option<Ray3> = None;
+    let mut grabbed_panel: Option<u64> = None;
+    let mut grab_radius = 1.6_f32;
+    let mut grab_direction_offset = glam::Vec2::ZERO;
 
     while !exit {
         while let Some(event) = instance.poll_event(&mut events)? {
@@ -341,6 +371,9 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
         for update in &updates {
             if let PanelUpdate::Removed { panel_id } = update {
                 panel_frames.remove(panel_id);
+                if grabbed_panel == Some(*panel_id) {
+                    grabbed_panel = None;
+                }
             }
         }
         for command in updates {
@@ -417,6 +450,54 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                     ray: cursor_ray.expect("ray assigned above"),
                     time_ms,
                 });
+                let grip = grip_action.state(&session, right_hand)?;
+                if grip.changed_since_last_sync {
+                    if grip.current_state {
+                        grabbed_panel = cursor_ray.and_then(|ray| {
+                            panel_frames
+                                .iter()
+                                .filter_map(|(id, panel)| {
+                                    panel.geometry.intersect(ray).map(|hit| (*id, hit))
+                                })
+                                .min_by(|(_, first), (_, second)| {
+                                    first.distance_m.total_cmp(&second.distance_m)
+                                })
+                                .map(|(id, _hit)| {
+                                    let panel = &panel_frames[&id];
+                                    grab_radius =
+                                        panel.geometry.pose.center.length().clamp(0.6, 5.0);
+                                    let aim_angles = PanelPose::spherical_angles(ray.direction);
+                                    let center_angles =
+                                        PanelPose::spherical_angles(panel.geometry.pose.center);
+                                    grab_direction_offset = glam::Vec2::new(
+                                        PanelPose::wrap_angle(center_angles.x - aim_angles.x),
+                                        center_angles.y - aim_angles.y,
+                                    );
+                                    id
+                                })
+                        });
+                    } else {
+                        grabbed_panel = None;
+                    }
+                }
+                if let Some(panel_id) = grabbed_panel {
+                    let stick = stick_action.state(&session, right_hand)?.current_state;
+                    let delta_seconds = (frame_state.predicted_display_period.as_nanos() as f32
+                        / 1_000_000_000.0)
+                        .clamp(0.0, 0.1);
+                    grab_radius = (grab_radius + stick.y * delta_seconds * 1.5).clamp(0.6, 5.0);
+                    if let Some(ray) = cursor_ray
+                        && let Some(panel) = panel_frames.get_mut(&panel_id)
+                    {
+                        let pose = PanelPose::on_sphere_from_aim(
+                            ray.direction,
+                            grab_direction_offset,
+                            grab_radius,
+                        );
+                        panel.geometry.pose = pose;
+                        let _ = input.try_send(XrInput::MovePanel { panel_id, pose });
+                    }
+                }
                 let trigger = trigger_action.state(&session, right_hand)?;
                 if trigger.changed_since_last_sync {
                     let _ = input.try_send(XrInput::Button {
@@ -427,6 +508,7 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
             }
         } else {
             cursor_ray = None;
+            grabbed_panel = None;
         }
         frame_stream.begin()?;
         if !frame_state.should_render {
@@ -541,7 +623,7 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
             .map(|panel| {
                 let pose = panel.geometry.pose;
                 let frame = &panel.shared;
-                let orientation = glam::Quat::from_rotation_y(pose.yaw);
+                let orientation = pose.orientation();
                 let size = xr::Rect2Di {
                     offset: xr::Offset2Di { x: 0, y: 0 },
                     extent: xr::Extent2Di {

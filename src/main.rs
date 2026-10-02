@@ -97,6 +97,15 @@ impl Compositor {
                 self.dispatch_button(pressed, time_ms);
                 Ok(())
             }
+            XrInput::MovePanel { panel_id, pose } => {
+                if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == panel_id) {
+                    panel.pose = pose;
+                    if let Some(geometry) = panel.geometry.as_mut() {
+                        geometry.pose = pose;
+                    }
+                }
+                Ok(())
+            }
             XrInput::GpuDevice {
                 render_node,
                 limits,
