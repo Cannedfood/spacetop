@@ -341,6 +341,9 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
     let mut cursor_ray: Option<Ray3> = None;
     let mut grabbed_panel: Option<u64> = None;
     let mut grab_radius = 1.6_f32;
+    let mut grab_player_position = glam::Vec3::ZERO;
+    let mut grab_initial_radius = 1.6_f32;
+    let mut grab_initial_width = 1.0_f32;
     let mut grab_direction_offset = glam::Vec2::ZERO;
 
     while !exit {
@@ -422,6 +425,21 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
         }
 
         let frame_state = frame_waiter.wait()?;
+        let (view_state, views) =
+            session.locate_views(VIEW_TYPE, frame_state.predicted_display_time, &space)?;
+        if view_state.contains(xr::ViewStateFlags::POSITION_VALID) && !views.is_empty() {
+            grab_player_position = views
+                .iter()
+                .map(|view| {
+                    glam::Vec3::new(
+                        view.pose.position.x,
+                        view.pose.position.y,
+                        view.pose.position.z,
+                    )
+                })
+                .sum::<glam::Vec3>()
+                / views.len() as f32;
+        }
         // Update the action set and forward the right controller's aim ray.
         session.sync_actions(&[xr::ActiveActionSet::new(&action_set)])?;
         if aim_action.is_active(&session, right_hand)? {
@@ -464,11 +482,18 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                                 })
                                 .map(|(id, _hit)| {
                                     let panel = &panel_frames[&id];
-                                    grab_radius =
-                                        panel.geometry.pose.center.length().clamp(0.6, 5.0);
+                                    grab_radius = panel
+                                        .geometry
+                                        .pose
+                                        .center
+                                        .distance(grab_player_position)
+                                        .clamp(0.6, 5.0);
+                                    grab_initial_radius = grab_radius;
+                                    grab_initial_width = panel.geometry.pose.width_m;
                                     let aim_angles = PanelPose::spherical_angles(ray.direction);
-                                    let center_angles =
-                                        PanelPose::spherical_angles(panel.geometry.pose.center);
+                                    let center_angles = PanelPose::spherical_angles(
+                                        panel.geometry.pose.center - grab_player_position,
+                                    );
                                     grab_direction_offset = glam::Vec2::new(
                                         PanelPose::wrap_angle(center_angles.x - aim_angles.x),
                                         center_angles.y - aim_angles.y,
@@ -489,9 +514,15 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                     if let Some(ray) = cursor_ray
                         && let Some(panel) = panel_frames.get_mut(&panel_id)
                     {
-                        let pose = PanelPose::on_sphere_from_aim(
+                        let mut pose = PanelPose::on_sphere_from_aim(
                             ray.direction,
                             grab_direction_offset,
+                            grab_radius,
+                            grab_player_position,
+                        );
+                        pose.width_m = PanelPose::width_for_distance(
+                            grab_initial_width,
+                            grab_initial_radius,
                             grab_radius,
                         );
                         panel.geometry.pose = pose;

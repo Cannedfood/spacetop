@@ -66,9 +66,15 @@ impl PanelPose {
 
     /// Place a panel at `center` and orient its front toward the local-space origin.
     pub fn facing_origin(center: Vec3) -> Self {
-        let radius = center.length().max(f32::EPSILON);
-        let yaw = (-center.x).atan2(-center.z);
-        let pitch = (center.y / radius).clamp(-1.0, 1.0).asin();
+        Self::facing_player(center, Vec3::ZERO)
+    }
+
+    /// Place a panel center relative to a player position, facing back toward that player.
+    pub fn facing_player(center: Vec3, player: Vec3) -> Self {
+        let toward_player = player - center;
+        let radius = toward_player.length().max(f32::EPSILON);
+        let yaw = toward_player.x.atan2(toward_player.z);
+        let pitch = -(toward_player.y / radius).clamp(-1.0, 1.0).asin();
         Self {
             center,
             yaw,
@@ -78,13 +84,18 @@ impl PanelPose {
     }
 
     /// Keep the panel center at a fixed angular offset from the controller aim on the sphere.
-    pub fn on_sphere_from_aim(aim_direction: Vec3, angular_offset: Vec2, radius: f32) -> Self {
+    pub fn on_sphere_from_aim(
+        aim_direction: Vec3,
+        angular_offset: Vec2,
+        radius: f32,
+        player: Vec3,
+    ) -> Self {
         let aim = Self::spherical_angles(aim_direction);
         let yaw = aim.x + angular_offset.x;
         let pitch = (aim.y + angular_offset.y)
             .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
         let direction = Self::direction_from_angles(yaw, pitch);
-        Self::facing_origin(direction * radius)
+        Self::facing_player(player + direction * radius, player)
     }
 
     /// Yaw and pitch in the local reference space, with yaw measured from -Z.
@@ -101,6 +112,11 @@ impl PanelPose {
 
     pub fn wrap_angle(angle: f32) -> f32 {
         (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+    }
+
+    /// Scale a panel linearly with viewer distance to preserve its projected size.
+    pub fn width_for_distance(base_width: f32, base_distance: f32, distance: f32) -> f32 {
+        base_width * distance / base_distance.max(f32::EPSILON)
     }
 
     pub fn orientation(self) -> glam::Quat {
@@ -220,10 +236,12 @@ mod tests {
 
     #[test]
     fn grabbed_panel_stays_on_player_sphere_and_faces_player() {
-        let pose = PanelPose::facing_origin(Vec3::new(0.2, 0.4, -2.0));
-        assert!((pose.center.length() - Vec3::new(0.2, 0.4, -2.0).length()).abs() < 1.0e-5);
+        let player = Vec3::new(0.0, 1.6, 0.0);
+        let center = Vec3::new(0.2, 0.4, -2.0);
+        let pose = PanelPose::facing_player(center, player);
+        assert!((pose.center.distance(player) - center.distance(player)).abs() < 1.0e-5);
         let normal = pose.orientation() * Vec3::Z;
-        assert!(normal.dot(-pose.center.normalize()) > 0.99999);
+        assert!(normal.dot((player - pose.center).normalize()) > 0.99999);
 
         let slot_pose = PanelPose::for_slot(1);
         assert!((slot_pose.orientation() * Vec3::Z).dot(-slot_pose.center.normalize()) > 0.99999);
@@ -239,15 +257,20 @@ mod tests {
             PanelPose::wrap_angle(center_angles.x - aim_angles.x),
             center_angles.y - aim_angles.y,
         );
-        let moved =
-            PanelPose::on_sphere_from_aim(aim_direction, angular_offset, initial.center.length());
+        let moved = PanelPose::on_sphere_from_aim(
+            aim_direction,
+            angular_offset,
+            initial.center.length(),
+            Vec3::ZERO,
+        );
         assert!((moved.center - initial.center).length() < 1.0e-4);
         assert!((moved.center.length() - initial.center.length()).abs() < 1.0e-5);
 
         let moved_aim = Vec3::new(-0.4, 0.3, 1.0).normalize();
-        let moved = PanelPose::on_sphere_from_aim(moved_aim, angular_offset, 2.0);
-        assert!((moved.center.length() - 2.0).abs() < 1.0e-5);
-        let moved_angles = PanelPose::spherical_angles(moved.center);
+        let player = Vec3::new(0.0, 1.6, 0.0);
+        let moved = PanelPose::on_sphere_from_aim(moved_aim, angular_offset, 2.0, player);
+        assert!((moved.center.distance(player) - 2.0).abs() < 1.0e-5);
+        let moved_angles = PanelPose::spherical_angles(moved.center - player);
         let expected_angles = PanelPose::spherical_angles(moved_aim) + angular_offset;
         assert!(PanelPose::wrap_angle(moved_angles.x - expected_angles.x).abs() < 1.0e-5);
         assert!((moved_angles.y - expected_angles.y).abs() < 1.0e-5);
@@ -255,9 +278,23 @@ mod tests {
             moved
                 .orientation()
                 .mul_vec3(Vec3::Z)
-                .dot(-moved.center.normalize())
+                .dot((player - moved.center).normalize())
                 > 0.99999
         );
+    }
+
+    #[test]
+    fn panel_width_scales_linearly_with_distance() {
+        let start_width = 1.0;
+        let start_distance = 1.5;
+        assert_eq!(
+            PanelPose::width_for_distance(start_width, start_distance, start_distance),
+            start_width
+        );
+        assert!(
+            (PanelPose::width_for_distance(start_width, start_distance, 3.0) - 2.0).abs() < 1.0e-6
+        );
+        assert!((PanelPose::width_for_distance(0.8, 2.0, 1.0) - 0.4).abs() < 1.0e-6);
     }
 
     #[test]
