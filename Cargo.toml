@@ -15,7 +15,7 @@ ash = { version = "0.38", default-features = false, features = ["loaded", "std"]
 calloop = "0.14"
 glam = "0.30"
 openxr = { version = "0.22", default-features = false, features = ["loaded"] }
-smithay = { version = "0.7.0", default-features = false, features = ["wayland_frontend", "renderer_gl", "backend_gbm", "backend_gbm_has_create_with_modifiers2", "backend_gbm_has_fd_for_plane"] }
+smithay = { version = "0.7.0", default-features = false, features = ["wayland_frontend", "renderer_gl", "backend_gbm", "backend_gbm_has_create_with_modifiers2", "backend_gbm_has_fd_for_plane", "xwayland"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -4,6 +4,7 @@ use anyhow::Context;
 mod bridge;
 mod gpu;
 mod panel;
+mod x11;
 mod xr;
 
 use bridge::{PanelUpdate, XrInput};
@@ -24,7 +25,7 @@ use smithay::{
             protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
         },
     },
-    utils::{Physical, Raw, SERIAL_COUNTER, Size},
+    utils::{IsAlive, Physical, Raw, SERIAL_COUNTER, Size},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -38,8 +39,11 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
+        xwayland_shell::XWaylandShellState,
     },
+    xwayland::{X11Wm, XWaylandClientData},
 };
+use x11::PanelSurface;
 
 #[derive(Default)]
 struct ClientState {
@@ -52,7 +56,7 @@ impl ClientData for ClientState {
 }
 
 struct ToplevelPanel {
-    surface: ToplevelSurface,
+    surface: PanelSurface,
     pose: PanelPose,
     geometry: Option<PanelGeometry>,
     id: u64,
@@ -63,6 +67,8 @@ struct Compositor {
     compositor_state: CompositorState,
     shm_state: ShmState,
     xdg_shell_state: XdgShellState,
+    xwayland_shell_state: XWaylandShellState,
+    xwm: Option<X11Wm>,
     _output_manager_state: OutputManagerState,
     seat_state: SeatState<Self>,
     seat: Seat<Self>,
@@ -130,6 +136,7 @@ impl Compositor {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
+        let xwayland_shell_state = XWaylandShellState::new::<Self>(&display_handle);
         let output_manager_state = OutputManagerState::new();
 
         let mut seat_state = SeatState::new();
@@ -160,6 +167,8 @@ impl Compositor {
             compositor_state,
             shm_state,
             xdg_shell_state,
+            xwayland_shell_state,
+            xwm: None,
             _output_manager_state: output_manager_state,
             seat_state,
             seat,
@@ -301,25 +310,16 @@ impl Compositor {
         for panel in &self.panels {
             let should_activate = Some(panel.id) == panel_id;
             let currently_active = self.active_panel == Some(panel.id);
-            if should_activate != currently_active {
-                panel.surface.with_pending_state(|state| {
-                    if should_activate {
-                        state.states.set(
-                            smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
-                        );
-                    } else {
-                        state.states.unset(
-                            smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
-                        );
-                    }
-                });
-                panel.surface.send_configure();
+            if should_activate != currently_active
+                && let Err(error) = panel.surface.set_activated(should_activate)
+            {
+                eprintln!("failed to update window activation: {error:#}");
             }
         }
         self.active_panel = panel_id;
         if let (Some(panel_id), Some(keyboard)) = (panel_id, self.seat.get_keyboard()) {
             if let Some(panel) = self.panels.iter().find(|panel| panel.id == panel_id) {
-                keyboard.set_focus(self, Some(panel.surface.wl_surface().clone()), serial);
+                keyboard.set_focus(self, Some(panel.surface.clone()), serial);
             }
         } else if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_focus(self, None, serial);
@@ -397,6 +397,9 @@ impl CompositorHandler for Compositor {
         &mut self.compositor_state
     }
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        if let Some(data) = client.get_data::<XWaylandClientData>() {
+            return &data.compositor_state;
+        }
         &client
             .get_data::<ClientState>()
             .expect("client state is installed on connection")
@@ -459,7 +462,7 @@ impl XdgShellHandler for Compositor {
             .find(|pose| self.panels.iter().all(|panel| panel.pose != *pose))
             .expect("an unused panel placement exists");
         self.panels.push(ToplevelPanel {
-            surface: surface.clone(),
+            surface: PanelSurface::Wayland(surface.clone()),
             pose,
             geometry: None,
             id: panel_id,
@@ -517,7 +520,7 @@ impl XdgShellHandler for Compositor {
 }
 
 impl SeatHandler for Compositor {
-    type KeyboardFocus = WlSurface;
+    type KeyboardFocus = PanelSurface;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
     fn seat_state(&mut self) -> &mut SeatState<Self> {
@@ -564,6 +567,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = ListeningSocketSource::new_auto()?;
     let wayland_display = socket.socket_name().to_os_string();
     eprintln!("Wayland display: {}", wayland_display.to_string_lossy());
+    let waiting_for_xwayland = x11::start(
+        &display_handle,
+        event_loop.handle(),
+        wayland_display.clone(),
+        app.clone(),
+    )?;
     event_loop
         .handle()
         .insert_source(socket, move |stream, _, compositor| {
@@ -572,17 +581,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .insert_client(stream, Arc::new(ClientState::default()))
                 .expect("failed to insert Wayland client");
         })?;
-    if let Some(app) = app {
-        let child = Command::new(&app)
-            .env("WAYLAND_DISPLAY", &wayland_display)
-            .spawn()
-            .map_err(|error| {
-                format!(
-                    "failed to start app `{app}` on {}`: {error}",
-                    wayland_display.to_string_lossy()
-                )
-            })?;
-        eprintln!("Started `{app}` as process {}", child.id());
+    if waiting_for_xwayland.is_none()
+        && let Some(app) = app
+    {
+        spawn_app(&app, &wayland_display, None)?;
     }
     event_loop
         .handle()
@@ -608,6 +610,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(error) = compositor.fatal_error {
         return Err(error.into());
     }
+    Ok(())
+}
+
+fn spawn_app(
+    app: &str,
+    wayland_display: &std::ffi::OsStr,
+    x11_display: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut command = Command::new(app);
+    command
+        .env("WAYLAND_DISPLAY", wayland_display)
+        .env_remove("WAYLAND_SOCKET")
+        .env_remove("XAUTHORITY");
+    if let Some(display) = x11_display {
+        command.env("DISPLAY", display);
+    } else {
+        command.env_remove("DISPLAY");
+    }
+    let child = command
+        .spawn()
+        .with_context(|| format!("failed to start app `{app}`"))?;
+    eprintln!("Started `{app}` as process {}", child.id());
     Ok(())
 }
 

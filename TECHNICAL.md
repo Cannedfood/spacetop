@@ -1,5 +1,23 @@
 # Technical Documentation
 
+## X11 Applications
+
+Spacetop starts a private rootless XWayland server when `Xwayland` is on `PATH`.
+XWayland 23.1 or newer is required for the surface-association protocol.
+Smithay's X11 window manager handles mapping, application-requested resizing,
+unmapping, remapping, destruction, activation, and ICCCM keyboard focus.
+Associated Wayland surfaces use the same GPU capture, XR panels, and controller
+pointer input as native Wayland windows. X11 override-redirect windows are
+currently presented as independent panels, not positioned menus over their parent.
+Clipboard exchange between X11 and Wayland, window decorations, and interactive
+window movement/resizing are not implemented.
+
+`--app=PROGRAM` waits until the X11 window manager is ready and supplies both
+`WAYLAND_DISPLAY` and `DISPLAY`. The compositor prints those display names for
+manual launches. If XWayland is not installed, startup continues in Wayland-only
+mode, and `--app` removes the inherited `DISPLAY` so X11 apps cannot accidentally
+open on the host desktop. Other XWayland startup or connection failures are fatal.
+
 ## GPU Rendering
 
 GPU sharing is mandatory and uses the OpenXR runtime's Vulkan GPU.
@@ -74,3 +92,14 @@ To select a particular GPU for that test:
 ```sh
 SPACETOP_GPU_TEST_NODE=/dev/dri/renderD129 cargo test gpu_shared_app -- --ignored --nocapture
 ```
+
+Opt-in X11 tests start the real XWayland server. One checks deferred GPU setup,
+pointer input, keyboard focus, and close. The GPU-backed test also verifies
+captured pixels, application-requested resize, unmap/remap, and placement reuse:
+
+```sh
+cargo test x11_app -- --ignored --nocapture --test-threads=1
+```
+
+These require `Xwayland` and a valid `XDG_RUNTIME_DIR`; the GPU-backed test also
+requires a compatible render node and Vulkan DMA-BUF import support.
