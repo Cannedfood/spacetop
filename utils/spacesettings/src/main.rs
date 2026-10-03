@@ -64,8 +64,42 @@ enum Message {
     WindowCursorProximityChanged(f32),
     WindowCursorCloseBorderWidthChanged(f32),
     WindowGrabbedBorderWidthChanged(f32),
+    Reset(ResetTarget),
     Reload,
     Save,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ResetTarget {
+    BackgroundImage,
+    BackgroundBrightness,
+    BackgroundRotation,
+    BackgroundSection,
+    FloorHeight,
+    FloorAlbedo,
+    FloorRoughness,
+    FloorReflectance,
+    FloorRayCount,
+    FloorTransparentReflections,
+    FloorReflectionGrainSize,
+    FloorSection,
+    WindowDistance,
+    WindowPixelsPerDegree,
+    WindowAnimationHalfTime,
+    WindowCollisionMargin,
+    WindowCursorProximity,
+    WindowPadding,
+    WindowMargin,
+    WindowBorderRadius,
+    WindowBorderWidth,
+    WindowCursorCloseBorderWidth,
+    WindowGrabbedBorderWidth,
+    WindowBorderColor,
+    WindowCursorCloseBorderColor,
+    WindowGrabbedBorderColor,
+    WindowPlacementSection,
+    WindowResolutionSection,
+    WindowBorderSection,
 }
 
 struct SettingsApp {
@@ -149,6 +183,7 @@ impl SettingsApp {
                 | Message::WindowCursorProximityChanged(_)
                 | Message::WindowCursorCloseBorderWidthChanged(_)
                 | Message::WindowGrabbedBorderWidthChanged(_)
+                | Message::Reset(_)
         );
         match message {
             Message::BackgroundChanged(selection) => {
@@ -251,6 +286,7 @@ impl SettingsApp {
             Message::WindowGrabbedBorderWidthChanged(value) => {
                 self.config.window.grabbed_border_width_px = value
             }
+            Message::Reset(target) => self.reset(target),
             Message::Reload => match AppConfig::load() {
                 Ok(config) => {
                     *self = Self::from_config(config, "Configuration reloaded".into(), false)
@@ -267,6 +303,133 @@ impl SettingsApp {
             self.status_is_error = false;
         }
         iced::Task::none()
+    }
+
+    fn reset(&mut self, target: ResetTarget) {
+        let defaults = AppConfig::default();
+        match target {
+            ResetTarget::BackgroundImage => {
+                self.config.background.image = defaults.background.image;
+                self.load_background_preview();
+            }
+            ResetTarget::BackgroundBrightness => {
+                self.config.background.brightness_stops = defaults.background.brightness_stops;
+                self.update_background_preview();
+            }
+            ResetTarget::BackgroundRotation => {
+                self.config.background.rotation_degrees = defaults.background.rotation_degrees;
+                self.update_background_preview();
+            }
+            ResetTarget::BackgroundSection => {
+                self.config.background = defaults.background;
+                self.load_background_preview();
+            }
+            ResetTarget::FloorHeight => {
+                self.config.floor.height_m = defaults.floor.height_m;
+                self.floor_height = defaults.floor.height_m.to_string();
+            }
+            ResetTarget::FloorAlbedo => {
+                self.config.floor.albedo = defaults.floor.albedo;
+                self.show_albedo_picker = false;
+            }
+            ResetTarget::FloorRoughness => {
+                self.config.floor.roughness = defaults.floor.roughness;
+            }
+            ResetTarget::FloorReflectance => {
+                self.config.floor.reflectance = defaults.floor.reflectance;
+            }
+            ResetTarget::FloorRayCount => self.config.floor.ray_count = defaults.floor.ray_count,
+            ResetTarget::FloorTransparentReflections => {
+                self.config.floor.trace_through_transparent_windows =
+                    defaults.floor.trace_through_transparent_windows;
+            }
+            ResetTarget::FloorReflectionGrainSize => {
+                self.config.floor.reflection_grain_size_m = defaults.floor.reflection_grain_size_m;
+            }
+            ResetTarget::FloorSection => {
+                self.floor_height = defaults.floor.height_m.to_string();
+                self.config.floor = defaults.floor;
+                self.show_albedo_picker = false;
+            }
+            ResetTarget::WindowDistance => {
+                self.config.window.default_distance_m = defaults.window.default_distance_m;
+                self.window_distance = defaults.window.default_distance_m.to_string();
+            }
+            ResetTarget::WindowPixelsPerDegree => {
+                self.config.window.pixels_per_degree = defaults.window.pixels_per_degree;
+                self.window_pixels_per_degree = defaults.window.pixels_per_degree.to_string();
+            }
+            ResetTarget::WindowAnimationHalfTime => {
+                self.config.window.animation_half_time_s = defaults.window.animation_half_time_s;
+            }
+            ResetTarget::WindowCollisionMargin => {
+                self.config.window.collision_margin_m = defaults.window.collision_margin_m;
+            }
+            ResetTarget::WindowCursorProximity => {
+                self.config.window.cursor_proximity_radius_px =
+                    defaults.window.cursor_proximity_radius_px;
+            }
+            ResetTarget::WindowPadding => {
+                self.config.window.padding_px = defaults.window.padding_px
+            }
+            ResetTarget::WindowMargin => self.config.window.margin_px = defaults.window.margin_px,
+            ResetTarget::WindowBorderRadius => {
+                self.config.window.border_radius_px = defaults.window.border_radius_px;
+            }
+            ResetTarget::WindowBorderWidth => {
+                self.config.window.border_width_px = defaults.window.border_width_px;
+            }
+            ResetTarget::WindowCursorCloseBorderWidth => {
+                self.config.window.cursor_close_border_width_px =
+                    defaults.window.cursor_close_border_width_px;
+            }
+            ResetTarget::WindowGrabbedBorderWidth => {
+                self.config.window.grabbed_border_width_px =
+                    defaults.window.grabbed_border_width_px;
+            }
+            ResetTarget::WindowBorderColor => {
+                self.config.window.border_color = defaults.window.border_color;
+                self.show_window_border_picker = false;
+            }
+            ResetTarget::WindowCursorCloseBorderColor => {
+                self.config.window.cursor_close_border_color =
+                    defaults.window.cursor_close_border_color;
+                self.show_cursor_close_border_picker = false;
+            }
+            ResetTarget::WindowGrabbedBorderColor => {
+                self.config.window.grabbed_border_color = defaults.window.grabbed_border_color;
+                self.show_grabbed_border_picker = false;
+            }
+            ResetTarget::WindowPlacementSection => {
+                self.config.window.default_distance_m = defaults.window.default_distance_m;
+                self.config.window.animation_half_time_s = defaults.window.animation_half_time_s;
+                self.config.window.collision_margin_m = defaults.window.collision_margin_m;
+                self.window_distance = defaults.window.default_distance_m.to_string();
+            }
+            ResetTarget::WindowResolutionSection => {
+                self.config.window.pixels_per_degree = defaults.window.pixels_per_degree;
+                self.window_pixels_per_degree = defaults.window.pixels_per_degree.to_string();
+            }
+            ResetTarget::WindowBorderSection => {
+                self.config.window.padding_px = defaults.window.padding_px;
+                self.config.window.margin_px = defaults.window.margin_px;
+                self.config.window.border_radius_px = defaults.window.border_radius_px;
+                self.config.window.border_width_px = defaults.window.border_width_px;
+                self.config.window.cursor_proximity_radius_px =
+                    defaults.window.cursor_proximity_radius_px;
+                self.config.window.cursor_close_border_width_px =
+                    defaults.window.cursor_close_border_width_px;
+                self.config.window.border_color = defaults.window.border_color;
+                self.config.window.cursor_close_border_color =
+                    defaults.window.cursor_close_border_color;
+                self.config.window.grabbed_border_width_px =
+                    defaults.window.grabbed_border_width_px;
+                self.config.window.grabbed_border_color = defaults.window.grabbed_border_color;
+                self.show_window_border_picker = false;
+                self.show_cursor_close_border_picker = false;
+                self.show_grabbed_border_picker = false;
+            }
+        }
     }
 
     fn open_background_folder(&mut self) {
@@ -383,6 +546,7 @@ impl SettingsApp {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let defaults = AppConfig::default();
         let mut background_options = vec![RANDOM_BACKGROUND.to_owned()];
         background_options.extend(
             self.backgrounds
@@ -455,15 +619,27 @@ impl SettingsApp {
         let environment = section(
             "BACKGROUND",
             column![
-                text("IMAGE SOURCE").size(11).color(MUTED),
-                pick_list(
-                    background_options,
-                    selected_background,
-                    Message::BackgroundChanged,
-                )
-                .placeholder("Select an EXR background")
-                .padding([9, 11])
-                .width(Length::Fill),
+                row![
+                    column![
+                        text("IMAGE SOURCE").size(11).color(MUTED),
+                        pick_list(
+                            background_options,
+                            selected_background,
+                            Message::BackgroundChanged,
+                        )
+                        .placeholder("Select an EXR background")
+                        .padding([9, 11])
+                        .width(Length::Fill),
+                    ]
+                    .spacing(8)
+                    .width(Length::Fill),
+                    reset_button(
+                        self.config.background.image == defaults.background.image,
+                        ResetTarget::BackgroundImage,
+                    ),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::End),
                 background_preview,
                 slider_row(
                     "SKYBOX BRIGHTNESS (EV)",
@@ -472,6 +648,8 @@ impl SettingsApp {
                     8.0,
                     0.1,
                     Message::BackgroundBrightnessChanged,
+                    self.config.background.brightness_stops == defaults.background.brightness_stops,
+                    ResetTarget::BackgroundBrightness,
                 ),
                 slider_row(
                     "SKYBOX ROTATION (DEG)",
@@ -480,6 +658,8 @@ impl SettingsApp {
                     360.0,
                     1.0,
                     Message::BackgroundRotationChanged,
+                    self.config.background.rotation_degrees == defaults.background.rotation_degrees,
+                    ResetTarget::BackgroundRotation,
                 ),
                 row![
                     button(text("Open Folder").size(13))
@@ -495,6 +675,8 @@ impl SettingsApp {
                 .spacing(8),
             ]
             .spacing(8),
+            self.config.background == defaults.background,
+            ResetTarget::BackgroundSection,
         );
 
         let floor_height = labeled_input(
@@ -502,6 +684,8 @@ impl SettingsApp {
             &self.floor_height,
             "-1.3",
             Message::FloorHeightChanged,
+            number_is_default(&self.floor_height, defaults.floor.height_m),
+            ResetTarget::FloorHeight,
         );
         let albedo = Color::from_rgba(
             self.config.floor.albedo[0],
@@ -523,7 +707,20 @@ impl SettingsApp {
             column![
                 row![
                     floor_height,
-                    column![text("ALBEDO (RGBA)").size(11).color(MUTED), albedo_picker].spacing(8)
+                    column![
+                        text("ALBEDO (RGBA)").size(11).color(MUTED),
+                        row![
+                            albedo_picker,
+                            reset_button(
+                                self.config.floor.albedo == defaults.floor.albedo,
+                                ResetTarget::FloorAlbedo,
+                            ),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    ]
+                    .spacing(8)
+                    .width(Length::Fill)
                 ]
                 .spacing(18)
                 .align_y(iced::Alignment::End),
@@ -534,6 +731,8 @@ impl SettingsApp {
                     1.0,
                     0.01,
                     Message::RoughnessChanged,
+                    self.config.floor.roughness == defaults.floor.roughness,
+                    ResetTarget::FloorRoughness,
                 ),
                 slider_row(
                     "REFLECTANCE",
@@ -542,6 +741,8 @@ impl SettingsApp {
                     1.0,
                     0.01,
                     Message::ReflectanceChanged,
+                    self.config.floor.reflectance == defaults.floor.reflectance,
+                    ResetTarget::FloorReflectance,
                 ),
                 row![
                     text("REFLECTION RAYS")
@@ -560,12 +761,25 @@ impl SettingsApp {
                         .color(TEXT)
                         .width(Length::Fixed(34.0))
                         .align_x(Horizontal::Right),
+                    reset_button(
+                        self.config.floor.ray_count == defaults.floor.ray_count,
+                        ResetTarget::FloorRayCount,
+                    ),
                 ]
                 .spacing(12)
                 .align_y(iced::Alignment::Center),
-                checkbox(self.config.floor.trace_through_transparent_windows)
-                    .label("Trace reflections through transparent window areas")
-                    .on_toggle(Message::TransparentReflectionsChanged),
+                row![
+                    checkbox(self.config.floor.trace_through_transparent_windows)
+                        .label("Trace reflections through transparent window areas")
+                        .on_toggle(Message::TransparentReflectionsChanged)
+                        .width(Length::Fill),
+                    reset_button(
+                        self.config.floor.trace_through_transparent_windows
+                            == defaults.floor.trace_through_transparent_windows,
+                        ResetTarget::FloorTransparentReflections,
+                    ),
+                ]
+                .align_y(iced::Alignment::Center),
                 slider_row(
                     "REFLECTION GRID (MM)",
                     self.config.floor.reflection_grain_size_m * 1000.0,
@@ -573,9 +787,22 @@ impl SettingsApp {
                     50.0,
                     1.0,
                     Message::ReflectionGrainSizeChanged,
+                    self.config.floor.reflection_grain_size_m
+                        == defaults.floor.reflection_grain_size_m,
+                    ResetTarget::FloorReflectionGrainSize,
                 ),
             ]
             .spacing(18),
+            number_is_default(&self.floor_height, defaults.floor.height_m)
+                && self.config.floor.albedo == defaults.floor.albedo
+                && self.config.floor.roughness == defaults.floor.roughness
+                && self.config.floor.reflectance == defaults.floor.reflectance
+                && self.config.floor.ray_count == defaults.floor.ray_count
+                && self.config.floor.reflection_grain_size_m
+                    == defaults.floor.reflection_grain_size_m
+                && self.config.floor.trace_through_transparent_windows
+                    == defaults.floor.trace_through_transparent_windows,
+            ResetTarget::FloorSection,
         );
 
         let window_border_color = Color::from_rgba(
@@ -631,7 +858,17 @@ impl SettingsApp {
                 &self.window_pixels_per_degree,
                 "32",
                 Message::WindowPixelsPerDegreeChanged,
+                number_is_default(
+                    &self.window_pixels_per_degree,
+                    defaults.window.pixels_per_degree,
+                ),
+                ResetTarget::WindowPixelsPerDegree,
             ),
+            number_is_default(
+                &self.window_pixels_per_degree,
+                defaults.window.pixels_per_degree,
+            ),
+            ResetTarget::WindowResolutionSection,
         );
 
         let placement = section(
@@ -642,6 +879,8 @@ impl SettingsApp {
                     &self.window_distance,
                     "1.6",
                     Message::WindowDistanceChanged,
+                    number_is_default(&self.window_distance, defaults.window.default_distance_m),
+                    ResetTarget::WindowDistance,
                 ),
                 slider_row(
                     "DODGE HALF-TIME (S)",
@@ -650,6 +889,9 @@ impl SettingsApp {
                     5.0,
                     0.05,
                     Message::WindowAnimationHalfTimeChanged,
+                    self.config.window.animation_half_time_s
+                        == defaults.window.animation_half_time_s,
+                    ResetTarget::WindowAnimationHalfTime,
                 ),
                 slider_row(
                     "DODGE MARGIN (CM)",
@@ -658,9 +900,16 @@ impl SettingsApp {
                     50.0,
                     1.0,
                     Message::WindowCollisionMarginChanged,
+                    self.config.window.collision_margin_m == defaults.window.collision_margin_m,
+                    ResetTarget::WindowCollisionMargin,
                 ),
             ]
             .spacing(10),
+            number_is_default(&self.window_distance, defaults.window.default_distance_m)
+                && self.config.window.animation_half_time_s
+                    == defaults.window.animation_half_time_s
+                && self.config.window.collision_margin_m == defaults.window.collision_margin_m,
+            ResetTarget::WindowPlacementSection,
         );
 
         let windows = section(
@@ -673,6 +922,9 @@ impl SettingsApp {
                     500.0,
                     1.0,
                     Message::WindowCursorProximityChanged,
+                    self.config.window.cursor_proximity_radius_px
+                        == defaults.window.cursor_proximity_radius_px,
+                    ResetTarget::WindowCursorProximity,
                 ),
                 iced::widget::rule::horizontal(1),
                 slider_row(
@@ -682,6 +934,8 @@ impl SettingsApp {
                     500.0,
                     1.0,
                     Message::WindowPaddingChanged,
+                    self.config.window.padding_px == defaults.window.padding_px,
+                    ResetTarget::WindowPadding,
                 ),
                 slider_row(
                     "GRAB MARGIN (PX)",
@@ -690,6 +944,8 @@ impl SettingsApp {
                     500.0,
                     1.0,
                     Message::WindowMarginChanged,
+                    self.config.window.margin_px == defaults.window.margin_px,
+                    ResetTarget::WindowMargin,
                 ),
                 slider_row(
                     "BORDER RADIUS (PX)",
@@ -698,6 +954,8 @@ impl SettingsApp {
                     500.0,
                     1.0,
                     Message::WindowBorderRadiusChanged,
+                    self.config.window.border_radius_px == defaults.window.border_radius_px,
+                    ResetTarget::WindowBorderRadius,
                 ),
                 iced::widget::rule::horizontal(1),
                 slider_row(
@@ -707,6 +965,8 @@ impl SettingsApp {
                     100.0,
                     1.0,
                     Message::WindowBorderWidthChanged,
+                    self.config.window.border_width_px == defaults.window.border_width_px,
+                    ResetTarget::WindowBorderWidth,
                 ),
                 slider_row(
                     "CLOSE BORDER (PX)",
@@ -715,6 +975,9 @@ impl SettingsApp {
                     100.0,
                     1.0,
                     Message::WindowCursorCloseBorderWidthChanged,
+                    self.config.window.cursor_close_border_width_px
+                        == defaults.window.cursor_close_border_width_px,
+                    ResetTarget::WindowCursorCloseBorderWidth,
                 ),
                 slider_row(
                     "GRABBED BORDER (PX)",
@@ -723,24 +986,53 @@ impl SettingsApp {
                     100.0,
                     1.0,
                     Message::WindowGrabbedBorderWidthChanged,
+                    self.config.window.grabbed_border_width_px
+                        == defaults.window.grabbed_border_width_px,
+                    ResetTarget::WindowGrabbedBorderWidth,
                 ),
                 iced::widget::rule::horizontal(1),
                 row![
                     column![
                         text("BORDER COLOR").size(11).color(MUTED),
-                        window_border_picker
+                        row![
+                            window_border_picker,
+                            reset_button(
+                                self.config.window.border_color == defaults.window.border_color,
+                                ResetTarget::WindowBorderColor,
+                            ),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center)
                     ]
                     .width(Length::Fill)
                     .spacing(8),
                     column![
                         text("CLOSE BORDER COLOR").size(11).color(MUTED),
-                        cursor_close_border_picker
+                        row![
+                            cursor_close_border_picker,
+                            reset_button(
+                                self.config.window.cursor_close_border_color
+                                    == defaults.window.cursor_close_border_color,
+                                ResetTarget::WindowCursorCloseBorderColor,
+                            ),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center)
                     ]
                     .width(Length::Fill)
                     .spacing(8),
                     column![
                         text("GRABBED BORDER COLOR").size(11).color(MUTED),
-                        grabbed_border_picker
+                        row![
+                            grabbed_border_picker,
+                            reset_button(
+                                self.config.window.grabbed_border_color
+                                    == defaults.window.grabbed_border_color,
+                                ResetTarget::WindowGrabbedBorderColor,
+                            ),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center)
                     ]
                     .width(Length::Fill)
                     .spacing(8),
@@ -749,6 +1041,21 @@ impl SettingsApp {
                 .align_y(iced::Alignment::Center),
             ]
             .spacing(10),
+            self.config.window.padding_px == defaults.window.padding_px
+                && self.config.window.margin_px == defaults.window.margin_px
+                && self.config.window.border_radius_px == defaults.window.border_radius_px
+                && self.config.window.border_width_px == defaults.window.border_width_px
+                && self.config.window.cursor_proximity_radius_px
+                    == defaults.window.cursor_proximity_radius_px
+                && self.config.window.cursor_close_border_width_px
+                    == defaults.window.cursor_close_border_width_px
+                && self.config.window.border_color == defaults.window.border_color
+                && self.config.window.cursor_close_border_color
+                    == defaults.window.cursor_close_border_color
+                && self.config.window.grabbed_border_width_px
+                    == defaults.window.grabbed_border_width_px
+                && self.config.window.grabbed_border_color == defaults.window.grabbed_border_color,
+            ResetTarget::WindowBorderSection,
         );
 
         let status_color = if self.status_is_error {
@@ -893,20 +1200,39 @@ fn parse_number(label: &str, value: &str) -> Result<f32, String> {
         .map_err(|_| format!("{label} must be a number"))
 }
 
-fn section<'a>(title: &'a str, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    container(column![text(title).size(11).color(ACCENT), content.into()].spacing(16))
-        .width(Length::Fill)
-        .padding(18)
-        .style(|_| container::Style {
-            background: Some(Background::Color(SURFACE)),
-            border: Border {
-                color: BORDER,
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
+fn number_is_default(value: &str, default: f32) -> bool {
+    value.parse::<f32>().is_ok_and(|value| value == default)
+}
+
+fn section<'a>(
+    title: &'a str,
+    content: impl Into<Element<'a, Message>>,
+    is_default: bool,
+    reset_target: ResetTarget,
+) -> Element<'a, Message> {
+    container(
+        column![
+            row![
+                text(title).size(11).color(ACCENT).width(Length::Fill),
+                reset_button(is_default, reset_target),
+            ]
+            .align_y(iced::Alignment::Center),
+            content.into(),
+        ]
+        .spacing(16),
+    )
+    .width(Length::Fill)
+    .padding(18)
+    .style(|_| container::Style {
+        background: Some(Background::Color(SURFACE)),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 fn labeled_input<'a>(
@@ -914,10 +1240,17 @@ fn labeled_input<'a>(
     value: &'a str,
     placeholder: &'a str,
     on_input: impl Fn(String) -> Message + 'static,
+    is_default: bool,
+    reset_target: ResetTarget,
 ) -> Element<'a, Message> {
     column![
         text(label).size(11).color(MUTED),
-        styled_input(placeholder, value, on_input),
+        row![
+            styled_input(placeholder, value, on_input),
+            reset_button(is_default, reset_target),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
     ]
     .spacing(8)
     .width(Length::Fill)
@@ -974,6 +1307,8 @@ fn slider_row<'a>(
     max: f32,
     step: f32,
     on_change: impl Fn(f32) -> Message + 'static,
+    is_default: bool,
+    reset_target: ResetTarget,
 ) -> Element<'a, Message> {
     row![
         text(label)
@@ -988,6 +1323,7 @@ fn slider_row<'a>(
             .color(TEXT)
             .width(Length::Fixed(34.0))
             .align_x(Horizontal::Right),
+        reset_button(is_default, reset_target),
     ]
     .spacing(12)
     .align_y(iced::Alignment::Center)
@@ -1000,6 +1336,36 @@ fn quiet_button(_theme: &Theme, _status: button::Status) -> button::Style {
         text_color: TEXT,
         border: Border {
             color: BORDER,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn reset_button(is_default: bool, target: ResetTarget) -> Element<'static, Message> {
+    button(text("Reset").size(11))
+        .on_press_maybe((!is_default).then_some(Message::Reset(target)))
+        .padding([6, 8])
+        .style(reset_button_style)
+        .into()
+}
+
+fn reset_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let disabled = matches!(status, button::Status::Disabled);
+    button::Style {
+        background: Some(Background::Color(if disabled {
+            Color::from_rgb(0.13, 0.16, 0.17)
+        } else {
+            SURFACE
+        })),
+        text_color: if disabled { MUTED } else { TEXT },
+        border: Border {
+            color: if disabled {
+                Color::from_rgba(0.52, 0.73, 0.73, 0.10)
+            } else {
+                BORDER
+            },
             width: 1.0,
             radius: 6.0.into(),
         },
@@ -1064,5 +1430,36 @@ mod tests {
 
         assert_eq!(rotated[0], unrotated[4]);
         assert_eq!(rotated[12], unrotated[0]);
+    }
+
+    #[test]
+    fn section_resets_restore_defaults_and_text_fields() {
+        let defaults = AppConfig::default();
+        let mut config = defaults.clone();
+        config.background.image = "custom.exr".into();
+        config.background.brightness_stops = 1.0;
+        config.floor.height_m = -2.0;
+        config.floor.roughness = 0.8;
+        config.window.default_distance_m = 2.0;
+        config.window.pixels_per_degree = 40.0;
+        config.window.border_width_px = 5.0;
+
+        let mut app = SettingsApp::from_config(config, String::new(), false);
+        app.reset(ResetTarget::BackgroundSection);
+        app.reset(ResetTarget::FloorSection);
+        app.reset(ResetTarget::WindowPlacementSection);
+        app.reset(ResetTarget::WindowResolutionSection);
+        app.reset(ResetTarget::WindowBorderSection);
+
+        assert_eq!(app.config, defaults);
+        assert_eq!(app.floor_height, defaults.floor.height_m.to_string());
+        assert_eq!(
+            app.window_distance,
+            defaults.window.default_distance_m.to_string()
+        );
+        assert_eq!(
+            app.window_pixels_per_degree,
+            defaults.window.pixels_per_degree.to_string()
+        );
     }
 }
