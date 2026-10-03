@@ -1,7 +1,13 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use ash::vk;
 use glam::{Mat4, Quat, Vec3, Vec4};
+use half::f16;
 use openxr as xr;
+use std::{
+    fs::{self, File},
+    io::Read,
+    path::PathBuf,
+};
 
 use crate::{
     gpu::SharedImage,
@@ -30,6 +36,30 @@ struct Transform {
 var<immediate> transform: Transform;
 @group(0) @binding(0) var panel: texture_2d<f32>;
 @group(0) @binding(1) var filtering: sampler;
+struct SkyVertex {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) direction: vec3<f32>,
+}
+@vertex fn sky_vertex(@builtin(vertex_index) index: u32) -> SkyVertex {
+    let corners = array<vec2<f32>, 6>(
+        vec2(0.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 0.0),
+        vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
+    let uv = corners[index];
+    var result: SkyVertex;
+    result.position = vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+    result.uv = uv;
+    result.direction = (transform.matrix * vec4(uv, 0.0, 1.0)).xyz;
+    return result;
+}
+@fragment fn sky(input: SkyVertex) -> @location(0) vec4<f32> {
+    let direction = normalize(input.direction);
+    let uv = vec2(
+        atan2(direction.z, direction.x) / (2.0 * PI) + 0.5,
+        0.5 - asin(clamp(direction.y, -1.0, 1.0)) / PI);
+    let hdr = max(textureSample(panel, filtering, uv).rgb, vec3(0.0));
+    return vec4(hdr / (vec3(1.0) + hdr), 1.0);
+}
 struct Vertex {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -202,6 +232,28 @@ pub(crate) fn view_projection(view: &xr::View) -> Mat4 {
     projection * camera.inverse()
 }
 
+fn sky_matrix(view: &xr::View) -> Mat4 {
+    let orientation = Quat::from_xyzw(
+        view.pose.orientation.x,
+        view.pose.orientation.y,
+        view.pose.orientation.z,
+        view.pose.orientation.w,
+    );
+    let left = view.fov.angle_left.tan();
+    let right = view.fov.angle_right.tan();
+    let down = view.fov.angle_down.tan();
+    let up = view.fov.angle_up.tan();
+    let right_axis = orientation * Vec3::X;
+    let up_axis = orientation * Vec3::Y;
+    let forward_axis = orientation * Vec3::NEG_Z;
+    Mat4::from_cols(
+        (right_axis * (right - left)).extend(0.0),
+        (up_axis * (down - up)).extend(0.0),
+        Vec4::ZERO,
+        (right_axis * left + up_axis * up + forward_axis).extend(0.0),
+    )
+}
+
 fn model(geometry: PanelGeometry) -> Mat4 {
     Mat4::from_scale_rotation_translation(
         Vec3::new(
@@ -219,6 +271,329 @@ fn image_range(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
         .aspect_mask(aspect)
         .level_count(1)
         .layer_count(1)
+}
+
+fn random_background() -> Result<PathBuf> {
+    let directory = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set; cannot locate skybox backgrounds")?
+        .join(".config/spacetop/backgrounds");
+    let mut backgrounds = fs::read_dir(&directory)
+        .with_context(|| format!("read skybox directory {}", directory.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("exr"))
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        !backgrounds.is_empty(),
+        "no .exr skyboxes found in {}",
+        directory.display()
+    );
+    let mut random = [0; 8];
+    File::open("/dev/urandom")
+        .context("open system random source")?
+        .read_exact(&mut random)
+        .context("read system random source")?;
+    Ok(backgrounds.swap_remove((u64::from_ne_bytes(random) % backgrounds.len() as u64) as usize))
+}
+
+fn memory_type(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    bits: u32,
+    required: vk::MemoryPropertyFlags,
+) -> Result<u32> {
+    let properties = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+    (0..properties.memory_type_count)
+        .find(|index| {
+            bits & (1 << index) != 0
+                && properties.memory_types[*index as usize]
+                    .property_flags
+                    .contains(required)
+        })
+        .context("no compatible Vulkan memory type")
+}
+
+pub(crate) struct SkyboxTexture {
+    device: ash::Device,
+    extent: vk::Extent2D,
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    view: vk::ImageView,
+    pool: vk::DescriptorPool,
+    descriptor: vk::DescriptorSet,
+    staging: Option<(vk::Buffer, vk::DeviceMemory)>,
+}
+
+impl SkyboxTexture {
+    pub fn new(
+        renderer: &SceneRenderer,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<Self> {
+        let path = random_background()?;
+        let pixels = image::ImageReader::open(&path)
+            .with_context(|| format!("open skybox {}", path.display()))?
+            .with_guessed_format()
+            .context("identify skybox image format")?
+            .decode()
+            .with_context(|| format!("decode skybox {}", path.display()))?
+            .into_rgba32f();
+        let extent = vk::Extent2D {
+            width: pixels.width(),
+            height: pixels.height(),
+        };
+        ensure!(extent.width > 0 && extent.height > 0, "empty skybox image");
+        let pixels = pixels
+            .into_raw()
+            .into_iter()
+            .map(f16::from_f32)
+            .collect::<Vec<_>>();
+        let upload_size = std::mem::size_of_val(pixels.as_slice()) as u64;
+        let device = &renderer.device;
+        let mut skybox = Self {
+            device: device.clone(),
+            extent,
+            image: vk::Image::null(),
+            memory: vk::DeviceMemory::null(),
+            view: vk::ImageView::null(),
+            pool: vk::DescriptorPool::null(),
+            descriptor: vk::DescriptorSet::null(),
+            staging: None,
+        };
+        unsafe {
+            skybox.image = device.create_image(
+                &vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(vk::Format::R16G16B16A16_SFLOAT)
+                    .extent(vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED),
+                None,
+            )?;
+            let requirements = device.get_image_memory_requirements(skybox.image);
+            skybox.memory = device.allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(requirements.size)
+                    .memory_type_index(memory_type(
+                        instance,
+                        physical_device,
+                        requirements.memory_type_bits,
+                        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                    )?),
+                None,
+            )?;
+            device.bind_image_memory(skybox.image, skybox.memory, 0)?;
+            skybox.view = image_view(
+                device,
+                skybox.image,
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ImageAspectFlags::COLOR,
+            )?;
+            let buffer = device.create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(upload_size)
+                    .usage(vk::BufferUsageFlags::TRANSFER_SRC),
+                None,
+            )?;
+            let buffer_requirements = device.get_buffer_memory_requirements(buffer);
+            let upload_memory_type = match memory_type(
+                instance,
+                physical_device,
+                buffer_requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            ) {
+                Ok(memory_type) => memory_type,
+                Err(error) => {
+                    device.destroy_buffer(buffer, None);
+                    return Err(error);
+                }
+            };
+            let buffer_memory = match device.allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(buffer_requirements.size)
+                    .memory_type_index(upload_memory_type),
+                None,
+            ) {
+                Ok(memory) => memory,
+                Err(error) => {
+                    device.destroy_buffer(buffer, None);
+                    return Err(error.into());
+                }
+            };
+            if let Err(error) = device.bind_buffer_memory(buffer, buffer_memory, 0) {
+                device.destroy_buffer(buffer, None);
+                device.free_memory(buffer_memory, None);
+                return Err(error.into());
+            }
+            let mapped =
+                match device.map_memory(buffer_memory, 0, upload_size, vk::MemoryMapFlags::empty())
+                {
+                    Ok(mapped) => mapped,
+                    Err(error) => {
+                        device.destroy_buffer(buffer, None);
+                        device.free_memory(buffer_memory, None);
+                        return Err(error.into());
+                    }
+                };
+            std::ptr::copy_nonoverlapping(
+                pixels.as_ptr().cast::<u8>(),
+                mapped.cast::<u8>(),
+                upload_size as usize,
+            );
+            device.unmap_memory(buffer_memory);
+            skybox.staging = Some((buffer, buffer_memory));
+
+            let sizes = [
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLED_IMAGE,
+                    descriptor_count: 1,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLER,
+                    descriptor_count: 1,
+                },
+            ];
+            skybox.pool = device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(1)
+                    .pool_sizes(&sizes),
+                None,
+            )?;
+            skybox.descriptor = device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(skybox.pool)
+                    .set_layouts(&[renderer.descriptor_layout]),
+            )?[0];
+            let images = [vk::DescriptorImageInfo::default()
+                .image_view(skybox.view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let samplers = [vk::DescriptorImageInfo::default().sampler(renderer.sky_sampler)];
+            device.update_descriptor_sets(
+                &[
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(skybox.descriptor)
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&images),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(skybox.descriptor)
+                        .dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::SAMPLER)
+                        .image_info(&samplers),
+                ],
+                &[],
+            );
+        }
+        eprintln!("Skybox: {}", path.display());
+        Ok(skybox)
+    }
+
+    pub fn needs_upload(&self) -> bool {
+        self.staging.is_some()
+    }
+
+    pub unsafe fn upload(&self, command: vk::CommandBuffer) {
+        let Some((buffer, _)) = self.staging else {
+            return;
+        };
+        let range = image_range(vk::ImageAspectFlags::COLOR);
+        let to_transfer = vk::ImageMemoryBarrier::default()
+            .image(self.image)
+            .subresource_range(range)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                command,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_transfer],
+            );
+            self.device.cmd_copy_buffer_to_image(
+                command,
+                buffer,
+                self.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[vk::BufferImageCopy::default()
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .layer_count(1),
+                    )
+                    .image_extent(vk::Extent3D {
+                        width: self.extent.width,
+                        height: self.extent.height,
+                        depth: 1,
+                    })],
+            );
+            let to_shader = vk::ImageMemoryBarrier::default()
+                .image(self.image)
+                .subresource_range(range)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+            self.device.cmd_pipeline_barrier(
+                command,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_shader],
+            );
+        }
+    }
+
+    pub fn upload_complete(&mut self) {
+        if let Some((buffer, memory)) = self.staging.take() {
+            unsafe {
+                self.device.destroy_buffer(buffer, None);
+                self.device.free_memory(memory, None);
+            }
+        }
+    }
+}
+
+impl Drop for SkyboxTexture {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some((buffer, memory)) = self.staging.take() {
+                self.device.destroy_buffer(buffer, None);
+                self.device.free_memory(memory, None);
+            }
+            if self.pool != vk::DescriptorPool::null() {
+                self.device.destroy_descriptor_pool(self.pool, None);
+            }
+            if self.view != vk::ImageView::null() {
+                self.device.destroy_image_view(self.view, None);
+            }
+            if self.image != vk::Image::null() {
+                self.device.destroy_image(self.image, None);
+            }
+            if self.memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.memory, None);
+            }
+        }
+    }
 }
 
 fn image_view(
@@ -460,10 +835,19 @@ pub(crate) struct SceneRenderer {
     render_pass: vk::RenderPass,
     descriptor_layout: vk::DescriptorSetLayout,
     sampler: vk::Sampler,
+    sky_sampler: vk::Sampler,
     layout: vk::PipelineLayout,
     window_pipeline: vk::Pipeline,
+    sky_pipeline: vk::Pipeline,
     cursor_pipeline: vk::Pipeline,
     floor_light_pipeline: vk::Pipeline,
+}
+
+pub(crate) struct SceneFrame<'a> {
+    pub skybox: Option<&'a SkyboxTexture>,
+    pub panels: &'a [(&'a PanelTexture, PanelGeometry)],
+    pub cursor: Option<PanelPose>,
+    pub floor_y: f32,
 }
 
 impl SceneRenderer {
@@ -474,8 +858,10 @@ impl SceneRenderer {
             render_pass: vk::RenderPass::null(),
             descriptor_layout: vk::DescriptorSetLayout::null(),
             sampler: vk::Sampler::null(),
+            sky_sampler: vk::Sampler::null(),
             layout: vk::PipelineLayout::null(),
             window_pipeline: vk::Pipeline::null(),
+            sky_pipeline: vk::Pipeline::null(),
             cursor_pipeline: vk::Pipeline::null(),
             floor_light_pipeline: vk::Pipeline::null(),
         };
@@ -554,6 +940,15 @@ impl SceneRenderer {
                     .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
                 None,
             )?;
+            renderer.sky_sampler = device.create_sampler(
+                &vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::LINEAR)
+                    .min_filter(vk::Filter::LINEAR)
+                    .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+                None,
+            )?;
             let constants = [vk::PushConstantRange::default()
                 .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                 .size(128)];
@@ -565,6 +960,7 @@ impl SceneRenderer {
             )?;
         }
         renderer.window_pipeline = renderer.pipeline("window")?;
+        renderer.sky_pipeline = renderer.pipeline("sky")?;
         renderer.cursor_pipeline = renderer.pipeline("cursor")?;
         renderer.floor_light_pipeline = renderer.pipeline("floor_light")?;
         Ok(renderer)
@@ -573,6 +969,8 @@ impl SceneRenderer {
     fn pipeline(&self, fragment: &str) -> Result<vk::Pipeline> {
         let vertex_name = if fragment == "floor_light" {
             c"floor_vertex"
+        } else if fragment == "sky" {
+            c"sky_vertex"
         } else {
             c"vertex"
         };
@@ -615,7 +1013,7 @@ impl SceneRenderer {
             let samples = vk::PipelineMultisampleStateCreateInfo::default()
                 .rasterization_samples(vk::SampleCountFlags::TYPE_1);
             let depth = vk::PipelineDepthStencilStateCreateInfo::default()
-                .depth_test_enable(true)
+                .depth_test_enable(fragment != "sky")
                 .depth_write_enable(fragment == "window")
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
             let additive = fragment == "floor_light";
@@ -683,12 +1081,10 @@ impl SceneRenderer {
         command: vk::CommandBuffer,
         target: &RenderTarget,
         view: &xr::View,
-        panels: impl Iterator<Item = (&'a PanelTexture, PanelGeometry)>,
-        cursor: Option<PanelPose>,
-        floor_y: f32,
+        frame: &SceneFrame<'a>,
     ) {
         let projection = view_projection(view);
-        let mut panels = panels.collect::<Vec<_>>();
+        let mut panels = frame.panels.to_vec();
         panels.sort_by(|(_, first), (_, second)| {
             let first = (projection * first.pose.center.extend(1.0)).w;
             let second = (projection * second.pose.center.extend(1.0)).w;
@@ -731,6 +1127,22 @@ impl SceneRenderer {
                 }],
             );
             self.device.cmd_set_scissor(command, 0, &[area]);
+            if let Some(skybox) = frame.skybox {
+                self.device.cmd_bind_pipeline(
+                    command,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.sky_pipeline,
+                );
+                self.device.cmd_bind_descriptor_sets(
+                    command,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.layout,
+                    0,
+                    &[skybox.descriptor],
+                    &[],
+                );
+                self.draw_panel(command, sky_matrix(view));
+            }
             self.device.cmd_bind_pipeline(
                 command,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -768,7 +1180,7 @@ impl SceneRenderer {
                     up.x,
                     up.y,
                     up.z,
-                    floor_y,
+                    frame.floor_y,
                 ];
                 let bytes = std::slice::from_raw_parts(emitter.as_ptr().cast::<u8>(), 48);
                 self.device.cmd_push_constants(
@@ -804,7 +1216,7 @@ impl SceneRenderer {
                 );
                 self.draw_panel(command, projection * model(geometry));
             }
-            if let Some(mut pose) = cursor {
+            if let Some(mut pose) = frame.cursor {
                 pose.center += pose.orientation() * Vec3::Z * 0.001;
                 self.device.cmd_bind_pipeline(
                     command,
@@ -845,10 +1257,12 @@ impl Drop for SceneRenderer {
         unsafe {
             self.device
                 .destroy_pipeline(self.floor_light_pipeline, None);
+            self.device.destroy_pipeline(self.sky_pipeline, None);
             self.device.destroy_pipeline(self.cursor_pipeline, None);
             self.device.destroy_pipeline(self.window_pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
             self.device.destroy_sampler(self.sampler, None);
+            self.device.destroy_sampler(self.sky_sampler, None);
             self.device
                 .destroy_descriptor_set_layout(self.descriptor_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);
@@ -863,6 +1277,8 @@ mod tests {
     #[test]
     fn shaders_compile() {
         for (entry, stage) in [
+            ("sky_vertex", naga::ShaderStage::Vertex),
+            ("sky", naga::ShaderStage::Fragment),
             ("vertex", naga::ShaderStage::Vertex),
             ("window", naga::ShaderStage::Fragment),
             ("cursor", naga::ShaderStage::Fragment),

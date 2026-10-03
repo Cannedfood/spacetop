@@ -10,7 +10,9 @@ use std::{
 use crate::bridge::{PanelReceiver, PanelUpdate, XrInput};
 use crate::gpu::{self, SharedImage};
 use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3};
-use crate::scene::{FALLBACK_FLOOR_Y, PanelTexture, RenderTarget, SceneRenderer};
+use crate::scene::{
+    FALLBACK_FLOOR_Y, PanelTexture, RenderTarget, SceneFrame, SceneRenderer, SkyboxTexture,
+};
 use anyhow::{Context, Result, ensure};
 use ash::{
     Entry as VkEntry,
@@ -334,6 +336,7 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
         "Vulkan GPU lacks D32 depth attachment support"
     );
     let scene = SceneRenderer::new(&device, format)?;
+    let mut skybox = SkyboxTexture::new(&scene, &vk_instance, physical_device)?;
     let view_configuration = instance.enumerate_view_configuration_views(system, VIEW_TYPE)?;
     ensure!(
         view_configuration.len() == 2,
@@ -794,6 +797,16 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                 &mut cursor_sphere_radius,
             )
         });
+        let panel_draws = panel_frames
+            .values()
+            .map(|panel| (&panel.texture, panel.geometry))
+            .collect::<Vec<_>>();
+        let scene_frame = SceneFrame {
+            skybox: Some(&skybox),
+            panels: &panel_draws,
+            cursor: cursor_scene_pose,
+            floor_y,
+        };
         unsafe {
             timings.measure("gpu/previous-render-wait", period, || {
                 device.wait_for_fences(&[fence], true, u64::MAX)
@@ -805,6 +818,10 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
+            let upload_skybox = skybox.needs_upload();
+            if upload_skybox {
+                skybox.upload(command_buffer);
+            }
             for panel in panel_frames.values() {
                 panel.texture.ownership(command_buffer, queue_family, true);
             }
@@ -819,16 +836,7 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                     .targets
                     .get(image_index as usize)
                     .context("bad eye swapchain index")?;
-                scene.draw(
-                    command_buffer,
-                    target,
-                    view,
-                    panel_frames
-                        .values()
-                        .map(|panel| (&panel.texture, panel.geometry)),
-                    cursor_scene_pose,
-                    floor_y,
-                );
+                scene.draw(command_buffer, target, view, &scene_frame);
             }
             for panel in panel_frames.values() {
                 panel.texture.ownership(command_buffer, queue_family, false);
@@ -844,6 +852,9 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
             timings.measure("gpu/render-completion", period, || {
                 device.wait_for_fences(&[fence], true, u64::MAX)
             })?;
+            if upload_skybox {
+                skybox.upload_complete();
+            }
         }
         for eye in &mut eyes {
             timings.measure("openxr/release-image", Duration::ZERO, || {

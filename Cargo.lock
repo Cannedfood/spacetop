@@ -3983,6 +3983,8 @@ dependencies = [
  "calloop 0.14.5",
  "evdev",
  "glam 0.33.12",
+ "half",
+ "image",
  "naga 29.0.4",
  "openxr",
  "smithay",

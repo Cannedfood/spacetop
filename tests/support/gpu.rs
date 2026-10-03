@@ -1,12 +1,15 @@
 use super::*;
 use crate::{
     panel::{PanelGeometry, PanelPose},
-    scene::{FALLBACK_FLOOR_Y, PanelTexture, RenderTarget, SceneRenderer},
+    scene::{
+        FALLBACK_FLOOR_Y, PanelTexture, RenderTarget, SceneFrame, SceneRenderer, SkyboxTexture,
+    },
 };
 
 struct SceneReadback<'a> {
     renderer: &'a SceneRenderer,
     view: &'a openxr::View,
+    skybox: Option<&'a SkyboxTexture>,
     panels: &'a [(&'a PanelTexture, PanelGeometry)],
     cursor: Option<PanelPose>,
     floor_y: f32,
@@ -239,6 +242,9 @@ impl Vulkan {
                         height: size.h as u32,
                     },
                 )?;
+                if let Some(skybox) = scene.skybox.filter(|skybox| skybox.needs_upload()) {
+                    skybox.upload(command);
+                }
                 for (texture, _) in scene.panels {
                     texture.ownership(command, self.queue_family, true);
                 }
@@ -246,9 +252,12 @@ impl Vulkan {
                     command,
                     &target,
                     scene.view,
-                    scene.panels.iter().copied(),
-                    scene.cursor,
-                    scene.floor_y,
+                    &SceneFrame {
+                        skybox: scene.skybox,
+                        panels: scene.panels,
+                        cursor: scene.cursor,
+                        floor_y: scene.floor_y,
+                    },
                 );
                 for (texture, _) in scene.panels {
                     texture.ownership(command, self.queue_family, false);
@@ -439,6 +448,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         Some(SceneReadback {
             renderer: &scene,
             view: &view,
+            skybox: None,
             panels: &panels,
             cursor: Some(cursor),
             floor_y: FALLBACK_FLOOR_Y,
@@ -465,6 +475,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         Some(SceneReadback {
             renderer: &scene,
             view: &view,
+            skybox: None,
             panels: &panels,
             cursor: None,
             floor_y: FALLBACK_FLOOR_Y,
@@ -488,6 +499,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             Some(SceneReadback {
                 renderer: &scene,
                 view: &view,
+                skybox: None,
                 panels,
                 cursor: None,
                 floor_y: FALLBACK_FLOOR_Y,
@@ -509,6 +521,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         Some(SceneReadback {
             renderer: &scene,
             view: &shifted_view,
+            skybox: None,
             panels: &[(&background, emitter)],
             cursor: None,
             floor_y: FALLBACK_FLOOR_Y,
@@ -594,6 +607,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         Some(SceneReadback {
             renderer: &scene,
             view: &view,
+            skybox: None,
             panels: &[(&background, emitter)],
             cursor: None,
             floor_y: -2.6,
@@ -616,6 +630,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         Some(SceneReadback {
             renderer: &scene,
             view: &stage_view,
+            skybox: None,
             panels: &[(&background, stage_emitter)],
             cursor: None,
             floor_y: 0.0,
@@ -623,5 +638,44 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     )?;
     assert_eq!(pixel(&calibrated, 256, 450), floor_pixel);
     assert_eq!(pixel(&calibrated, 256, 256), pixel(&lit, 256, 256));
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires Vulkan DMA-BUF support and a configured EXR skybox"]
+fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
+    let vulkan = Vulkan::new()?;
+    let renderer = SceneRenderer::new(&vulkan.device, vk::Format::R8G8B8A8_SRGB)?;
+    let skybox = SkyboxTexture::new(&renderer, &vulkan.instance, vulkan.physical_device)?;
+    let view = openxr::View {
+        pose: openxr::Posef::IDENTITY,
+        fov: openxr::Fovf {
+            angle_left: -std::f32::consts::FRAC_PI_4,
+            angle_right: std::f32::consts::FRAC_PI_4,
+            angle_up: std::f32::consts::FRAC_PI_4,
+            angle_down: -std::f32::consts::FRAC_PI_4,
+        },
+    };
+    let pixels = vulkan.readback_image(
+        None,
+        (128, 64).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &renderer,
+            view: &view,
+            skybox: Some(&skybox),
+            panels: &[],
+            cursor: None,
+            floor_y: FALLBACK_FLOOR_Y,
+        }),
+    )?;
+    assert!(pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+    let colors = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .collect::<std::collections::HashSet<_>>();
+    assert!(colors.len() > 8, "skybox should vary across the view");
     Ok(())
 }
