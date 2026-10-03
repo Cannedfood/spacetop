@@ -123,6 +123,9 @@ with no depth writes. Rays follow an isotropic GGX visible-normal distribution:
 the shader samples view-visible microfacet normals and reflects the eye direction
 about each one. Analytic ray/quad intersections provide window texture coordinates;
 misses contribute zero, and the sum is divided by the total ray count.
+The sky pass also reflects the equirectangular skybox across the ground normal;
+the configured skybox exposure and rotation apply to this sample. Fresnel weights
+the reflected radiance, while floor roughness broadens it with a five-tap filter.
 Schlick Fresnel and height-correlated Smith masking provide the BRDF/PDF weight
 `F * G2 / G1(view)`. There is no extra area or inverse-square multiplier: distance
 changes the window's angular coverage instead. Premultiplied texture colors
@@ -135,10 +138,10 @@ reflectance, and `FLOOR_RAY_COUNT` defaults to four. Lower roughness concentrate
 rays near the mirror direction; higher roughness broadens the reflection.
 Other windows do not block these rays; there are no shadow queries or ray-tracing
 extensions. Each ray gets an independent pseudorandom jitter inside its equal-area
-sample stratum, seeded by floor-world X/Z coordinates rounded to 2 mm cells and
-ray index with an integer PCG hash. `FLOOR_NOISE_CELL_SIZE` controls this spacing.
-Signed coordinates remain distinct, and height recalibration does not reseed the
-pattern. Seeds follow the floor rather than framebuffer pixels or headset motion;
+sample stratum, seeded by floor-world X/Z coordinates rounded to cells sized by
+`floor.reflection_grain_size_m` (default 2 mm, range 1-50 mm) and ray index with
+an integer PCG hash. Signed coordinates remain distinct, and height recalibration
+does not reseed the pattern. Seeds follow the floor rather than framebuffer pixels or headset motion;
 GGX reflection directions still respond to the eye position. Four samples remain
 noisy; increasing the ray count improves coverage.
 There is no temporal accumulation or denoising.

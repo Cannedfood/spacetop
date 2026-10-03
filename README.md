@@ -49,14 +49,16 @@ The background image can be `"random"` to select an EXR from
 ```toml
 [background]
 image = "random"
+brightness_stops = 0.0
+rotation_degrees = 0.0
 
 [floor]
 height_m = -1.3
-albedo = [0.12, 0.12, 0.12]
+albedo = [0.12, 0.12, 0.12, 0.75]
 roughness = 0.1
 reflectance = 0.18
-transparency = 0.25
 ray_count = 4
+reflection_grain_size_m = 0.002
 
 [window]
 default_distance_m = 1.6
@@ -65,9 +67,15 @@ default_distance_m = 1.6
 default_distance_m = 1.6
 ```
 
-Floor albedo, roughness, reflectance, and transparency must be between `0` and
-`1`; `ray_count` must be between `1` and `64`; window and cursor distances must
-be between `0.1` and `100` meters.
+Background brightness uses exposure stops before tone mapping: `0` preserves the
+source, `+1` doubles HDR radiance, and `-1` halves it. Values range from `-8` to
+`8` stops. Floor albedo RGBA channels, roughness, and reflectance must be between
+`0` and `1`; `ray_count` must be between `1` and `64`; window and cursor
+distances must be between `0.1` and `100` meters. Albedo alpha controls floor
+opacity. `floor.reflection_grain_size_m` controls the floor-reflection noise
+grid spacing; it defaults to `0.002` meters and accepts `0.001` through `0.05`
+meters. `background.rotation_degrees` rotates the equirectangular skybox around
+the vertical axis from `0` to `360` degrees; `360` is equivalent to `0`.
 
 Edit the configuration with the standalone settings app:
 

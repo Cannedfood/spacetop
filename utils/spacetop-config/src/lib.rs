@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use tempfile::NamedTempFile;
 
 pub const DEFAULT_DISTANCE: f32 = 1.6;
@@ -24,17 +24,45 @@ pub struct AppConfig {
 #[serde(default)]
 pub struct BackgroundConfig {
     pub image: String,
+    pub brightness_stops: f32,
+    pub rotation_degrees: f32,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(default)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct FloorConfig {
     pub height_m: f32,
-    pub albedo: [f32; 3],
+    pub albedo: [f32; 4],
     pub roughness: f32,
     pub reflectance: f32,
-    pub transparency: f32,
     pub ray_count: u32,
+    pub reflection_grain_size_m: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct FloorConfigFields {
+    height_m: f32,
+    albedo: Option<Vec<f32>>,
+    roughness: f32,
+    reflectance: f32,
+    transparency: Option<f32>,
+    ray_count: u32,
+    reflection_grain_size_m: f32,
+}
+
+impl Default for FloorConfigFields {
+    fn default() -> Self {
+        let floor = FloorConfig::default();
+        Self {
+            height_m: floor.height_m,
+            albedo: None,
+            roughness: floor.roughness,
+            reflectance: floor.reflectance,
+            transparency: None,
+            ray_count: floor.ray_count,
+            reflection_grain_size_m: floor.reflection_grain_size_m,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -47,6 +75,8 @@ impl Default for BackgroundConfig {
     fn default() -> Self {
         Self {
             image: "random".into(),
+            brightness_stops: 0.0,
+            rotation_degrees: 0.0,
         }
     }
 }
@@ -55,12 +85,52 @@ impl Default for FloorConfig {
     fn default() -> Self {
         Self {
             height_m: FALLBACK_FLOOR_HEIGHT,
-            albedo: [0.12, 0.12, 0.12],
+            albedo: [0.12, 0.12, 0.12, 0.75],
             roughness: 0.1,
             reflectance: 0.18,
-            transparency: 0.25,
             ray_count: 4,
+            reflection_grain_size_m: 0.002,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for FloorConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = FloorConfigFields::deserialize(deserializer)?;
+        let defaults = Self::default();
+        let legacy_alpha = || {
+            fields
+                .transparency
+                .map_or(defaults.albedo[3], |transparency| 1.0 - transparency)
+        };
+        let albedo = match fields.albedo {
+            Some(channels) => match channels.as_slice() {
+                [red, green, blue] => [*red, *green, *blue, legacy_alpha()],
+                [red, green, blue, alpha] => [*red, *green, *blue, *alpha],
+                _ => {
+                    return Err(D::Error::custom(
+                        "floor.albedo must contain three legacy or four RGBA channels",
+                    ));
+                }
+            },
+            None => {
+                let mut albedo = defaults.albedo;
+                albedo[3] = legacy_alpha();
+                albedo
+            }
+        };
+
+        Ok(Self {
+            height_m: fields.height_m,
+            albedo,
+            roughness: fields.roughness,
+            reflectance: fields.reflectance,
+            ray_count: fields.ray_count,
+            reflection_grain_size_m: fields.reflection_grain_size_m,
+        })
     }
 }
 
@@ -117,6 +187,16 @@ impl AppConfig {
             "background.image must be `random` or a non-empty file path"
         );
         ensure!(
+            self.background.brightness_stops.is_finite()
+                && (-8.0..=8.0).contains(&self.background.brightness_stops),
+            "background.brightness_stops must be between -8 and 8 stops"
+        );
+        ensure!(
+            self.background.rotation_degrees.is_finite()
+                && (0.0..=360.0).contains(&self.background.rotation_degrees),
+            "background.rotation_degrees must be between 0 and 360 degrees"
+        );
+        ensure!(
             self.floor.height_m.is_finite(),
             "floor.height_m must be finite"
         );
@@ -125,7 +205,7 @@ impl AppConfig {
                 .albedo
                 .iter()
                 .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
-            "floor.albedo channels must be finite and between 0 and 1"
+            "floor.albedo RGBA channels must be finite and between 0 and 1"
         );
         ensure!(
             self.floor.roughness.is_finite() && (0.0..=1.0).contains(&self.floor.roughness),
@@ -136,12 +216,13 @@ impl AppConfig {
             "floor.reflectance must be between 0 and 1"
         );
         ensure!(
-            self.floor.transparency.is_finite() && (0.0..=1.0).contains(&self.floor.transparency),
-            "floor.transparency must be between 0 and 1"
-        );
-        ensure!(
             (1..=64).contains(&self.floor.ray_count),
             "floor.ray_count must be between 1 and 64"
+        );
+        ensure!(
+            self.floor.reflection_grain_size_m.is_finite()
+                && (0.001..=0.05).contains(&self.floor.reflection_grain_size_m),
+            "floor.reflection_grain_size_m must be between 0.001 and 0.05 meters"
         );
         for (name, distance) in [
             ("window.default_distance_m", self.window.default_distance_m),
@@ -201,5 +282,50 @@ mod tests {
 
         assert!(invalid.save_to(&path).is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn validates_background_brightness_stops() {
+        let mut config = AppConfig::default();
+        config.background.brightness_stops = 1.5;
+        assert!(config.validate().is_ok());
+
+        config.background.brightness_stops = -8.0;
+        assert!(config.validate().is_ok());
+
+        config.background.brightness_stops = 8.0;
+        assert!(config.validate().is_ok());
+
+        config.background.brightness_stops = -8.1;
+        assert!(config.validate().is_err());
+
+        config.background.brightness_stops = 8.1;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_background_rotation_degrees() {
+        let mut config = AppConfig::default();
+        config.background.rotation_degrees = 360.0;
+        assert!(config.validate().is_ok());
+
+        config.background.rotation_degrees = -0.1;
+        assert!(config.validate().is_err());
+
+        config.background.rotation_degrees = f32::NAN;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_floor_reflection_grain_size() {
+        let mut config = AppConfig::default();
+        config.floor.reflection_grain_size_m = 0.02;
+        assert!(config.validate().is_ok());
+
+        config.floor.reflection_grain_size_m = 0.0009;
+        assert!(config.validate().is_err());
+
+        config.floor.reflection_grain_size_m = f32::NAN;
+        assert!(config.validate().is_err());
     }
 }

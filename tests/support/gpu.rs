@@ -375,7 +375,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         &vulkan.instance,
         vulkan.physical_device,
         vk::Format::R8G8B8A8_SRGB,
-        &crate::config::FloorConfig::default(),
+        &crate::config::AppConfig::default(),
     )?;
     let mut producer = GpuRenderer::new(&vulkan.render_node)?;
     let mut make_texture = |quadrants: bool| -> Result<PanelTexture> {
@@ -526,6 +526,15 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     let empty_floor_pixel = pixel(&empty, 256, 450);
     assert_eq!(empty_floor_pixel, [0, 0, 0, 255]);
     let lit = floor_pixels(&[(&background, emitter)])?;
+    let mut brighter_sky_config = crate::config::AppConfig::default();
+    brighter_sky_config.background.brightness_stops = 2.0;
+    scene.update_config(&brighter_sky_config)?;
+    let unchanged_reflection = floor_pixels(&[(&background, emitter)])?;
+    assert_eq!(
+        lit, unchanged_reflection,
+        "skybox brightness must not alter window reflections"
+    );
+    scene.update_config(&crate::config::AppConfig::default())?;
     let repeated = floor_pixels(&[(&background, emitter)])?;
     assert_eq!(lit, repeated);
     let mut shifted_view = view;
@@ -665,7 +674,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
         &vulkan.instance,
         vulkan.physical_device,
         vk::Format::R8G8B8A8_SRGB,
-        &crate::config::FloorConfig::default(),
+        &crate::config::AppConfig::default(),
     )?;
     let mut skybox = SkyboxTexture::new(
         &renderer,
@@ -721,6 +730,93 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
         ground_colors.len() > 1,
         "transparent floor should reveal variations in the skybox"
     );
+
+    let brightness_sum = |pixels: &[u8]| {
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| u64::from(pixel[0]) + u64::from(pixel[1]) + u64::from(pixel[2]))
+            .sum::<u64>()
+    };
+    let base_brightness = brightness_sum(&pixels);
+    let mut brighter_config = crate::config::AppConfig::default();
+    brighter_config.background.brightness_stops = 1.0;
+    renderer.update_config(&brighter_config)?;
+    let brighter_pixels = vulkan.readback_image(
+        None,
+        (128, 64).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &renderer,
+            view: &view,
+            skybox: Some(&mut skybox),
+            panels: &[],
+            cursor: None,
+            floor_y: FALLBACK_FLOOR_Y,
+        }),
+    )?;
+    assert!(
+        brightness_sum(&brighter_pixels) > base_brightness,
+        "increasing skybox exposure by one stop should brighten the rendered image"
+    );
+    let mut rotated_config = crate::config::AppConfig::default();
+    rotated_config.background.rotation_degrees = 90.0;
+    renderer.update_config(&rotated_config)?;
+    let rotated_pixels = vulkan.readback_image(
+        None,
+        (128, 64).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &renderer,
+            view: &view,
+            skybox: Some(&mut skybox),
+            panels: &[],
+            cursor: None,
+            floor_y: FALLBACK_FLOOR_Y,
+        }),
+    )?;
+    assert_ne!(
+        pixels, rotated_pixels,
+        "skybox rotation should change the view"
+    );
+    let mut reflective_floor_config = crate::config::AppConfig::default();
+    reflective_floor_config.floor.albedo = [0.0, 0.0, 0.0, 1.0];
+    reflective_floor_config.floor.reflectance = 1.0;
+    reflective_floor_config.floor.roughness = 0.0;
+    renderer.update_config(&reflective_floor_config)?;
+    let reflected_pixels = vulkan.readback_image(
+        None,
+        (128, 64).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &renderer,
+            view: &view,
+            skybox: Some(&mut skybox),
+            panels: &[],
+            cursor: None,
+            floor_y: FALLBACK_FLOOR_Y,
+        }),
+    )?;
+    let sky_only_pixels = vulkan.readback_image(
+        None,
+        (128, 64).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &renderer,
+            view: &view,
+            skybox: Some(&mut skybox),
+            panels: &[],
+            cursor: None,
+            floor_y: f32::NAN,
+        }),
+    )?;
+    let ground_start = 56 * 128 * 4;
+    assert_ne!(
+        &reflected_pixels[ground_start..],
+        &sky_only_pixels[ground_start..],
+        "ground should show the skybox reflected across its surface"
+    );
     Ok(())
 }
 
@@ -728,25 +824,27 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
 #[ignore = "requires Vulkan DMA-BUF support and a configured EXR skybox"]
 fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
     let vulkan = Vulkan::new()?;
-    let floor_config = crate::config::FloorConfig {
-        albedo: [0.2, 0.3, 0.4],
-        reflectance: 0.12,
-        transparency: 0.4,
-        ..crate::config::FloorConfig::default()
-    };
+    let mut config = crate::config::AppConfig::default();
+    config.floor.albedo = [0.2, 0.3, 0.4, 0.6];
+    config.floor.reflectance = 0.12;
+    let floor_config = &config.floor;
     let renderer = SceneRenderer::new(
         &vulkan.device,
         &vulkan.instance,
         vulkan.physical_device,
         vk::Format::R8G8B8A8_SRGB,
-        &crate::config::FloorConfig::default(),
+        &crate::config::AppConfig::default(),
     )?;
-    renderer.update_floor_config(&floor_config)?;
+    renderer.update_config(&config)?;
+    let skybox_directory = tempfile::tempdir()?;
+    let skybox_path = skybox_directory.path().join("black.exr");
+    image::Rgb32FImage::from_pixel(8, 4, image::Rgb([0.0, 0.0, 0.0])).save(&skybox_path)?;
+    let skybox_path = skybox_path.to_string_lossy().into_owned();
     let mut skybox = SkyboxTexture::new(
         &renderer,
         &vulkan.instance,
         vulkan.physical_device,
-        "random",
+        &skybox_path,
     )?;
     let view_at = |target: glam::Vec3, eye: glam::Vec3| {
         let orientation =
@@ -801,8 +899,8 @@ fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
         }
     };
     let recovered_albedo = |floor: &[u8], sky: &[u8]| {
-        (decode(floor[center]) - floor_config.transparency * decode(sky[center]))
-            / (1.0 - floor_config.transparency)
+        (decode(floor[center]) - (1.0 - floor_config.albedo[3]) * decode(sky[center]))
+            / floor_config.albedo[3]
     };
     let head_albedo = recovered_albedo(&head_on, &head_sky);
     let expected_head_albedo = floor_config.albedo[0] * (1.0 - floor_config.reflectance);

@@ -1,4 +1,3 @@
-const FLOOR_NOISE_CELL_SIZE: f32 = 0.002;
 const PI: f32 = 3.14159265;
 
 struct Transform {
@@ -14,6 +13,7 @@ var<immediate> transform: Transform;
 struct FloorMaterial {
     albedo: vec4<f32>,
     controls: vec4<f32>,
+    sampling: vec4<f32>,
 }
 @group(1) @binding(0) var<uniform> floor_material: FloorMaterial;
 struct SkyVertex {
@@ -34,25 +34,51 @@ struct SkyVertex {
 }
 fn fresnel_schlick(cosine: f32) -> f32 {
     let grazing = pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
-    let reflectance = floor_material.controls.y;
+    let reflectance = floor_material.controls.x;
     return reflectance + (1.0 - reflectance) * grazing;
+}
+fn skybox_exposure() -> f32 {
+    return exp2(floor_material.controls.y);
+}
+fn skybox_uv(direction: vec3<f32>) -> vec2<f32> {
+    let longitude = atan2(direction.z, direction.x) + floor_material.sampling.y;
+    return vec2(
+        fract(longitude / (2.0 * PI) + 0.5),
+        0.5 - asin(clamp(direction.y, -1.0, 1.0)) / PI);
+}
+fn sample_skybox(direction: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let uv = skybox_uv(direction);
+    var hdr = textureSampleLevel(panel, filtering, uv, 0.0).rgb;
+    let blur = roughness * roughness * 0.04;
+    if blur > 0.0 {
+        hdr += textureSampleLevel(panel, filtering, uv + vec2(blur, 0.0), 0.0).rgb;
+        hdr += textureSampleLevel(panel, filtering, uv - vec2(blur, 0.0), 0.0).rgb;
+        hdr += textureSampleLevel(panel, filtering, uv + vec2(0.0, blur), 0.0).rgb;
+        hdr += textureSampleLevel(panel, filtering, uv - vec2(0.0, blur), 0.0).rgb;
+        hdr *= 0.2;
+    }
+    hdr = max(hdr * skybox_exposure(), vec3(0.0));
+    return hdr / (vec3(1.0) + hdr);
 }
 @fragment fn sky(input: SkyVertex) -> @location(0) vec4<f32> {
     let direction = normalize(input.direction);
-    let uv = vec2(
-        atan2(direction.z, direction.x) / (2.0 * PI) + 0.5,
-        0.5 - asin(clamp(direction.y, -1.0, 1.0)) / PI);
-    let hdr = max(textureSample(panel, filtering, uv).rgb, vec3(0.0));
-    let background = hdr / (vec3(1.0) + hdr);
     let floor_distance = (transform.emitter_up.w - transform.eye_position.y) / direction.y;
     if direction.y < 0.0 && floor_distance > 0.0 {
         let fresnel = fresnel_schlick(-direction.y);
         let albedo = floor_material.albedo.rgb * (1.0 - fresnel);
-        return vec4(
-            albedo * (1.0 - floor_material.controls.x) + background * floor_material.controls.x,
-            1.0);
+        let opacity = floor_material.albedo.a;
+        var transmitted_background = vec3(0.0);
+        if opacity < 1.0 {
+            transmitted_background = sample_skybox(direction, 0.0);
+        }
+        let reflection_direction = reflect(direction, vec3(0.0, 1.0, 0.0));
+        let reflected_sky = sample_skybox(reflection_direction, floor_material.controls.z);
+        let ground = albedo * opacity
+            + transmitted_background * (1.0 - opacity)
+            + reflected_sky * fresnel * opacity;
+        return vec4(ground, 1.0);
     }
-    return vec4(background, 1.0);
+    return vec4(sample_skybox(direction, 0.0), 1.0);
 }
 struct Vertex {
     @builtin(position) position: vec4<f32>,
@@ -106,7 +132,8 @@ fn sample_hash(value: u32) -> u32 {
     return (word >> 22u) ^ word;
 }
 fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
-    let cell = bitcast<vec2<u32>>(vec2<i32>(round(position.xz / FLOOR_NOISE_CELL_SIZE)));
+    let cell = bitcast<vec2<u32>>(
+        vec2<i32>(round(position.xz / floor_material.sampling.x)));
     let seed = sample_hash(cell.x ^ sample_hash(cell.y) ^ sample_hash(index + 0x9e3779b9u));
     let random = vec2(sample_hash(seed), sample_hash(seed ^ 0x85ebca6bu));
     return vec2<f32>(random >> vec2(8u)) / 16777216.0;
@@ -151,13 +178,13 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
         let hit = world + ray * distance - center;
         let uv = vec2(dot(hit, right) / width + 0.5, 0.5 - dot(hit, up) / height);
         if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) { continue; }
-        let color = textureSampleLevel(panel, filtering, uv, 0.0);
+        let color = textureSampleLevel(panel, filtering, uv, 0.0).rgb;
         let view_half = clamp(dot(view, half_vector), 0.0, 1.0);
         let fresnel = fresnel_schlick(view_half);
         let light_masking = ggx_masking(ray.y, alpha_squared);
         let weight = fresnel * light_masking
             / (view_masking + light_masking - view_masking * light_masking);
-        sum += color.rgb * weight;
+        sum += color * weight;
     }
     return vec4(sum / f32(ray_count), 0.0);
 }

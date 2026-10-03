@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    config::FloorConfig,
+    config::AppConfig,
     gpu::SharedImage,
     panel::{PanelGeometry, PanelPose},
 };
@@ -716,17 +716,24 @@ pub(crate) struct SceneFrame<'a> {
 struct FloorUniform {
     albedo: [f32; 4],
     controls: [f32; 4],
+    sampling: [f32; 4],
 }
 
-impl From<&FloorConfig> for FloorUniform {
-    fn from(config: &FloorConfig) -> Self {
+impl From<&AppConfig> for FloorUniform {
+    fn from(config: &AppConfig) -> Self {
         Self {
-            albedo: [config.albedo[0], config.albedo[1], config.albedo[2], 0.0],
+            albedo: config.floor.albedo,
             controls: [
-                config.transparency,
-                config.reflectance,
-                config.roughness,
-                config.ray_count as f32,
+                config.floor.reflectance,
+                config.background.brightness_stops,
+                config.floor.roughness,
+                config.floor.ray_count as f32,
+            ],
+            sampling: [
+                config.floor.reflection_grain_size_m,
+                config.background.rotation_degrees.to_radians(),
+                0.0,
+                0.0,
             ],
         }
     }
@@ -738,7 +745,7 @@ impl SceneRenderer {
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
         format: vk::Format,
-        floor_config: &FloorConfig,
+        config: &AppConfig,
     ) -> Result<Self> {
         let mut renderer = Self {
             device: device.clone(),
@@ -834,7 +841,7 @@ impl SceneRenderer {
                 ]),
                 None,
             )?;
-            let uniform = FloorUniform::from(floor_config);
+            let uniform = FloorUniform::from(config);
             renderer.floor_buffer = device.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(std::mem::size_of::<FloorUniform>() as u64)
@@ -927,8 +934,8 @@ impl SceneRenderer {
         Ok(renderer)
     }
 
-    pub fn update_floor_config(&self, floor_config: &FloorConfig) -> Result<()> {
-        let uniform = FloorUniform::from(floor_config);
+    pub fn update_config(&self, config: &AppConfig) -> Result<()> {
+        let uniform = FloorUniform::from(config);
         unsafe {
             let mapped = self.device.map_memory(
                 self.floor_memory,

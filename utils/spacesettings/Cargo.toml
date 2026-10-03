@@ -5,4 +5,9 @@ edition = "2024"
 
 [dependencies]
 iced = { version = "0.14", features = ["advanced", "image", "svg"] }
+iced_aw = { version = "0.14.1", default-features = false, features = ["color_picker"] }
+image = { version = "0.25", default-features = false, features = ["exr"] }
 spacetop-config = { path = "../spacetop-config" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,9 +1,23 @@
+use std::{
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
 use iced::{
     Background, Border, Color, Element, Length, Theme,
     alignment::Horizontal,
-    widget::{button, column, container, row, scrollable, slider, text, text_input},
+    widget::{
+        button, column, container, image as iced_image, pick_list, row, scrollable, slider, text,
+        text_input,
+    },
 };
+use iced_aw::helpers::color_picker;
 use spacetop_config::AppConfig;
+
+const RANDOM_BACKGROUND: &str = "Random";
+const BACKGROUND_DOWNLOAD_URL: &str = "https://polyhaven.com/hdris";
 
 const TEXT: Color = Color::from_rgb(0.92, 0.95, 0.96);
 const MUTED: Color = Color::from_rgb(0.60, 0.69, 0.72);
@@ -15,11 +29,19 @@ const BORDER: Color = Color::from_rgba(0.52, 0.73, 0.73, 0.22);
 #[derive(Debug, Clone)]
 enum Message {
     BackgroundChanged(String),
+    OpenBackgroundFolder,
+    RefreshBackgrounds,
+    DownloadBackgrounds,
+    OpenConfigFile,
+    BackgroundBrightnessChanged(f32),
+    BackgroundRotationChanged(f32),
+    ChooseAlbedoColor,
+    SubmitAlbedoColor(Color),
+    CancelAlbedoColor,
     FloorHeightChanged(String),
-    AlbedoChanged(usize, String),
     RoughnessChanged(f32),
     ReflectanceChanged(f32),
-    TransparencyChanged(f32),
+    ReflectionGrainSizeChanged(f32),
     RayCountChanged(u32),
     WindowDistanceChanged(String),
     CursorDistanceChanged(String),
@@ -29,8 +51,12 @@ enum Message {
 
 struct SettingsApp {
     config: AppConfig,
+    backgrounds: Vec<PathBuf>,
+    background_preview_source: Option<image::Rgb32FImage>,
+    background_preview: Option<iced_image::Handle>,
+    background_preview_message: String,
+    show_albedo_picker: bool,
     floor_height: String,
-    albedo: [String; 3],
     window_distance: String,
     cursor_distance: String,
     status: String,
@@ -50,30 +76,98 @@ impl SettingsApp {
     }
 
     fn from_config(config: AppConfig, status: String, status_is_error: bool) -> Self {
+        let backgrounds = background_files();
         let floor_height = format!("{}", config.floor.height_m);
-        let albedo = config.floor.albedo.map(|channel| format!("{channel:.3}"));
         let window_distance = format!("{}", config.window.default_distance_m);
         let cursor_distance = format!("{}", config.cursor.default_distance_m);
-        Self {
+        let mut app = Self {
             config,
+            backgrounds,
+            background_preview_source: None,
+            background_preview: None,
+            background_preview_message: String::new(),
+            show_albedo_picker: false,
             floor_height,
-            albedo,
             window_distance,
             cursor_distance,
             status,
             status_is_error,
-        }
+        };
+        app.load_background_preview();
+        app
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
-        let editing = !matches!(&message, Message::Reload | Message::Save);
+        let editing = matches!(
+            &message,
+            Message::BackgroundChanged(_)
+                | Message::BackgroundBrightnessChanged(_)
+                | Message::BackgroundRotationChanged(_)
+                | Message::FloorHeightChanged(_)
+                | Message::SubmitAlbedoColor(_)
+                | Message::RoughnessChanged(_)
+                | Message::ReflectanceChanged(_)
+                | Message::ReflectionGrainSizeChanged(_)
+                | Message::RayCountChanged(_)
+                | Message::WindowDistanceChanged(_)
+                | Message::CursorDistanceChanged(_)
+        );
         match message {
-            Message::BackgroundChanged(image) => self.config.background.image = image,
+            Message::BackgroundChanged(selection) => {
+                if selection == RANDOM_BACKGROUND {
+                    self.config.background.image = "random".into();
+                } else if let Some(path) = self.backgrounds.iter().find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name == selection.as_str())
+                }) {
+                    self.config.background.image = format!(
+                        "~/.config/spacetop/backgrounds/{}",
+                        path.file_name().unwrap().to_string_lossy()
+                    );
+                }
+                self.load_background_preview();
+            }
+            Message::OpenBackgroundFolder => self.open_background_folder(),
+            Message::RefreshBackgrounds => {
+                self.backgrounds = background_files();
+                self.status = if self.backgrounds.is_empty() {
+                    "No EXR backgrounds found".into()
+                } else {
+                    format!("Found {} EXR background(s)", self.backgrounds.len())
+                };
+                self.status_is_error = false;
+            }
+            Message::DownloadBackgrounds => match open_with_xdg(BACKGROUND_DOWNLOAD_URL) {
+                Ok(()) => {
+                    self.status = "Opened Poly Haven in your browser".into();
+                    self.status_is_error = false;
+                }
+                Err(error) => {
+                    self.status = format!("Could not open Poly Haven: {error}");
+                    self.status_is_error = true;
+                }
+            },
+            Message::OpenConfigFile => self.open_config_file(),
+            Message::BackgroundBrightnessChanged(value) => {
+                self.config.background.brightness_stops = value;
+                self.update_background_preview();
+            }
+            Message::BackgroundRotationChanged(value) => {
+                self.config.background.rotation_degrees = value;
+                self.update_background_preview();
+            }
+            Message::ChooseAlbedoColor => self.show_albedo_picker = true,
+            Message::SubmitAlbedoColor(color) => {
+                self.config.floor.albedo = [color.r, color.g, color.b, color.a];
+                self.show_albedo_picker = false;
+            }
+            Message::CancelAlbedoColor => self.show_albedo_picker = false,
             Message::FloorHeightChanged(value) => self.floor_height = value,
-            Message::AlbedoChanged(channel, value) => self.albedo[channel] = value,
             Message::RoughnessChanged(value) => self.config.floor.roughness = value,
             Message::ReflectanceChanged(value) => self.config.floor.reflectance = value,
-            Message::TransparencyChanged(value) => self.config.floor.transparency = value,
+            Message::ReflectionGrainSizeChanged(value_mm) => {
+                self.config.floor.reflection_grain_size_m = value_mm / 1000.0;
+            }
             Message::RayCountChanged(value) => self.config.floor.ray_count = value,
             Message::WindowDistanceChanged(value) => self.window_distance = value,
             Message::CursorDistanceChanged(value) => self.cursor_distance = value,
@@ -93,6 +187,83 @@ impl SettingsApp {
             self.status_is_error = false;
         }
         iced::Task::none()
+    }
+
+    fn open_background_folder(&mut self) {
+        let Some(directory) = background_directory() else {
+            self.status = "Could not locate the backgrounds folder: HOME is not set".into();
+            self.status_is_error = true;
+            return;
+        };
+        if let Err(error) = fs::create_dir_all(&directory) {
+            self.status = format!("Could not create backgrounds folder: {error}");
+            self.status_is_error = true;
+            return;
+        }
+
+        self.backgrounds = background_files();
+        match open_with_xdg(&directory) {
+            Ok(()) => {
+                self.status = "Opened backgrounds folder".into();
+                self.status_is_error = false;
+            }
+            Err(error) => {
+                self.status = format!("Could not open backgrounds folder: {error}");
+                self.status_is_error = true;
+            }
+        }
+    }
+
+    fn open_config_file(&mut self) {
+        match AppConfig::path() {
+            Ok(path) => match open_with_xdg(&path) {
+                Ok(()) => {
+                    self.status = "Opened configuration file".into();
+                    self.status_is_error = false;
+                }
+                Err(error) => {
+                    self.status = format!("Could not open configuration file: {error}");
+                    self.status_is_error = true;
+                }
+            },
+            Err(error) => {
+                self.status = format!("Could not locate configuration file: {error:#}");
+                self.status_is_error = true;
+            }
+        }
+    }
+
+    fn load_background_preview(&mut self) {
+        self.background_preview_source = None;
+        self.background_preview = None;
+        if self.config.background.image == "random" {
+            self.background_preview_message =
+                "Random chooses an image when Spacetop starts. Select an EXR to preview.".into();
+            return;
+        }
+
+        let path = expand_background_path(&self.config.background.image);
+        match image::open(&path) {
+            Ok(decoded) => {
+                self.background_preview_source = Some(decoded.thumbnail(640, 320).to_rgb32f());
+                self.background_preview_message.clear();
+                self.update_background_preview();
+            }
+            Err(error) => {
+                self.background_preview_message = format!("Could not load preview: {error}");
+            }
+        }
+    }
+
+    fn update_background_preview(&mut self) {
+        self.background_preview = self.background_preview_source.as_ref().map(|source| {
+            let pixels = tone_mapped_preview_pixels(
+                source,
+                self.config.background.brightness_stops,
+                self.config.background.rotation_degrees,
+            );
+            iced_image::Handle::from_rgba(source.width(), source.height(), pixels)
+        });
     }
 
     fn save(&mut self) {
@@ -121,9 +292,6 @@ impl SettingsApp {
     fn config_from_fields(&self) -> Result<AppConfig, String> {
         let mut config = self.config.clone();
         config.floor.height_m = parse_number("Fallback floor height", &self.floor_height)?;
-        for (index, value) in self.albedo.iter().enumerate() {
-            config.floor.albedo[index] = parse_number("Albedo channel", value)?;
-        }
         config.window.default_distance_m =
             parse_number("Default window distance", &self.window_distance)?;
         config.cursor.default_distance_m =
@@ -135,15 +303,116 @@ impl SettingsApp {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let mut background_options = vec![RANDOM_BACKGROUND.to_owned()];
+        background_options.extend(
+            self.backgrounds
+                .iter()
+                .filter_map(|path| path.file_name().and_then(OsStr::to_str).map(str::to_owned)),
+        );
+        let selected_background = if self.config.background.image == "random" {
+            Some(RANDOM_BACKGROUND.to_owned())
+        } else {
+            let configured_path = expand_background_path(&self.config.background.image);
+            self.backgrounds
+                .iter()
+                .find(|path| **path == configured_path)
+                .and_then(|path| path.file_name())
+                .and_then(OsStr::to_str)
+                .map(str::to_owned)
+        };
+        let background_preview: Element<'_, Message> =
+            if let Some(handle) = &self.background_preview {
+                column![
+                    container(
+                        iced_image::Image::new(handle.clone())
+                            .width(Length::Fill)
+                            .height(Length::Fixed(164.0))
+                            .content_fit(iced::ContentFit::Contain)
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fixed(164.0))
+                    .padding(5)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(INPUT)),
+                        border: Border {
+                            color: BORDER,
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    }),
+                    text(format!(
+                        "Exposure preview: {:+.1} EV",
+                        self.config.background.brightness_stops
+                    ))
+                    .size(11)
+                    .color(MUTED),
+                ]
+                .spacing(6)
+                .into()
+            } else {
+                container(
+                    text(self.background_preview_message.as_str())
+                        .size(12)
+                        .color(MUTED),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(164.0))
+                .padding(12)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(Background::Color(INPUT)),
+                    border: Border {
+                        color: BORDER,
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .into()
+            };
         let environment = section(
             "BACKGROUND",
             column![
                 text("IMAGE SOURCE").size(11).color(MUTED),
-                styled_input(
-                    "random or /path/to/image.exr",
-                    &self.config.background.image,
+                pick_list(
+                    background_options,
+                    selected_background,
                     Message::BackgroundChanged,
+                )
+                .placeholder("Select an EXR background")
+                .padding([9, 11])
+                .width(Length::Fill),
+                background_preview,
+                slider_row(
+                    "SKYBOX BRIGHTNESS (EV)",
+                    self.config.background.brightness_stops,
+                    -8.0,
+                    8.0,
+                    0.1,
+                    Message::BackgroundBrightnessChanged,
                 ),
+                slider_row(
+                    "SKYBOX ROTATION (DEG)",
+                    self.config.background.rotation_degrees,
+                    0.0,
+                    360.0,
+                    1.0,
+                    Message::BackgroundRotationChanged,
+                ),
+                row![
+                    button(text("Open Folder").size(13))
+                        .on_press(Message::OpenBackgroundFolder)
+                        .style(quiet_button),
+                    button(text("Refresh List").size(13))
+                        .on_press(Message::RefreshBackgrounds)
+                        .style(quiet_button),
+                    button(text("Browse PolyHaven Backgrounds").size(13))
+                        .on_press(Message::DownloadBackgrounds)
+                        .style(quiet_button),
+                ]
+                .spacing(8),
             ]
             .spacing(8),
         );
@@ -154,37 +423,45 @@ impl SettingsApp {
             "-1.3",
             Message::FloorHeightChanged,
         );
-        let albedo_fields = row![
-            channel_input("R", 0, &self.albedo[0]),
-            channel_input("G", 1, &self.albedo[1]),
-            channel_input("B", 2, &self.albedo[2]),
-            color_swatch(&self.albedo),
-        ]
-        .spacing(12)
-        .align_y(iced::Alignment::End);
+        let albedo = Color::from_rgba(
+            self.config.floor.albedo[0],
+            self.config.floor.albedo[1],
+            self.config.floor.albedo[2],
+            self.config.floor.albedo[3],
+        );
+        let albedo_picker = color_picker(
+            self.show_albedo_picker,
+            albedo,
+            button(color_swatch(albedo))
+                .on_press(Message::ChooseAlbedoColor)
+                .style(quiet_button),
+            Message::CancelAlbedoColor,
+            Message::SubmitAlbedoColor,
+        );
         let floor = section(
             "FLOOR MATERIAL",
             column![
                 row![
                     floor_height,
-                    column![text("ALBEDO").size(11).color(MUTED), albedo_fields].spacing(8)
+                    column![text("ALBEDO (RGBA)").size(11).color(MUTED), albedo_picker].spacing(8)
                 ]
                 .spacing(18)
                 .align_y(iced::Alignment::End),
                 slider_row(
                     "ROUGHNESS",
                     self.config.floor.roughness,
+                    0.0,
+                    1.0,
+                    0.01,
                     Message::RoughnessChanged,
                 ),
                 slider_row(
                     "REFLECTANCE",
                     self.config.floor.reflectance,
+                    0.0,
+                    1.0,
+                    0.01,
                     Message::ReflectanceChanged,
-                ),
-                slider_row(
-                    "TRANSPARENCY",
-                    self.config.floor.transparency,
-                    Message::TransparencyChanged,
                 ),
                 row![
                     text("REFLECTION RAYS")
@@ -206,6 +483,14 @@ impl SettingsApp {
                 ]
                 .spacing(12)
                 .align_y(iced::Alignment::Center),
+                slider_row(
+                    "REFLECTION GRID (MM)",
+                    self.config.floor.reflection_grain_size_m * 1000.0,
+                    1.0,
+                    50.0,
+                    1.0,
+                    Message::ReflectionGrainSizeChanged,
+                ),
             ]
             .spacing(18),
         );
@@ -263,6 +548,9 @@ impl SettingsApp {
                     ]
                     .spacing(4),
                     iced::widget::Space::new().width(Length::Fill),
+                    button(text("Open Config").size(13))
+                        .on_press(Message::OpenConfigFile)
+                        .style(quiet_button),
                 ]
                 .align_y(iced::Alignment::Center),
                 scrollable(column![environment, floor, placement].spacing(14)).height(Length::Fill),
@@ -279,6 +567,87 @@ impl SettingsApp {
         })
         .into()
     }
+}
+
+fn background_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/spacetop/backgrounds"))
+}
+
+fn background_files() -> Vec<PathBuf> {
+    let Some(directory) = background_directory() else {
+        return Vec::new();
+    };
+    background_files_in(&directory)
+}
+
+fn background_files_in(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+
+    let mut files = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let is_file = entry.file_type().ok()?.is_file();
+            let is_exr = path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("exr"));
+            (is_file && is_exr && path.file_name().and_then(OsStr::to_str).is_some())
+                .then_some(path)
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+    });
+    files
+}
+
+fn expand_background_path(path: &str) -> PathBuf {
+    if let Some(relative) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(relative);
+    }
+    PathBuf::from(path)
+}
+
+fn tone_mapped_preview_pixels(
+    source: &image::Rgb32FImage,
+    brightness_stops: f32,
+    rotation_degrees: f32,
+) -> Vec<u8> {
+    let exposure = brightness_stops.exp2();
+    let width = source.width();
+    let height = source.height();
+    let shift = (rotation_degrees.rem_euclid(360.0) / 360.0 * width as f32).round() as u32;
+    let mut output = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = source.get_pixel((x + shift) % width, y);
+            let encode = |channel: f32| {
+                let exposed = (channel * exposure).max(0.0);
+                let mapped = if exposed.is_infinite() {
+                    1.0
+                } else {
+                    exposed / (1.0 + exposed)
+                };
+                let srgb = if mapped <= 0.003_130_8 {
+                    mapped * 12.92
+                } else {
+                    1.055 * mapped.powf(1.0 / 2.4) - 0.055
+                };
+                (srgb * 255.0).round().clamp(0.0, 255.0) as u8
+            };
+            output.extend([encode(pixel[0]), encode(pixel[1]), encode(pixel[2]), 255]);
+        }
+    }
+    output
+}
+
+fn open_with_xdg(target: impl AsRef<OsStr>) -> Result<(), std::io::Error> {
+    Command::new("xdg-open").arg(target).spawn().map(|_| ())
 }
 
 fn parse_number(label: &str, value: &str) -> Result<f32, String> {
@@ -341,41 +710,33 @@ fn styled_input<'a>(
         .into()
 }
 
-fn channel_input<'a>(label: &'a str, channel: usize, value: &'a str) -> Element<'a, Message> {
-    column![
-        text(label).size(11).color(MUTED),
-        styled_input("0.00", value, move |value| Message::AlbedoChanged(
-            channel, value
-        )),
+fn color_swatch(color: Color) -> Element<'static, Message> {
+    row![
+        container(text(""))
+            .width(Length::Fixed(42.0))
+            .height(Length::Fixed(32.0))
+            .style(move |_| container::Style {
+                background: Some(Background::Color(color)),
+                border: Border {
+                    color: BORDER,
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            }),
+        text("Pick color").size(13).color(TEXT),
     ]
-    .spacing(8)
-    .width(Length::Fixed(78.0))
+    .spacing(10)
+    .align_y(iced::Alignment::Center)
     .into()
-}
-
-fn color_swatch(channels: &[String; 3]) -> Element<'static, Message> {
-    let values = channels
-        .each_ref()
-        .map(|channel| channel.parse::<f32>().unwrap_or_default().clamp(0.0, 1.0));
-    let color = Color::from_rgb(values[0], values[1], values[2]);
-    container(text(""))
-        .width(Length::Fixed(42.0))
-        .height(Length::Fixed(36.0))
-        .style(move |_| container::Style {
-            background: Some(Background::Color(color)),
-            border: Border {
-                color: BORDER,
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
 }
 
 fn slider_row<'a>(
     label: &'a str,
     value: f32,
+    min: f32,
+    max: f32,
+    step: f32,
     on_change: impl Fn(f32) -> Message + 'static,
 ) -> Element<'a, Message> {
     row![
@@ -383,8 +744,8 @@ fn slider_row<'a>(
             .size(11)
             .color(MUTED)
             .width(Length::Fixed(126.0)),
-        slider(0.0..=1.0, value, on_change)
-            .step(0.01_f32)
+        slider(min..=max, value, on_change)
+            .step(step)
             .width(Length::Fill),
         text(format!("{value:.2}"))
             .size(13)
@@ -425,9 +786,47 @@ fn accent_button(_theme: &Theme, _status: button::Status) -> button::Style {
 
 fn main() -> iced::Result {
     iced::application(SettingsApp::new, SettingsApp::update, SettingsApp::view)
+        .font(iced_aw::ICED_AW_FONT_BYTES)
         .title("Space Settings")
         .window_size((760.0, 820.0))
         .centered()
         .theme(Theme::Dark)
         .run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_files_only_includes_regular_exr_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let exr = directory.path().join("sky.exr");
+        fs::write(&exr, []).unwrap();
+        fs::write(directory.path().join("preview.png"), []).unwrap();
+        fs::create_dir(directory.path().join("nested.exr")).unwrap();
+
+        assert_eq!(background_files_in(directory.path()), vec![exr]);
+    }
+
+    #[test]
+    fn preview_exposure_brightens_linear_hdr_pixels() {
+        let source = image::Rgb32FImage::from_pixel(1, 1, image::Rgb([1.0, 1.0, 1.0]));
+        let base = tone_mapped_preview_pixels(&source, 0.0, 0.0);
+        let brighter = tone_mapped_preview_pixels(&source, 1.0, 0.0);
+
+        assert!(brighter[0] > base[0]);
+        assert_eq!(base[3], 255);
+    }
+
+    #[test]
+    fn preview_rotation_wraps_the_panorama_horizontally() {
+        let source =
+            image::Rgb32FImage::from_fn(4, 1, |x, _| image::Rgb([x as f32 / 4.0, 0.0, 0.0]));
+        let unrotated = tone_mapped_preview_pixels(&source, 0.0, 0.0);
+        let rotated = tone_mapped_preview_pixels(&source, 0.0, 90.0);
+
+        assert_eq!(rotated[0], unrotated[4]);
+        assert_eq!(rotated[12], unrotated[0]);
+    }
 }

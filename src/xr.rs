@@ -339,13 +339,7 @@ pub fn run(
         .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT),
         "Vulkan GPU lacks D32 depth attachment support"
     );
-    let scene = SceneRenderer::new(
-        &device,
-        &vk_instance,
-        physical_device,
-        format,
-        &config.floor,
-    )?;
+    let scene = SceneRenderer::new(&device, &vk_instance, physical_device, format, &config)?;
     let mut skybox = SkyboxTexture::new(
         &scene,
         &vk_instance,
@@ -515,7 +509,7 @@ pub fn run(
                                 } else {
                                     None
                                 };
-                            scene.update_floor_config(&next_config.floor)?;
+                            scene.update_config(&next_config)?;
                             Ok(next_skybox)
                         })();
                         match result {
