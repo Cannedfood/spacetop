@@ -726,9 +726,14 @@ pub fn run(
                     panel_frames
                         .iter()
                         .filter_map(|(id, panel)| {
-                            panel.geometry.intersect_with_margin(ray, 0.04).map(|hit| (*id, hit))
+                            panel
+                                .geometry
+                                .intersect_with_margin(ray, 0.04)
+                                .map(|hit| (*id, hit))
                         })
-                        .min_by(|(_, first), (_, second)| first.distance_m.total_cmp(&second.distance_m))
+                        .min_by(|(_, first), (_, second)| {
+                            first.distance_m.total_cmp(&second.distance_m)
+                        })
                         .map(|(id, _)| id)
                 });
                 let pointing_at_window = hovered_panel.is_some();
@@ -759,7 +764,10 @@ pub fn run(
                                         .clamp(0.6, 5.0);
                                     grab_initial_radius = grab_radius;
                                     grab_initial_width = panel.geometry.pose.width_m;
-                                    resize_initial_size = (panel.geometry.logical_size.w, panel.geometry.logical_size.h);
+                                    resize_initial_size = (
+                                        panel.geometry.logical_size.w,
+                                        panel.geometry.logical_size.h,
+                                    );
                                     let aim_angles = PanelPose::spherical_angles(ray.direction);
                                     let center_angles = PanelPose::spherical_angles(
                                         panel.geometry.pose.center - grab_player_position,
@@ -785,7 +793,11 @@ pub fn run(
                 {
                     let width = hit.surface_px.x.round() as i32;
                     let height = hit.surface_px.y.round() as i32;
-                    let _ = input.try_send(XrInput::ResizePanel { panel_id, width, height });
+                    let _ = input.try_send(XrInput::ResizePanel {
+                        panel_id,
+                        width,
+                        height,
+                    });
                 }
                 let delta_seconds = (frame_state.predicted_display_period.as_nanos() as f32
                     / 1_000_000_000.0)
@@ -906,7 +918,8 @@ pub fn run(
             skybox: Some(&skybox),
             panels: &panel_draws,
             cursor: cursor_scene_pose,
-            hovered_panel: hovered_panel.and_then(|id| panel_frames.get(&id).map(|panel| panel.geometry)),
+            hovered_panel: hovered_panel
+                .and_then(|id| panel_frames.get(&id).map(|panel| panel.geometry)),
             floor_y,
         };
         unsafe {

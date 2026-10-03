@@ -1215,7 +1215,16 @@ impl SceneRenderer {
                 self.window_pipeline,
             );
             for (texture, geometry) in panels {
-                let outline = [0.0, 0.0, 0.0, if frame.hovered_panel == Some(geometry) { 1.0 } else { 0.0 }];
+                let outline = [
+                    0.0,
+                    0.0,
+                    0.0,
+                    if frame.hovered_panel == Some(geometry) {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                ];
                 let outline_bytes = std::slice::from_raw_parts(outline.as_ptr().cast::<u8>(), 16);
                 self.device.cmd_push_constants(
                     command,

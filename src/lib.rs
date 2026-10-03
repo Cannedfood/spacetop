@@ -194,7 +194,11 @@ impl Compositor {
                 self.dispatch_scroll(value, time_ms);
                 Ok(())
             }
-            XrInput::ResizePanel { panel_id, width, height } => {
+            XrInput::ResizePanel {
+                panel_id,
+                width,
+                height,
+            } => {
                 if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == panel_id) {
                     match &panel.surface {
                         x11::PanelSurface::X11 { window, .. } => {
@@ -206,7 +210,9 @@ impl Compositor {
                             }
                         }
                         x11::PanelSurface::Wayland(surface) => {
-                            surface.with_pending_state(|state| state.size = Some((width.max(1), height.max(1)).into()));
+                            surface.with_pending_state(|state| {
+                                state.size = Some((width.max(1), height.max(1)).into())
+                            });
                             surface.send_configure();
                         }
                         x11::PanelSurface::Popup(_) => {}
