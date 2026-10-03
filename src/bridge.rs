@@ -1,24 +1,32 @@
-//! Latest panel updates and bounded input between the compositor and OpenXR threads.
+//! Latest panel updates, reliable transitions, and capped best-effort XR input.
 
-use calloop::channel::{self, Channel, SyncSender};
+use calloop::channel::{self, Channel, Sender};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 #[cfg(test)]
 use std::sync::mpsc::TryRecvError;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
 use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3};
 
 #[derive(Debug)]
 pub enum XrInput {
+    FrameTick,
     Ray {
         ray: Ray3,
         time_ms: u32,
     },
     Button {
+        button: u32,
         pressed: bool,
+        time_ms: u32,
+    },
+    PointerLost {
         time_ms: u32,
     },
     Scroll {
@@ -36,6 +44,74 @@ pub enum XrInput {
     FatalError {
         message: String,
     },
+}
+
+#[derive(Clone)]
+pub struct InputSender(Option<Arc<InputQueue>>);
+
+struct InputQueue {
+    sender: Sender<XrInput>,
+    pending: AtomicUsize,
+    frame_pending: AtomicBool,
+}
+
+impl InputSender {
+    pub fn discarded() -> Self {
+        Self(None)
+    }
+
+    pub fn send(&self, input: XrInput) -> Result<(), std::sync::mpsc::SendError<XrInput>> {
+        if let Some(queue) = &self.0 {
+            queue.pending.fetch_add(1, Ordering::Relaxed);
+            queue.sender.send(input).inspect_err(|_| {
+                queue.pending.fetch_sub(1, Ordering::Relaxed);
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn try_send(&self, input: XrInput) -> Result<(), std::sync::mpsc::TrySendError<XrInput>> {
+        if let Some(queue) = &self.0 {
+            if queue
+                .pending
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+                    (pending < 16).then_some(pending + 1)
+                })
+                .is_err()
+            {
+                return Err(std::sync::mpsc::TrySendError::Full(input));
+            }
+            queue.sender.send(input).map_err(|error| {
+                queue.pending.fetch_sub(1, Ordering::Relaxed);
+                std::sync::mpsc::TrySendError::Disconnected(error.0)
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn request_frame(&self) -> Result<(), std::sync::mpsc::SendError<XrInput>> {
+        if let Some(queue) = &self.0 {
+            if queue.frame_pending.swap(true, Ordering::Relaxed) {
+                return Ok(());
+            }
+            self.send(XrInput::FrameTick).inspect_err(|_| {
+                queue.frame_pending.store(false, Ordering::Relaxed);
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn received(&self, input: &XrInput) {
+        if let Some(queue) = &self.0 {
+            queue.pending.fetch_sub(1, Ordering::Relaxed);
+            if matches!(input, XrInput::FrameTick) {
+                queue.frame_pending.store(false, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -89,22 +165,18 @@ pub fn panel_channel() -> (PanelSender, PanelReceiver) {
     (PanelSender(pending.clone()), PanelReceiver(pending))
 }
 
-pub fn input_channel() -> (SyncSender<XrInput>, Channel<XrInput>) {
-    channel::sync_channel(16)
+pub fn input_channel() -> (InputSender, Channel<XrInput>) {
+    let (sender, receiver) = channel::channel();
+    (
+        InputSender(Some(Arc::new(InputQueue {
+            sender,
+            pending: AtomicUsize::new(0),
+            frame_pending: AtomicBool::new(false),
+        }))),
+        receiver,
+    )
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn removals_are_not_lost_when_many_windows_update() {
-        let (sender, receiver) = panel_channel();
-        for panel_id in 0..32 {
-            sender.publish(PanelUpdate::Removed { panel_id });
-            sender.publish(PanelUpdate::Removed { panel_id });
-        }
-        assert_eq!(receiver.drain().len(), 32);
-        assert!(receiver.drain().is_empty());
-    }
-}
+#[path = "../tests/unit/bridge.rs"]
+mod tests;

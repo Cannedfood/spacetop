@@ -2,7 +2,10 @@
 //! it does not implement an OpenXR runtime or provide inter-application overlay
 //! semantics.
 
-use std::{thread, time::Duration};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 
 use crate::bridge::{PanelReceiver, PanelUpdate, XrInput};
 use crate::gpu::{self, SharedImage};
@@ -28,23 +31,28 @@ impl XrPanel {
         format: vk::Format,
         shared: SharedImage,
         geometry: PanelGeometry,
+        timings: &mut crate::timing::Timings,
     ) -> Result<Self> {
         let size = shared.dmabuf.size();
-        let swapchain = session
-            .create_swapchain(&xr::SwapchainCreateInfo {
-                create_flags: xr::SwapchainCreateFlags::EMPTY,
-                usage_flags: xr::SwapchainUsageFlags::TRANSFER_DST
-                    | xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
-                format: format.as_raw() as _,
-                sample_count: 1,
-                width: size.w as u32,
-                height: size.h as u32,
-                face_count: 1,
-                array_size: 1,
-                mip_count: 1,
+        let swapchain = timings
+            .measure("openxr/create-swapchain", Duration::ZERO, || {
+                session.create_swapchain(&xr::SwapchainCreateInfo {
+                    create_flags: xr::SwapchainCreateFlags::EMPTY,
+                    usage_flags: xr::SwapchainUsageFlags::TRANSFER_DST
+                        | xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
+                    format: format.as_raw() as _,
+                    sample_count: 1,
+                    width: size.w as u32,
+                    height: size.h as u32,
+                    face_count: 1,
+                    array_size: 1,
+                    mip_count: 1,
+                })
             })
             .context("create window swapchain")?;
-        let images = swapchain.enumerate_images()?;
+        let images = timings.measure("openxr/enumerate-images", Duration::ZERO, || {
+            swapchain.enumerate_images()
+        })?;
         Ok(Self {
             shared,
             geometry,
@@ -71,7 +79,7 @@ fn panel_swapchain_format(formats: &[u32]) -> Result<vk::Format> {
 ///
 /// It submits captured Wayland panel pixels as independent quad layers and
 /// forwards the right-hand aim/select controller actions to the compositor.
-pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) -> Result<()> {
+pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<()> {
     let xr_entry = unsafe { xr::Entry::load(&()) }.context("load OpenXR loader")?;
     let available = xr_entry
         .enumerate_extensions()
@@ -274,38 +282,45 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
     let aim_action =
         action_set.create_action::<xr::Posef>("aim_pose", "Aim pose", &[right_hand])?;
     let trigger_action = action_set.create_action::<bool>("trigger", "Trigger", &[right_hand])?;
+    let secondary_action =
+        action_set.create_action::<bool>("secondary", "Secondary click", &[right_hand])?;
     let grip_action = action_set.create_action::<bool>("grip", "Grip", &[right_hand])?;
     let stick_action =
         action_set.create_action::<xr::Vector2f>("stick", "Thumbstick", &[right_hand])?;
     let aim_path = instance.string_to_path("/user/hand/right/input/aim/pose")?;
-    for (profile, button, grip, stick) in [
+    for (profile, button, secondary, grip, stick) in [
         (
             "/interaction_profiles/khr/simple_controller",
             "select/click",
+            None,
             None,
             None,
         ),
         (
             "/interaction_profiles/oculus/touch_controller",
             "trigger/value",
+            Some("b/click"),
             Some("squeeze/value"),
             Some("thumbstick"),
         ),
         (
             "/interaction_profiles/valve/index_controller",
             "trigger/click",
+            Some("b/click"),
             Some("squeeze/value"),
             Some("thumbstick"),
         ),
         (
             "/interaction_profiles/htc/vive_controller",
             "trigger/click",
+            Some("trackpad/click"),
             Some("squeeze/click"),
             Some("trackpad"),
         ),
         (
             "/interaction_profiles/microsoft/motion_controller",
             "trigger/value",
+            Some("trackpad/click"),
             Some("squeeze/click"),
             Some("thumbstick"),
         ),
@@ -317,6 +332,12 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                 instance.string_to_path(&format!("/user/hand/right/input/{button}"))?,
             ),
         ];
+        if let Some(secondary) = secondary {
+            bindings.push(xr::Binding::new(
+                &secondary_action,
+                instance.string_to_path(&format!("/user/hand/right/input/{secondary}"))?,
+            ));
+        }
         if let Some(grip) = grip {
             bindings.push(xr::Binding::new(
                 &grip_action,
@@ -339,27 +360,45 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
     let mut exit = false;
     let mut panel_frames = PanelImages::new();
     let mut cursor_ray: Option<Ray3> = None;
+    let mut pointer_tracked = false;
+    let mut trigger_pressed = false;
+    let mut secondary_pressed = false;
     let mut grabbed_panel: Option<u64> = None;
     let mut grab_radius = 1.6_f32;
     let mut grab_player_position = glam::Vec3::ZERO;
     let mut grab_initial_radius = 1.6_f32;
     let mut grab_initial_width = 1.0_f32;
     let mut grab_direction_offset = glam::Vec2::ZERO;
+    let mut timings = crate::timing::Timings::new();
 
     while !exit {
-        while let Some(event) = instance.poll_event(&mut events)? {
+        while let Some(event) = timings.measure("openxr/poll-event", Duration::ZERO, || {
+            instance.poll_event(&mut events)
+        })? {
             match event {
                 xr::Event::SessionStateChanged(changed)
                     if changed.session() == session.as_raw() =>
                 {
                     match changed.state() {
                         xr::SessionState::READY => {
-                            session.begin(VIEW_TYPE)?;
+                            timings.measure(
+                                "openxr/begin-session",
+                                Duration::from_millis(250),
+                                || session.begin(VIEW_TYPE),
+                            )?;
                             running = true;
                         }
                         xr::SessionState::STOPPING => {
+                            input.send(XrInput::PointerLost { time_ms: 0 })?;
+                            pointer_tracked = false;
+                            trigger_pressed = false;
+                            secondary_pressed = false;
                             running = false;
-                            session.end()?;
+                            timings.measure(
+                                "openxr/end-session",
+                                Duration::from_millis(250),
+                                || session.end(),
+                            )?;
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => exit = true,
                         _ => {}
@@ -370,10 +409,14 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
             }
         }
         // Drain compositor-to-XR panel snapshots without blocking the XR frame loop.
+        timings.reset_external();
+        let updates_started = Instant::now();
         let updates = frames.drain();
         for update in &updates {
             if let PanelUpdate::Removed { panel_id } = update {
-                panel_frames.remove(panel_id);
+                timings.measure("mixed/panel-retire", Duration::ZERO, || {
+                    panel_frames.remove(panel_id);
+                });
                 if grabbed_panel == Some(*panel_id) {
                     grabbed_panel = None;
                 }
@@ -394,14 +437,18 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                             && size.h as u32 <= limits.max_height,
                         "window image exceeds negotiated OpenXR limits"
                     );
-                    let shared =
-                        SharedImage::import(&vk_instance, &device, physical_device, dmabuf)
-                            .context("mandatory GPU DMA-BUF import failed")?;
+                    let shared = timings
+                        .measure("gpu/dmabuf-import", Duration::ZERO, || {
+                            SharedImage::import(&vk_instance, &device, physical_device, dmabuf)
+                        })
+                        .context("mandatory GPU DMA-BUF import failed")?;
                     if let Some(panel) = panel_frames.get_mut(&panel_id)
                         && panel.shared.dmabuf.size() == size
                     {
-                        panel.shared = shared;
-                        panel.geometry = geometry;
+                        timings.measure("gpu/panel-replace", Duration::ZERO, || {
+                            panel.shared = shared;
+                            panel.geometry = geometry;
+                        });
                     } else {
                         ensure!(
                             panel_frames.contains_key(&panel_id)
@@ -409,13 +456,21 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                             "OpenXR supports at most {} mapped window layers",
                             limits.max_layers
                         );
-                        panel_frames
-                            .insert(panel_id, XrPanel::new(&session, format, shared, geometry)?);
+                        let panel = XrPanel::new(&session, format, shared, geometry, &mut timings)?;
+                        timings.measure("mixed/panel-replace", Duration::ZERO, || {
+                            panel_frames.insert(panel_id, panel);
+                        });
                     }
                 }
                 PanelUpdate::Removed { .. } => {}
             }
         }
+        timings.record(
+            "app/panel-updates",
+            timings.app_elapsed(updates_started.elapsed()),
+            Duration::ZERO,
+        );
+        timings.record_external("openxr/panel-updates", "gpu/panel-updates", Duration::ZERO);
         if exit {
             break;
         }
@@ -424,9 +479,21 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
             continue;
         }
 
+        let wait_started = Instant::now();
         let frame_state = frame_waiter.wait()?;
-        let (view_state, views) =
-            session.locate_views(VIEW_TYPE, frame_state.predicted_display_time, &space)?;
+        let period =
+            Duration::from_nanos(frame_state.predicted_display_period.as_nanos().max(1) as u64);
+        if frame_state.should_render {
+            timings.record("openxr/wait-frame", wait_started.elapsed(), period * 3);
+        }
+        timings.reset_external();
+        let active_started = Instant::now();
+        if frame_state.should_render {
+            input.request_frame()?;
+        }
+        let (view_state, views) = timings.measure("openxr/locate-views", Duration::ZERO, || {
+            session.locate_views(VIEW_TYPE, frame_state.predicted_display_time, &space)
+        })?;
         if view_state.contains(xr::ViewStateFlags::POSITION_VALID) && !views.is_empty() {
             grab_player_position = views
                 .iter()
@@ -441,9 +508,16 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                 / views.len() as f32;
         }
         // Update the action set and forward the right controller's aim ray.
-        session.sync_actions(&[xr::ActiveActionSet::new(&action_set)])?;
-        if aim_action.is_active(&session, right_hand)? {
-            let controller = aim_space.locate(&space, frame_state.predicted_display_time)?;
+        timings.measure("openxr/sync-actions", Duration::ZERO, || {
+            session.sync_actions(&[xr::ActiveActionSet::new(&action_set)])
+        })?;
+        let mut tracked_this_frame = false;
+        if timings.measure("openxr/action-state", Duration::ZERO, || {
+            aim_action.is_active(&session, right_hand)
+        })? {
+            let controller = timings.measure("openxr/locate-controller", Duration::ZERO, || {
+                aim_space.locate(&space, frame_state.predicted_display_time)
+            })?;
             if controller
                 .location_flags
                 .contains(xr::SpaceLocationFlags::POSITION_VALID)
@@ -451,6 +525,7 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                     .location_flags
                     .contains(xr::SpaceLocationFlags::ORIENTATION_VALID)
             {
+                tracked_this_frame = true;
                 let pose = controller.pose;
                 let orientation = glam::Quat::from_xyzw(
                     pose.orientation.x,
@@ -473,7 +548,9 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                         .values()
                         .any(|panel| panel.geometry.intersect(ray).is_some())
                 });
-                let grip = grip_action.state(&session, right_hand)?;
+                let grip = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    grip_action.state(&session, right_hand)
+                })?;
                 if grip.changed_since_last_sync {
                     if grip.current_state {
                         grabbed_panel = cursor_ray.and_then(|ray| {
@@ -514,7 +591,11 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                     / 1_000_000_000.0)
                     .clamp(0.0, 0.1);
                 if let Some(panel_id) = grabbed_panel {
-                    let stick = stick_action.state(&session, right_hand)?.current_state;
+                    let stick = timings
+                        .measure("openxr/action-state", Duration::ZERO, || {
+                            stick_action.state(&session, right_hand)
+                        })?
+                        .current_state;
                     grab_radius = (grab_radius + stick.y * delta_seconds * 1.5).clamp(0.6, 5.0);
                     if let Some(ray) = cursor_ray
                         && let Some(panel) = panel_frames.get_mut(&panel_id)
@@ -534,7 +615,11 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                         let _ = input.try_send(XrInput::MovePanel { panel_id, pose });
                     }
                 } else if pointing_at_window {
-                    let stick = stick_action.state(&session, right_hand)?.current_state;
+                    let stick = timings
+                        .measure("openxr/action-state", Duration::ZERO, || {
+                            stick_action.state(&session, right_hand)
+                        })?
+                        .current_state;
                     if stick.y.abs() > 0.15 {
                         let scroll_input = stick.y.powf(3.0);
                         let _ = input.try_send(XrInput::Scroll {
@@ -543,25 +628,63 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                         });
                     }
                 }
-                let trigger = trigger_action.state(&session, right_hand)?;
-                if trigger.changed_since_last_sync {
-                    let _ = input.try_send(XrInput::Button {
-                        pressed: trigger.current_state,
-                        time_ms,
-                    });
+                let trigger = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    trigger_action.state(&session, right_hand)
+                })?;
+                let secondary = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    secondary_action.state(&session, right_hand)
+                })?;
+                for (button, down, previous) in [
+                    (
+                        0x110,
+                        trigger.is_active && trigger.current_state,
+                        &mut trigger_pressed,
+                    ),
+                    (
+                        0x111,
+                        secondary.is_active && secondary.current_state,
+                        &mut secondary_pressed,
+                    ),
+                ] {
+                    if down != *previous {
+                        input.send(XrInput::Ray {
+                            ray: cursor_ray.expect("tracked ray assigned"),
+                            time_ms,
+                        })?;
+                        input.send(XrInput::Button {
+                            button,
+                            pressed: down,
+                            time_ms,
+                        })?;
+                        *previous = down;
+                    }
                 }
             }
         } else {
             cursor_ray = None;
             grabbed_panel = None;
         }
-        frame_stream.begin()?;
+        if !tracked_this_frame {
+            cursor_ray = None;
+            grabbed_panel = None;
+            if pointer_tracked {
+                input.send(XrInput::PointerLost {
+                    time_ms: (frame_state.predicted_display_time.as_nanos() / 1_000_000) as u32,
+                })?;
+                trigger_pressed = false;
+                secondary_pressed = false;
+            }
+        }
+        pointer_tracked = tracked_this_frame;
+        timings.measure("openxr/begin-frame", period, || frame_stream.begin())?;
         if !frame_state.should_render {
-            frame_stream.end(
-                frame_state.predicted_display_time,
-                xr::EnvironmentBlendMode::OPAQUE,
-                &[],
-            )?;
+            timings.measure("openxr/end-frame", period * 2, || {
+                frame_stream.end(
+                    frame_state.predicted_display_time,
+                    xr::EnvironmentBlendMode::OPAQUE,
+                    &[],
+                )
+            })?;
             continue;
         }
 
@@ -572,7 +695,9 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                 .min_by(|(_, first), (_, second)| first.distance_m.total_cmp(&second.distance_m))
         });
         unsafe {
-            device.wait_for_fences(&[fence], true, u64::MAX)?;
+            timings.measure("gpu/previous-copy-wait", period, || {
+                device.wait_for_fences(&[fence], true, u64::MAX)
+            })?;
             device.reset_fences(&[fence])?;
             device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())?;
             device.begin_command_buffer(
@@ -587,8 +712,12 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                 .base_array_layer(0)
                 .layer_count(1);
             for (panel_id, panel) in &mut panel_frames {
-                let image_index = panel.swapchain.acquire_image()?;
-                panel.swapchain.wait_image(xr::Duration::INFINITE)?;
+                let image_index = timings.measure("openxr/acquire-image", period, || {
+                    panel.swapchain.acquire_image()
+                })?;
+                timings.measure("openxr/wait-image", period * 2, || {
+                    panel.swapchain.wait_image(xr::Duration::INFINITE)
+                })?;
                 let image = vk::Image::from_raw(
                     *panel
                         .images
@@ -652,15 +781,21 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                 );
             }
             device.end_command_buffer(command_buffer)?;
-            device.queue_submit(
-                queue,
-                &[vk::SubmitInfo::default().command_buffers(&[command_buffer])],
-                fence,
-            )?;
-            device.wait_for_fences(&[fence], true, u64::MAX)?;
+            timings.measure("gpu/queue-submit", Duration::ZERO, || {
+                device.queue_submit(
+                    queue,
+                    &[vk::SubmitInfo::default().command_buffers(&[command_buffer])],
+                    fence,
+                )
+            })?;
+            timings.measure("gpu/copy-completion", period, || {
+                device.wait_for_fences(&[fence], true, u64::MAX)
+            })?;
         }
         for panel in panel_frames.values_mut() {
-            panel.swapchain.release_image()?;
+            timings.measure("openxr/release-image", Duration::ZERO, || {
+                panel.swapchain.release_image()
+            })?;
         }
 
         let quads = panel_frames
@@ -709,11 +844,21 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
             .iter()
             .map(|quad| quad as &xr::CompositionLayerBase<xr::Vulkan>)
             .collect::<Vec<_>>();
-        frame_stream.end(
-            frame_state.predicted_display_time,
-            xr::EnvironmentBlendMode::OPAQUE,
-            &layers,
-        )?;
+        let active_elapsed = active_started.elapsed();
+        timings.record_frame(active_elapsed, period);
+        timings.record(
+            "app/xr-frame-work",
+            timings.app_elapsed(active_elapsed),
+            period,
+        );
+        timings.record_external("openxr/frame-calls", "gpu/frame-work", period);
+        timings.measure("openxr/end-frame", period * 2, || {
+            frame_stream.end(
+                frame_state.predicted_display_time,
+                xr::EnvironmentBlendMode::OPAQUE,
+                &layers,
+            )
+        })?;
     }
 
     unsafe {
@@ -730,20 +875,5 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
 }
 
 #[cfg(test)]
-mod color_tests {
-    use super::*;
-
-    #[test]
-    fn requires_srgb_swapchain() {
-        let srgb = vk::Format::R8G8B8A8_SRGB;
-        let linear = vk::Format::R8G8B8A8_UNORM;
-        assert_eq!(
-            panel_swapchain_format(&[linear.as_raw() as u32, srgb.as_raw() as u32])
-                .unwrap()
-                .as_raw(),
-            srgb.as_raw()
-        );
-        assert!(panel_swapchain_format(&[linear.as_raw() as u32]).is_err());
-        assert!(panel_swapchain_format(&[]).is_err());
-    }
-}
+#[path = "../tests/unit/xr.rs"]
+mod color_tests;

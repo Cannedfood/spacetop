@@ -12,74 +12,56 @@ Desktop shells and specialist apps require additional, explicitly scoped support
 ## What Already Exists
 
 - Core compositor/subsurface, shared-memory buffers, xdg-shell, seat, and output
-  protocol plumbing through Smithay.
+  protocol plumbing through Smithay, including surface buffer scale and a fixed
+  1280x720, 60 Hz virtual output.
 - GLES surface-tree rendering, client DMA-BUF import and device feedback once
   the GPU is ready, and GPU sharing into per-window OpenXR swapchains.
 - Multiple native toplevels and XWayland windows, map/unmap/destroy handling,
   application-driven buffer-size changes, activation, and keyboard focus routing.
-- Controller ray targeting, left click, vertical scrolling, and grip-driven
+- Controller ray targeting, left/secondary click, vertical scrolling, and grip-driven
   spatial panel movement/distance adjustment. This is not client-requested
   window movement or logical window resizing.
-- Tests for basic input/focus, window lifecycle, GPU pixels, and XWayland.
+- Native nested popup composition/grabs/repositioning/dismissal, parent-relative
+  X11 menus, subsurface/input-region targeting, and expanded capture bounds.
+  Menus share their parent's XR layer without changing its physical pixel scale.
+  X11 parent selection uses transient-for hints and active-window/overlap fallbacks.
+- Opt-in evdev keyboards and mouse buttons/wheels, XKB key/modifier delivery,
+  device-disconnect cleanup, and reliable XR button transitions/tracking cleanup.
+  See [README.md](README.md) for device configuration and permission requirements.
+- Native Wayland clipboard offers, MIME negotiation, FD transfers, and
+  keyboard-focus delivery through Smithay's `wl_data_device_manager` support.
+- XR-paced dirty-panel capture, commit coalescing before rendering, popup-owner
+  invalidation, and reliable input sends that do not wait for queue capacity.
+  Best-effort input admission is capped, and pending frame ticks are coalesced.
+- Tests for Wayland/X11 key events, native modifiers, input/focus, nested menus,
+  window lifecycle, GPU pixels, subsurface/input-region targeting, expanded and
+  negative popup bounds, tracking-loss releases, focus-before-click ordering,
+  and clipboard transfer/focus restoration. An opt-in real-GTK startup test
+  verifies that the required display interfaces allow Zenity to open.
 
-See [src/main.rs](src/main.rs), [src/x11.rs](src/x11.rs),
+See [src/lib.rs](src/lib.rs), [src/runtime.rs](src/runtime.rs), [src/x11.rs](src/x11.rs),
 [src/gpu.rs](src/gpu.rs), [src/xr.rs](src/xr.rs), and
 [TECHNICAL.md](TECHNICAL.md) for the current implementation.
 
 ## P0: Everyday App Blockers
 
-### Real Keyboard Input
+### Keyboard Discovery And Keyboard-Free Input
 
-The seat advertises a keyboard and sets focus, but there is no production source
-of key press/release events. `XrInput` has no keyboard event variant. The X11
-keyboard target forwards events if supplied; it does not acquire them.
+- Add seat-aware automatic discovery, hotplug/reconnection, and an explicit
+  host-input bridge if device access is not desirable for nested sessions.
+- Provide an XR virtual keyboard for keyboard-free use, plus text-input/IME.
 
-- Add a physical keyboard input backend or an explicit host-input bridge;
-  provide an XR virtual keyboard if keyboard-free use is a goal.
-- Deliver keycodes and modifier transitions through Smithay's keyboard handling,
-  with configurable XKB layouts/options, repeat, Compose, and focus-loss cleanup.
-- Test typing, shortcuts, held modifiers, repeat, and focus switches in both
-  native Wayland and X11 apps. Keyboard-enter events alone do not prove typing.
+### Primary Selection, X11 Clipboard, And XR Drag-And-Drop
 
-### Popups, Menus, And Tooltips
+There is no primary selection or X11/Wayland selection bridge. Smithay handles
+client-initiated drag-and-drop protocol/grabs, but drag icons are not rendered
+and real-toolkit XR drag-and-drop remains unverified.
 
-`new_popup` only sends a configure, popup grabs are ignored, and repositioning
-only acknowledges the token. Capture renders a toplevel's subsurface tree, not
-its separate xdg-popup tree. Popup commits do not resolve to their owning panel
-through the subsurface-parent walk.
-
-- Track popup ownership, nested popups, lifecycle, positioner geometry,
-  constraint adjustment, reactive placement, and reposition configures.
-- Render them relative to their parent, including content outside the parent's
-  buffer bounds, and translate input coordinates correctly.
-- Implement serial-validated popup grabs, keyboard/pointer routing, dismissal,
-  and `popup_done` handling.
-- Test context menus, combo boxes, submenus, tooltips, and popups at every edge.
-
-### Surface-Aware Pointer Targeting
-
-Ray targeting uses the root surface's rectangular buffer bounds and always
-focuses that root. Rendering subsurfaces does not make them independently
-clickable. Input regions, child stacking, and child coordinate offsets are not
-consulted by this hit-test.
-
-- Hit-test the actual surface hierarchy, including popups and input regions.
-- Respect xdg window geometry and distinguish content coordinates, buffer
-  coordinates, and the bounds of the composed tree. Shadows and negative child
-  offsets must not shift clicks or cause unintended clipping.
-- Preserve pointer-grab behavior for drags across panel boundaries and verify
-  press/release delivery to the right surface.
-- Test a clickable subsurface, input-region holes, shadows, and drag-outside.
-
-### Clipboard, Selection, And Drag-And-Drop
-
-No `wl_data_device_manager` is initialized, and there are no compositor
-selection handlers or X11/Wayland selection bridge.
-
-- Implement regular clipboard offers, ownership, MIME negotiation, streaming,
-  cancellation, and selection delivery when keyboard focus changes.
-- Implement drag-and-drop enter/motion/leave/drop, action negotiation, serial
-  validation, drag icons, and completion/cancellation.
+- Render drag icons and verify enter/motion/leave/drop, action negotiation,
+  serial validation, completion/cancellation, and coordinates across XR panels.
+- Verify clipboard images, large transfers, owner exit, and transfers between
+  real applications; the regression covers MIME offers, text FD transfer, and
+  focus restoration, not the full interoperability matrix.
 - Add primary selection for middle-click paste; data-control protocols are a
   separate, permission-sensitive feature for clipboard managers.
 - Bridge Wayland selections and X11 selections through Smithay's XWM support;
@@ -87,11 +69,16 @@ selection handlers or X11/Wayland selection bridge.
 
 ## P1: Broad Desktop Compatibility
 
+### Popup Work-Area Constraints
+
+- Define finite work-area constraints and reactive reconfiguration if an XR
+  workspace needs them; placement currently uses an unconstrained spatial plane.
+
 ### Window Management And Decorations
 
 Native xdg-shell handlers do not implement move, resize, maximize, fullscreen,
-minimize, or window-menu policy. X11 move/resize handlers are empty. A new client
-buffer size is accepted, but users cannot request a proper logical resize.
+minimize, or window-menu policy. X11 move/resize handlers are empty; users cannot
+request a proper logical resize.
 
 - Implement interactive resize with valid request serials, size constraints,
   resizing state, and configure/ack sequencing. Spatial panel scaling is not a
@@ -106,14 +93,13 @@ buffer size is accepted, but users cannot request a proper logical resize.
 - Add `xdg-activation` with token validation and a focus-stealing policy for
   application launches, links, and dialogs.
 
-### X11 Menus And Window-Manager Semantics
+### X11 Grab, Stacking, State, And Recovery Gaps
 
-Rootless XWayland is already supported; replacing it is not the missing piece.
-Override-redirect windows currently become independent panels, and configure
-requests ignore stacking changes.
+Unowned override-redirect windows get independent panels; configure requests
+ignore stacking changes.
 
-- Position X11 menus/tooltips relative to their owning window instead of giving
-  them unrelated spatial placement. Honor transient-for and window-type hints.
+- Refine parent inference, window-type policy, X11 grab behavior outside panel
+  bounds, and stacking for unusual override-redirect applications.
 - Implement XWM state requests and coherent stacking/focus policy, including
   fullscreen/maximize/minimize, normal size hints, and interactive move/resize.
 - Verify managed versus override-redirect focus behavior, modal dialogs,
@@ -123,9 +109,8 @@ requests ignore stacking changes.
 
 ### Viewports, Output Description, And Scaling
 
-Only a fixed 1280x720, 60 Hz virtual output is created. There is no viewporter,
-fractional-scale, or xdg-output global. Surface buffer scale exists, but it is
-not a complete desktop scaling model.
+There is no viewporter, fractional-scale, or xdg-output global, and no complete
+desktop scaling model.
 
 - Add `wp_viewporter` for source cropping and destination sizing; some rendering
   paths depend on it, while others can fall back.
@@ -137,36 +122,36 @@ not a complete desktop scaling model.
 - Test integer/fractional scaling, buffer transforms, viewport cropping,
   subsurface offsets, and xdg window geometry independently and in combination.
 - Verify synchronized/desynchronized subsurface commits and cached state;
-  Smithay supplies core handling, but the current commit-triggered capture path
+  Smithay supplies core handling, but the current deferred capture path
   needs regression coverage for when child state actually becomes visible.
 
-### Complete Pointer Behavior And Reliable Input Delivery
+### Cursor Support, Advanced Pointer Input, And Input Stress Testing
 
-Only left click and vertical continuous scrolling are emitted. The displayed
-cursor is a fixed targeting cross, not the app's requested cursor.
+The cursor remains a fixed targeting cross.
 
-- Add right/middle/extra buttons, horizontal scroll, and appropriate scroll
-  source/stop information. Supply discrete/value120 events for wheel input
-  when that backend is available.
+- Add physical mouse-motion mapping, continuous-scroll stop information, and
+  more controller-profile coverage. Simple controllers have no secondary click.
 - Render client cursor surfaces with hotspots, animation, and hidden-cursor
   requests; optionally add `cursor-shape` support while retaining the XR reticle
   as a separate targeting aid.
 - Add relative-pointer and pointer-constraints for games, CAD, and captured
   mouse workflows, with an explicit XR mapping and escape mechanism.
-- Do not drop button/key transitions. The bounded XR input channel uses ignored
-  `try_send` results, so a lost release can leave a button held. Coalesce motion,
-  preserve transitions, and clear state on tracking/session/focus loss.
+- Verify transition latency, best-effort drops, and reliable backlog growth
+  during prolonged compositor stalls on the headset. Protocol tests cover
+  admission limits and transition ordering, not end-to-end interaction timing.
 - Touch, tablet, and gestures are optional backend-specific follow-ups, not
   prerequisites for ordinary keyboard/mouse applications.
 
-### Frame Pacing, Presentation, And GPU Synchronization
+### Presentation Feedback, Damage Tracking, And GPU Synchronization
 
-Frame callbacks complete immediately after panel capture, before XR presentation.
+Capture completion still does not establish actual XR presentation.
 Every capture allocates a fresh linear image and waits for GLES on the CPU;
-Vulkan copies also use blocking completion. There is no presentation-time global.
+Vulkan copies every mapped panel each rendered frame and uses blocking
+completion. There is no presentation-time global.
 
-- Schedule redraw/callback delivery against XR cadence and visibility, rather
-  than letting commit rate determine animation pace and allocation pressure.
+- Refine per-panel visibility/occlusion scheduling and verify callback timing
+  under load. Current pacing follows renderable XR ticks, not individual
+  window visibility or confirmed presentation.
 - Add `wp_presentation` with truthful presented/discarded feedback tied to what
   the XR runtime can actually report. A captured or coalesced-away frame must
   not be reported as displayed.
@@ -212,13 +197,14 @@ responsibilities, not implementations of the Wayland server itself.
 
 ## Verification Needed
 
-The existing [src/compositor_tests.rs](src/compositor_tests.rs) covers a small
-synthetic client and selected XWayland/GPU paths. It does not establish broad
+The existing [compositor tests](tests/compositor/mod.rs) cover a small
+synthetic client and selected XWayland/GPU paths. They do not establish broad
 toolkit compatibility. Add focused regression cases alongside each fix and a
 repeatable real-app matrix:
 
-- GTK and Qt: typing, clipboard, menus/submenus, tooltips, file dialogs, modal
-  dialogs, resize, fullscreen, scaling, and close/reopen.
+- GTK and Qt: typing, clipboard, context menus/submenus, combo boxes, tooltips,
+  nested keyboard navigation, file dialogs, modal dialogs, resize, fullscreen,
+  scaling, and close/reopen.
 - Firefox and Chromium/Electron: text input/IME, context menus, clipboard/DND,
   accelerated rendering, video, downloads/dialogs, and portal screen sharing.
 - SDL/native games: key transitions, relative pointer/constraints, fullscreen,
@@ -227,11 +213,15 @@ repeatable real-app matrix:
 - Protocol clients: nested popups, subsurface input/commit semantics, region
   hit-testing, transforms/viewports, invalid serials, client disconnects, and
   buffer lifetime/synchronization.
+- Pointer drags: verify implicit-grab coordinates across differently placed
+  panels, shadows, transforms, and scaled clients with real applications.
+- Physical keyboards: verify repeat, Compose, layouts, shortcuts, and full
+  text-entry workflows with real toolkits/devices, beyond protocol key events.
 - Hardware/headset: verify both pixels and interaction on the actual XR display,
   test channel saturation/tracking loss, and exceed the visible layer budget.
 
-Suggested order: keyboard -> popup composition and surface hit-testing ->
-clipboard/DND -> window-management policy and X11 transients -> viewport/scaling
--> reliable input and pacing -> explicit sync -> IME and portal integration.
+Suggested next order: real-toolkit menu/input verification -> X11 clipboard/DND ->
+window-management policy and X11 semantics -> viewport/scaling -> input discovery
+and pacing -> explicit sync -> IME and portal integration.
 The broader matrix, rather than protocol count alone, should determine when
 "almost all apps" is an accurate description.

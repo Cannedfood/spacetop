@@ -1,4 +1,4 @@
-use std::{ffi::OsString, process::Stdio};
+use std::process::Stdio;
 
 use smithay::{
     backend::input::KeyState,
@@ -24,9 +24,16 @@ use smithay::{
 
 use crate::{Compositor, ToplevelPanel, bridge::PanelUpdate, panel::PanelPose};
 
+pub struct X11Popup {
+    pub window: X11Surface,
+    pub surface: WlSurface,
+    pub parent: u32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum PanelSurface {
     Wayland(ToplevelSurface),
+    Popup(WlSurface),
     X11 {
         window: X11Surface,
         surface: WlSurface,
@@ -37,6 +44,7 @@ impl PanelSurface {
     pub fn wl_surface(&self) -> &WlSurface {
         match self {
             Self::Wayland(surface) => surface.wl_surface(),
+            Self::Popup(surface) => surface,
             Self::X11 { surface, .. } => surface,
         }
     }
@@ -57,7 +65,7 @@ impl PanelSurface {
             Self::X11 { window, .. } if !window.is_override_redirect() => {
                 window.set_activated(activated)?;
             }
-            Self::X11 { .. } => {}
+            Self::X11 { .. } | Self::Popup(_) => {}
         }
         Ok(())
     }
@@ -67,6 +75,7 @@ impl IsAlive for PanelSurface {
     fn alive(&self) -> bool {
         match self {
             Self::Wayland(surface) => surface.alive(),
+            Self::Popup(surface) => surface.alive(),
             Self::X11 { window, .. } => window.alive(),
         }
     }
@@ -75,6 +84,18 @@ impl IsAlive for PanelSurface {
 impl smithay::wayland::seat::WaylandFocus for PanelSurface {
     fn wl_surface(&self) -> Option<std::borrow::Cow<'_, WlSurface>> {
         Some(std::borrow::Cow::Borrowed(self.wl_surface()))
+    }
+}
+
+impl From<smithay::desktop::PopupKind> for PanelSurface {
+    fn from(popup: smithay::desktop::PopupKind) -> Self {
+        Self::Popup(popup.wl_surface().clone())
+    }
+}
+
+impl From<PanelSurface> for WlSurface {
+    fn from(surface: PanelSurface) -> Self {
+        surface.wl_surface().clone()
     }
 }
 
@@ -91,6 +112,7 @@ impl KeyboardTarget<Compositor> for PanelSurface {
                 KeyboardTarget::enter(surface.wl_surface(), seat, data, keys, serial)
             }
             Self::X11 { window, .. } => KeyboardTarget::enter(window, seat, data, keys, serial),
+            Self::Popup(surface) => KeyboardTarget::enter(surface, seat, data, keys, serial),
         }
     }
 
@@ -100,6 +122,7 @@ impl KeyboardTarget<Compositor> for PanelSurface {
                 KeyboardTarget::leave(surface.wl_surface(), seat, data, serial)
             }
             Self::X11 { window, .. } => KeyboardTarget::leave(window, seat, data, serial),
+            Self::Popup(surface) => KeyboardTarget::leave(surface, seat, data, serial),
         }
     }
 
@@ -119,6 +142,9 @@ impl KeyboardTarget<Compositor> for PanelSurface {
             Self::X11 { window, .. } => {
                 KeyboardTarget::key(window, seat, data, key, state, serial, time)
             }
+            Self::Popup(surface) => {
+                KeyboardTarget::key(surface, seat, data, key, state, serial, time)
+            }
         }
     }
 
@@ -136,6 +162,9 @@ impl KeyboardTarget<Compositor> for PanelSurface {
             Self::X11 { window, .. } => {
                 KeyboardTarget::modifiers(window, seat, data, modifiers, serial)
             }
+            Self::Popup(surface) => {
+                KeyboardTarget::modifiers(surface, seat, data, modifiers, serial)
+            }
         }
     }
 }
@@ -143,8 +172,6 @@ impl KeyboardTarget<Compositor> for PanelSurface {
 pub fn start(
     display: &DisplayHandle,
     handle: LoopHandle<'static, Compositor>,
-    wayland_display: OsString,
-    app: Option<String>,
 ) -> anyhow::Result<Option<u32>> {
     let (xwayland, client) = match XWayland::spawn(
         display,
@@ -180,9 +207,7 @@ pub fn start(
                 }
                 let display = format!(":{display_number}");
                 eprintln!("X11 display: {display}");
-                if let Some(app) = &app
-                    && let Err(error) = crate::spawn_app(app, &wayland_display, Some(&display))
-                {
+                if let Err(error) = compositor.notify_ready(Some(display)) {
                     compositor.fatal_error = Some(error);
                 }
             }
@@ -196,6 +221,46 @@ pub fn start(
 
 impl Compositor {
     fn add_x11_panel(&mut self, window: X11Surface, surface: WlSurface) {
+        if window.is_override_redirect() {
+            let explicit_parent = window.is_transient_for().map(|parent| {
+                self.x11_popups
+                    .iter()
+                    .find(|popup| popup.window.window_id() == parent)
+                    .map(|popup| popup.parent)
+                    .unwrap_or(parent)
+            });
+            let parent = explicit_parent.and_then(|parent| self.panels.iter().find(|panel|
+                matches!(&panel.surface, PanelSurface::X11 { window, .. } if window.window_id() == parent)))
+                .or_else(|| self.panels.iter().find(|panel| Some(panel.id) == self.active_panel
+                    && matches!(panel.surface, PanelSurface::X11 { .. })))
+                .or_else(|| self.panels.iter().find(|panel| match &panel.surface {
+                    PanelSurface::X11 { window: parent, .. } => parent.geometry().overlaps(window.geometry()),
+                    _ => false,
+                }));
+            if let Some(parent) = parent {
+                let PanelSurface::X11 {
+                    window: parent_window,
+                    ..
+                } = &parent.surface
+                else {
+                    unreachable!()
+                };
+                let parent_id = parent_window.window_id();
+                let root = parent.surface.wl_surface().clone();
+                if self.x11_popups.iter().all(|popup| popup.surface != surface) {
+                    self.output.enter(&surface);
+                    self.x11_popups.push(X11Popup {
+                        window,
+                        surface,
+                        parent: parent_id,
+                    });
+                }
+                if let Some(index) = self.update_panel_from_commit(&root) {
+                    self.invalidate_panel(index);
+                }
+                return;
+            }
+        }
         if self
             .panels
             .iter()
@@ -216,16 +281,38 @@ impl Compositor {
             pose,
             geometry: None,
             id: self.next_panel_id,
+            bounds: Rectangle::default(),
         });
         self.next_panel_id = self.next_panel_id.saturating_add(1);
-        if let Some(index) = self.update_panel_from_commit(&surface)
-            && let Err(error) = self.capture_panel(index)
-        {
-            self.fatal_error = Some(error);
+        if let Some(index) = self.update_panel_from_commit(&surface) {
+            self.invalidate_panel(index);
         }
     }
 
     fn remove_x11_panel(&mut self, window: &X11Surface) {
+        if let Some(index) = self
+            .x11_popups
+            .iter()
+            .position(|popup| popup.window.window_id() == window.window_id())
+        {
+            let popup = self.x11_popups.remove(index);
+            let root = self
+                .panels
+                .iter()
+                .find(|panel| {
+                    matches!(&panel.surface,
+                PanelSurface::X11 { window, .. } if window.window_id() == popup.parent)
+                })
+                .map(|panel| panel.surface.wl_surface().clone());
+            if let Some(root) = root
+                && let Some(index) = self.update_panel_from_commit(&root)
+            {
+                self.invalidate_panel(index);
+            }
+            return;
+        }
+        self.x11_popups
+            .retain(|popup| popup.parent != window.window_id());
         self.panels.retain(|panel| {
             let remove = matches!(&panel.surface, PanelSurface::X11 { window: candidate, .. }
                 if candidate.xwm_id() == window.xwm_id() && candidate.window_id() == window.window_id());
@@ -318,10 +405,16 @@ impl XwmHandler for Compositor {
     fn configure_notify(
         &mut self,
         _xwm: XwmId,
-        _window: X11Surface,
+        window: X11Surface,
         _geometry: Rectangle<i32, Logical>,
         _above: Option<u32>,
     ) {
+        if let Some(surface) = window.wl_surface() {
+            let root = self.root_surface(&surface);
+            if let Some(index) = self.update_panel_from_commit(&root) {
+                self.invalidate_panel(index);
+            }
+        }
     }
     fn resize_request(
         &mut self,

@@ -13,9 +13,10 @@ resolver = "3"
 anyhow = "1"
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
 calloop = "0.14"
+evdev = "0.13"
 glam = "0.33"
 openxr = { version = "0.22", default-features = false, features = ["loaded"] }
-smithay = { version = "0.7.0", default-features = false, features = ["wayland_frontend", "renderer_gl", "backend_gbm", "backend_gbm_has_create_with_modifiers2", "backend_gbm_has_fd_for_plane", "xwayland"] }
+smithay = { version = "0.7.0", default-features = false, features = ["desktop", "wayland_frontend", "renderer_gl", "backend_gbm", "backend_gbm_has_create_with_modifiers2", "backend_gbm_has_fd_for_plane", "xwayland"] }
 
 [dev-dependencies]
 tempfile = "3"
