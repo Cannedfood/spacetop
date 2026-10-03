@@ -515,6 +515,27 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     assert_eq!(pixel(&pixels, 200, 300), [0, 0, 255, 255]);
     assert_eq!(pixel(&pixels, 300, 300), [255, 255, 255, 255]);
     assert_eq!(pixel(&pixels, 30, 30), [0, 0, 0, 255]);
+    let mut padded_window_config = window_test_config.clone();
+    padded_window_config.window.padding_px = 12.0;
+    scene.update_config(&padded_window_config)?;
+    let padded_window_pixels = vulkan.readback_image(
+        None,
+        (512, 512).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &mut scene,
+            view: &view,
+            skybox: Some(&mut skybox),
+            panels: &panels,
+            cursor: Some(cursor),
+            floor_y: FALLBACK_FLOOR_Y,
+        }),
+    )?;
+    assert_eq!(
+        pixels, padded_window_pixels,
+        "padding must expand around content without changing its physical size"
+    );
+    scene.update_config(&window_test_config)?;
     let single_panel_reference = vulkan.readback_image(
         None,
         (512, 512).into(),
@@ -620,9 +641,14 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     padded_config.window.padding_px = 12.0;
     scene.update_config(&padded_config)?;
     let padded_lit = floor_pixels(&mut scene, &mut skybox, &[(&background, emitter)])?;
-    assert!(
-        reflection_pixel_count(&padded_lit) < full_content_reflections,
-        "reflection rays should ignore panel padding"
+    assert_eq!(
+        reflection_pixel_count(&padded_lit),
+        full_content_reflections,
+        "padding must not shrink or occlude reflected content"
+    );
+    assert_eq!(
+        lit, padded_lit,
+        "padding must not alter content reflections"
     );
     scene.update_config(&window_test_config)?;
     let mut brighter_sky_config = window_test_config.clone();

@@ -6,18 +6,8 @@ use std::{io::Write, os::fd::AsFd};
 use wayland_client::protocol::wl_shm;
 
 #[test]
-fn pointer_coordinates_match_padded_window_content() {
+fn pointer_coordinates_match_logical_content_pixels() {
     let mut app = super::fixture::WaylandApp::new(None);
-    let panel_id = app.compositor.panels[0].id;
-    let pose = app.compositor.panels[0].geometry.unwrap().pose;
-    app.compositor
-        .handle_xr_input(crate::XrInput::MovePanel { panel_id, pose });
-    app.compositor
-        .handle_xr_input(crate::XrInput::ConfigReloaded {
-            default_window_distance: app.compositor.default_window_distance,
-            window_pixels_per_degree: app.compositor.window_pixels_per_degree,
-            window_padding_px: 12.0,
-        });
     let geometry = app.compositor.panels[0].geometry.unwrap();
     let ray_for_point = |x: f32, y: f32| Ray3 {
         origin: geometry.pose.center
@@ -36,10 +26,7 @@ fn pointer_coordinates_match_padded_window_content() {
         (90.0, 40.0),
         (50.0, 25.0),
     ] {
-        assert!(
-            app.compositor
-                .dispatch_ray(ray_for_point(12.0 + x * 0.76, 12.0 + y * 0.52), 1)
-        );
+        assert!(app.compositor.dispatch_ray(ray_for_point(x, y), 1));
         pump(
             &mut app.display,
             &mut app.compositor,
@@ -57,7 +44,7 @@ fn pointer_coordinates_match_padded_window_content() {
             "expected y={y}, got {actual_y}"
         );
     }
-    assert!(!app.compositor.dispatch_ray(ray_for_point(6.0, 25.0), 2));
+    assert!(!app.compositor.dispatch_ray(ray_for_point(-1.0, 25.0), 2));
     assert!(
         app.compositor
             .seat
@@ -66,13 +53,6 @@ fn pointer_coordinates_match_padded_window_content() {
             .current_focus()
             .is_none()
     );
-    app.compositor
-        .handle_xr_input(crate::XrInput::ConfigReloaded {
-            default_window_distance: app.compositor.default_window_distance,
-            window_pixels_per_degree: app.compositor.window_pixels_per_degree,
-            window_padding_px: 0.0,
-        });
-    assert!(app.compositor.panels[0].pose_is_explicit);
     assert!(app.compositor.dispatch_ray(ray_for_point(10.0, 10.0), 3));
     pump(
         &mut app.display,

@@ -668,9 +668,7 @@ pub fn run(
                                 let window_config_changed = next_config.window.default_distance_m
                                     != config.window.default_distance_m
                                     || next_config.window.pixels_per_degree
-                                        != config.window.pixels_per_degree
-                                    || next_config.window.effective_padding_px()
-                                        != config.window.effective_padding_px();
+                                        != config.window.pixels_per_degree;
                                 if window_config_changed
                                     && let Err(error) = input.send(XrInput::ConfigReloaded {
                                         default_window_distance: next_config
@@ -679,9 +677,6 @@ pub fn run(
                                         window_pixels_per_degree: next_config
                                             .window
                                             .pixels_per_degree,
-                                        window_padding_px: next_config
-                                            .window
-                                            .effective_padding_px(),
                                     })
                                 {
                                     eprintln!(
@@ -916,6 +911,7 @@ pub fn run(
                     ray: cursor_ray.expect("ray assigned above"),
                     time_ms,
                 });
+                let resize_reach_px = config.window.grab_reach_px();
                 let nearest_proximity = cursor_ray.and_then(|ray| {
                     panel_frames
                         .iter()
@@ -927,8 +923,11 @@ pub fn run(
                                 (-hit.surface_px.x).max(hit.surface_px.x - width).max(0.0);
                             let outside_y =
                                 (-hit.surface_px.y).max(hit.surface_px.y - height).max(0.0);
-                            (outside_x.hypot(outside_y) <= config.window.cursor_proximity_radius_px)
-                                .then_some((*id, hit))
+                            let within_grab_reach =
+                                outside_x <= resize_reach_px && outside_y <= resize_reach_px;
+                            let within_cursor_proximity = outside_x.hypot(outside_y)
+                                <= config.window.cursor_proximity_radius_px;
+                            (within_grab_reach || within_cursor_proximity).then_some((*id, hit))
                         })
                         .min_by(|(_, first), (_, second)| {
                             first.distance_m.total_cmp(&second.distance_m)
@@ -967,7 +966,7 @@ pub fn run(
                                         .geometry
                                         .intersect_with_margin_px(
                                             ray,
-                                            config.window.effective_margin_px(),
+                                            config.window.grab_reach_px(),
                                         )
                                         .map(|hit| (*id, hit))
                                 })
@@ -1009,15 +1008,17 @@ pub fn run(
                     && let Some(panel_id) = hovered_panel
                     && let Some(panel) = panel_frames.get(&panel_id)
                     && let Some(ray) = cursor_ray
-                    && let Some(hit) = panel.geometry.intersect_with_margin(ray, 0.04)
+                    && let Some(hit) = panel
+                        .geometry
+                        .intersect_with_margin_px(ray, resize_reach_px)
                 {
                     let width = panel.geometry.logical_size.w as f32;
                     let height = panel.geometry.logical_size.h as f32;
                     resize_edges = [
-                        hit.surface_px.x <= width * 0.04,
-                        hit.surface_px.x >= width * 0.96,
-                        hit.surface_px.y <= height * 0.04,
-                        hit.surface_px.y >= height * 0.96,
+                        hit.surface_px.x <= resize_reach_px,
+                        hit.surface_px.x >= width - resize_reach_px,
+                        hit.surface_px.y <= resize_reach_px,
+                        hit.surface_px.y >= height - resize_reach_px,
                     ];
                     if resize_edges.into_iter().any(|edge| edge) {
                         resizing_panel = Some(panel_id);

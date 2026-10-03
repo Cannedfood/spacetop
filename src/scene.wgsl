@@ -26,7 +26,6 @@ struct Window {
     center_width: vec4<f32>,
     right_height: vec4<f32>,
     up: vec4<f32>,
-    content_rect: vec4<f32>,
 }
 struct WindowBuffer {
     count: u32,
@@ -148,10 +147,7 @@ fn largest_border_width() -> f32 {
     }
     if outer_distance > border_width * 0.5 { discard; }
 
-    let padding = min(
-        max(floor_material.window_style.x, largest_border * 0.5),
-        (min(size.x, size.y) - 1.0) * 0.5,
-    );
+    let padding = max(floor_material.window_style.x, largest_border * 0.5);
     let content_size = max(size - vec2(2.0 * padding), vec2(1.0));
     let content_point = point - vec2(padding);
     let content_radius = max(radius - padding, 0.0);
@@ -217,11 +213,7 @@ fn nearest_window_hit(origin: vec3<f32>, ray: vec3<f32>, minimum_distance: f32) 
         let hit = origin + ray * distance - center;
         let uv = vec2(dot(hit, right) / width + 0.5, 0.5 - dot(hit, up) / height);
         if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) { continue; }
-        let content_min = window.content_rect.xy;
-        let content_max = window.content_rect.zw;
-        if any(uv < content_min) || any(uv > content_max) { continue; }
-        let content_uv = (uv - content_min) / (content_max - content_min);
-        nearest = WindowHit(distance, index, content_uv, true);
+        nearest = WindowHit(distance, index, uv, true);
     }
     return nearest;
 }

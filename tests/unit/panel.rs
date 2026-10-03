@@ -48,31 +48,17 @@ fn pixel_grab_margin_accepts_hits_just_outside_panel_bounds() {
 }
 
 #[test]
-fn padded_content_coordinates_match_displayed_corners_and_center() {
+fn pixel_intersection_margins_are_uniform_across_rectangular_axes() {
     let geometry = panel();
-    for (point, expected) in [
-        ((12.0, 12.0), (0.0, 0.0)),
-        ((988.0, 12.0), (1000.0, 0.0)),
-        ((12.0, 488.0), (0.0, 500.0)),
-        ((988.0, 488.0), (1000.0, 500.0)),
-        ((500.0, 250.0), (500.0, 250.0)),
-    ] {
-        let actual = geometry.content_coordinates(point.into(), 12.0).unwrap();
-        assert!((actual - Vec2::from(expected)).length() < 0.001);
+    for origin in [Vec3::new(-0.505, 0.0, -2.0), Vec3::new(0.0, 0.2525, -2.0)] {
+        let ray = Ray3 {
+            origin,
+            direction: Vec3::NEG_Z,
+        };
+        let hit = geometry.intersect_with_margin_px(ray, 6.0).unwrap();
+        assert!(hit.surface_px.x >= -6.0 && hit.surface_px.y >= -6.0);
+        assert!(geometry.intersect_with_margin_px(ray, 2.0).is_none());
     }
-    for point in [(11.0, 250.0), (989.0, 250.0), (500.0, 11.0), (500.0, 489.0)] {
-        assert!(geometry.content_coordinates(point.into(), 12.0).is_none());
-    }
-    let point = Vec2::new(750.0, 100.0);
-    assert_eq!(geometry.content_coordinates(point, 0.0), Some(point));
-    let tiny = PanelGeometry {
-        logical_size: (10, 5).into(),
-        ..geometry
-    };
-    assert_eq!(
-        tiny.content_coordinates(Vec2::new(5.0, 2.5), 12.0),
-        Some(Vec2::new(5.0, 2.5))
-    );
 }
 
 #[test]

@@ -279,18 +279,13 @@ pub struct PanelHit {
     pub distance_m: f32,
 }
 
-impl PanelGeometry {
-    pub fn content_coordinates(self, point: Vec2, padding_px: f32) -> Option<Vec2> {
-        let size = Vec2::new(self.logical_size.w as f32, self.logical_size.h as f32);
-        let padding = padding_px.min((size.min_element() - 1.0) * 0.5);
-        let content_size = (size - Vec2::splat(2.0 * padding)).max(Vec2::ONE);
-        let content_point = point - Vec2::splat(padding);
-        if content_point.min_element() < 0.0 || content_point.cmpgt(content_size).any() {
-            return None;
-        }
-        Some(content_point / content_size * size)
-    }
+#[derive(Clone, Copy)]
+struct PixelMargin {
+    horizontal_px: f32,
+    vertical_px: f32,
+}
 
+impl PanelGeometry {
     pub fn resized_pose_from_edges(
         self,
         new_size: Size<i32, smithay::utils::Logical>,
@@ -389,23 +384,33 @@ impl PanelGeometry {
 
     /// Intersect the panel and its resize grab margin, measured as a fraction of its size.
     pub fn intersect_with_margin(&self, ray: Ray3, margin: f32) -> Option<PanelHit> {
-        self.intersect_at(ray, Some(Vec2::splat(margin)))
+        let margin = margin.max(0.0);
+        self.intersect_at(
+            ray,
+            Some(PixelMargin {
+                horizontal_px: self.logical_size.w as f32 * margin,
+                vertical_px: self.logical_size.h as f32 * margin,
+            }),
+        )
     }
 
     /// Intersect the panel and its grab margin, measured in logical pixels.
     pub fn intersect_with_margin_px(&self, ray: Ray3, margin_px: f32) -> Option<PanelHit> {
-        let size = Vec2::new(self.logical_size.w as f32, self.logical_size.h as f32);
-        if size.min_element() <= 0.0 {
-            return None;
-        }
-        self.intersect_at(ray, Some(Vec2::splat(margin_px) / size))
+        let margin_px = margin_px.max(0.0);
+        self.intersect_at(
+            ray,
+            Some(PixelMargin {
+                horizontal_px: margin_px,
+                vertical_px: margin_px,
+            }),
+        )
     }
 
     pub fn intersect_unbounded(&self, ray: Ray3) -> Option<PanelHit> {
         self.intersect_at(ray, None)
     }
 
-    fn intersect_at(&self, ray: Ray3, margin: Option<Vec2>) -> Option<PanelHit> {
+    fn intersect_at(&self, ray: Ray3, margin: Option<PixelMargin>) -> Option<PanelHit> {
         let pixel_width = self.logical_size.w;
         let pixel_height = self.logical_size.h;
         let physical_width = self.pose.width_m;
@@ -439,15 +444,19 @@ impl PanelGeometry {
         let local_y = local.y;
         let u = local_x / physical_width + 0.5;
         let v = 0.5 - local_y / physical_height;
+        let surface_px = Vec2::new(u * pixel_width as f32, v * pixel_height as f32);
         if let Some(margin) = margin
-            && (u < -margin.x || u > 1.0 + margin.x || v < -margin.y || v > 1.0 + margin.y)
+            && (surface_px.x < -margin.horizontal_px
+                || surface_px.x > pixel_width as f32 + margin.horizontal_px
+                || surface_px.y < -margin.vertical_px
+                || surface_px.y > pixel_height as f32 + margin.vertical_px)
         {
             return None;
         }
 
         Some(PanelHit {
             uv: [u, v],
-            surface_px: Vec2::new(u * pixel_width as f32, v * pixel_height as f32),
+            surface_px,
             distance_m: distance,
         })
     }

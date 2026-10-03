@@ -113,7 +113,6 @@ struct Compositor {
     panel_limits: panel::PanelLimits,
     default_window_distance: f32,
     window_pixels_per_degree: f32,
-    window_padding_px: f32,
     active_panel: Option<u64>,
     fatal_error: Option<anyhow::Error>,
     started_at: Instant,
@@ -275,7 +274,6 @@ impl Compositor {
             XrInput::ConfigReloaded {
                 default_window_distance,
                 window_pixels_per_degree,
-                window_padding_px,
             } => {
                 if self.default_window_distance != default_window_distance
                     || self.window_pixels_per_degree != window_pixels_per_degree
@@ -286,7 +284,6 @@ impl Compositor {
                 }
                 self.default_window_distance = default_window_distance;
                 self.window_pixels_per_degree = window_pixels_per_degree;
-                self.window_padding_px = window_padding_px;
                 self.refresh_panels();
                 Ok(())
             }
@@ -305,13 +302,7 @@ impl Compositor {
 
     #[cfg(test)]
     fn new(display_handle: DisplayHandle, frame_sender: bridge::PanelSender) -> Self {
-        Self::with_window_settings(
-            display_handle,
-            frame_sender,
-            config::DEFAULT_DISTANCE,
-            32.0,
-            0.0,
-        )
+        Self::with_window_settings(display_handle, frame_sender, config::DEFAULT_DISTANCE, 32.0)
     }
 
     fn with_window_settings(
@@ -319,7 +310,6 @@ impl Compositor {
         frame_sender: bridge::PanelSender,
         default_window_distance: f32,
         window_pixels_per_degree: f32,
-        window_padding_px: f32,
     ) -> Self {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
@@ -372,7 +362,6 @@ impl Compositor {
             panel_limits: panel::PanelLimits::default(),
             default_window_distance,
             window_pixels_per_degree,
-            window_padding_px,
             active_panel: None,
             fatal_error: None,
             started_at: Instant::now(),
@@ -680,9 +669,7 @@ impl Compositor {
             .filter_map(|panel| {
                 let geometry = panel.geometry?;
                 let hit = geometry.intersect(ray)?;
-                let content_point =
-                    geometry.content_coordinates(hit.surface_px, self.window_padding_px)?;
-                let point = Point::from((content_point.x as f64, content_point.y as f64))
+                let point = Point::from((hit.surface_px.x as f64, hit.surface_px.y as f64))
                     + panel.bounds.loc.to_f64();
                 let index = self
                     .panels

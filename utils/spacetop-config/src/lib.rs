@@ -100,6 +100,10 @@ impl WindowConfig {
     pub fn effective_margin_px(&self) -> f32 {
         self.margin_px.max(self.max_border_width_px() * 0.5)
     }
+
+    pub fn grab_reach_px(&self) -> f32 {
+        self.effective_padding_px() + self.effective_margin_px()
+    }
 }
 
 impl Default for BackgroundConfig {
@@ -518,10 +522,12 @@ mod tests {
 
         assert_eq!(config.window.effective_padding_px(), 5.0);
         assert_eq!(config.window.effective_margin_px(), 5.0);
+        assert_eq!(config.window.grab_reach_px(), 10.0);
 
         config.window.padding_px = 7.0;
         config.window.margin_px = 9.0;
         assert_eq!(config.window.effective_padding_px(), 7.0);
         assert_eq!(config.window.effective_margin_px(), 9.0);
+        assert_eq!(config.window.grab_reach_px(), 16.0);
     }
 }

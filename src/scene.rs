@@ -123,10 +123,11 @@ fn model(geometry: PanelGeometry) -> Mat4 {
     )
 }
 
-fn expanded_window_model(geometry: PanelGeometry, border_width_px: f32) -> Mat4 {
+fn expanded_window_model(geometry: PanelGeometry, padding_px: f32, border_width_px: f32) -> Mat4 {
     let pixels_per_meter = geometry.logical_size.w as f32 / geometry.pose.width_m;
-    let width_m = (geometry.logical_size.w as f32 + border_width_px) / pixels_per_meter;
-    let height_m = (geometry.logical_size.h as f32 + border_width_px) / pixels_per_meter;
+    let expansion_px = padding_px * 2.0 + border_width_px;
+    let width_m = (geometry.logical_size.w as f32 + expansion_px) / pixels_per_meter;
+    let height_m = (geometry.logical_size.h as f32 + expansion_px) / pixels_per_meter;
     Mat4::from_scale_rotation_translation(
         Vec3::new(width_m, height_m, 1.0),
         geometry.pose.orientation(),
@@ -739,7 +740,6 @@ struct WindowGpuData {
     center_width: [f32; 4],
     right_height: [f32; 4],
     up: [f32; 4],
-    content_rect: [f32; 4],
 }
 
 #[repr(C, align(16))]
@@ -1197,23 +1197,10 @@ impl SceneRenderer {
                 let up = pose.orientation() * Vec3::Y;
                 let height =
                     pose.width_m * geometry.logical_size.h as f32 / geometry.logical_size.w as f32;
-                let size = [
-                    geometry.logical_size.w.max(1) as f32,
-                    geometry.logical_size.h.max(1) as f32,
-                ];
-                let padding = self
-                    .window_padding_px
-                    .min((size[0].min(size[1]) - 1.0).max(0.0) * 0.5);
                 WindowGpuData {
                     center_width: [pose.center.x, pose.center.y, pose.center.z, pose.width_m],
                     right_height: [right.x, right.y, right.z, height],
                     up: [up.x, up.y, up.z, 0.0],
-                    content_rect: [
-                        padding / size[0],
-                        padding / size[1],
-                        1.0 - padding / size[0],
-                        1.0 - padding / size[1],
-                    ],
                 }
             })
             .collect::<Vec<_>>();
@@ -1541,8 +1528,14 @@ impl SceneRenderer {
                 let close_hit = frame
                     .cursor_close_panel
                     .filter(|(close_geometry, _)| *close_geometry == geometry);
-                let cursor_position =
-                    close_hit.map_or([0.0; 4], |(_, position)| [position.x, position.y, 0.0, 0.0]);
+                let cursor_position = close_hit.map_or([0.0; 4], |(_, position)| {
+                    [
+                        position.x + self.window_padding_px,
+                        position.y + self.window_padding_px,
+                        0.0,
+                        0.0,
+                    ]
+                });
                 let cursor_position_bytes =
                     std::slice::from_raw_parts(cursor_position.as_ptr().cast::<u8>(), 16);
                 self.device.cmd_push_constants(
@@ -1552,8 +1545,12 @@ impl SceneRenderer {
                     64,
                     cursor_position_bytes,
                 );
-                eye[0] = geometry.logical_size.w as f32 + self.max_border_width_px;
-                eye[1] = geometry.logical_size.h as f32 + self.max_border_width_px;
+                eye[0] = geometry.logical_size.w as f32
+                    + self.window_padding_px * 2.0
+                    + self.max_border_width_px;
+                eye[1] = geometry.logical_size.h as f32
+                    + self.window_padding_px * 2.0
+                    + self.max_border_width_px;
                 eye[2] = if frame.grabbed_panel == Some(geometry) {
                     1.0
                 } else {
@@ -1578,7 +1575,12 @@ impl SceneRenderer {
                 );
                 self.draw_panel(
                     command,
-                    projection * expanded_window_model(geometry, self.max_border_width_px),
+                    projection
+                        * expanded_window_model(
+                            geometry,
+                            self.window_padding_px,
+                            self.max_border_width_px,
+                        ),
                 );
             }
             if let Some(mut pose) = frame.cursor {
@@ -1783,7 +1785,7 @@ mod tests {
             },
             logical_size: (200, 100).into(),
         };
-        let expanded = expanded_window_model(geometry, 4.0);
+        let expanded = expanded_window_model(geometry, 10.0, 4.0);
         let center = expanded.transform_point3(Vec3::ZERO);
         let left = expanded.transform_point3(Vec3::new(-0.5, 0.0, 0.0));
         let right = expanded.transform_point3(Vec3::new(0.5, 0.0, 0.0));
@@ -1791,6 +1793,6 @@ mod tests {
         assert!(
             (geometry.pose.center.x - left.x - (right.x - geometry.pose.center.x)).abs() < 1.0e-5
         );
-        assert!((right.x - left.x - 2.04).abs() < 1.0e-5);
+        assert!((right.x - left.x - 2.24).abs() < 1.0e-5);
     }
 }
