@@ -10,7 +10,7 @@ use std::{
 use crate::bridge::{PanelReceiver, PanelUpdate, XrInput};
 use crate::config::{AppConfig, ConfigWatcher};
 use crate::gpu::{self, SharedImage};
-use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3};
+use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3, dodge_windows};
 use crate::scene::{PanelTexture, RenderTarget, SceneFrame, SceneRenderer, SkyboxTexture};
 use anyhow::{Context, Result, ensure};
 use ash::{
@@ -23,6 +23,8 @@ use smithay::backend::allocator::Buffer;
 struct XrPanel {
     texture: PanelTexture,
     geometry: PanelGeometry,
+    saved_pose: PanelPose,
+    temporary_pose: PanelPose,
 }
 
 struct XrEye {
@@ -74,6 +76,58 @@ impl XrEye {
 }
 
 type PanelImages = std::collections::BTreeMap<u64, XrPanel>;
+
+fn update_dodge_targets(
+    panels: &mut PanelImages,
+    fixed_windows: &[u64],
+    player: glam::Vec3,
+    margin_m: f32,
+) {
+    let geometries: Vec<_> = panels
+        .iter()
+        .map(|(id, panel)| {
+            let pose = if fixed_windows.contains(id) {
+                panel.geometry.pose
+            } else {
+                panel.saved_pose
+            };
+            (
+                *id,
+                PanelGeometry {
+                    pose,
+                    ..panel.geometry
+                },
+            )
+        })
+        .collect();
+    let targets = dodge_windows(&geometries, fixed_windows, player, margin_m);
+    for (id, panel) in panels {
+        if let Some(pose) = targets.get(id) {
+            panel.temporary_pose = *pose;
+        }
+    }
+}
+
+fn save_dodge_targets(panels: &mut PanelImages, input: &crate::bridge::InputSender) -> Result<()> {
+    for (panel_id, panel) in panels {
+        panel.saved_pose = panel.temporary_pose;
+        input.send(XrInput::MovePanel {
+            panel_id: *panel_id,
+            pose: panel.saved_pose,
+        })?;
+    }
+    Ok(())
+}
+
+fn smooth_pose(current: PanelPose, target: PanelPose, factor: f32) -> PanelPose {
+    let angle_delta = |from: f32, to: f32| PanelPose::wrap_angle(to - from);
+    PanelPose {
+        center: current.center.lerp(target.center, factor),
+        yaw: current.yaw + angle_delta(current.yaw, target.yaw) * factor,
+        pitch: current.pitch + (target.pitch - current.pitch) * factor,
+        width_m: current.width_m + (target.width_m - current.width_m) * factor,
+    }
+}
 
 impl Drop for XrEye {
     fn drop(&mut self) {
@@ -477,8 +531,9 @@ pub fn run(
     let mut running = false;
     let mut exit = false;
     let mut panel_frames = PanelImages::new();
+    let mut pending_spawn = std::collections::BTreeSet::new();
     let mut cursor_ray: Option<Ray3> = None;
-    let mut cursor_sphere_radius = config.cursor.default_distance_m;
+    let mut cursor_sphere_radius = config.window.default_distance_m;
     let mut pointer_tracked = false;
     let mut trigger_pressed = false;
     let mut secondary_pressed = false;
@@ -526,7 +581,7 @@ pub fn run(
                                 if stage_space.is_none() || !stage_floor_calibrated {
                                     floor_y = next_config.floor.height_m;
                                 }
-                                cursor_sphere_radius = next_config.cursor.default_distance_m;
+                                cursor_sphere_radius = next_config.window.default_distance_m;
                                 if grabbed_panel.is_none() {
                                     grab_radius = next_config.window.default_distance_m;
                                     grab_initial_radius = next_config.window.default_distance_m;
@@ -606,6 +661,7 @@ pub fn run(
                 timings.measure("mixed/panel-retire", Duration::ZERO, || {
                     panel_frames.remove(panel_id);
                 });
+                pending_spawn.remove(panel_id);
                 if grabbed_panel == Some(*panel_id) {
                     grabbed_panel = None;
                 }
@@ -635,7 +691,25 @@ pub fn run(
                         PanelTexture::new(&scene, shared)
                     })?;
                     timings.measure("gpu/panel-replace", Duration::ZERO, || {
-                        panel_frames.insert(panel_id, XrPanel { texture, geometry });
+                        if let Some(panel) = panel_frames.get_mut(&panel_id) {
+                            let animated_pose = panel.geometry.pose;
+                            panel.geometry = geometry;
+                            panel.geometry.pose = animated_pose;
+                            panel.saved_pose.width_m = geometry.pose.width_m;
+                            panel.temporary_pose.width_m = geometry.pose.width_m;
+                            panel.texture = texture;
+                        } else {
+                            panel_frames.insert(
+                                panel_id,
+                                XrPanel {
+                                    texture,
+                                    geometry,
+                                    saved_pose: geometry.pose,
+                                    temporary_pose: geometry.pose,
+                                },
+                            );
+                            pending_spawn.insert(panel_id);
+                        }
                     });
                 }
                 PanelUpdate::Removed { .. } => {}
@@ -695,6 +769,29 @@ pub fn run(
                 })
                 .sum::<glam::Vec3>()
                 / views.len() as f32;
+            let orientation = views[0].pose.orientation;
+            let orientation =
+                glam::Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w);
+            let look_direction = orientation * glam::Vec3::NEG_Z;
+            for panel_id in std::mem::take(&mut pending_spawn) {
+                if let Some(panel) = panel_frames.get_mut(&panel_id) {
+                    let mut pose = PanelPose::facing_player(
+                        grab_player_position + look_direction * config.window.default_distance_m,
+                        grab_player_position,
+                    );
+                    pose.width_m = panel.saved_pose.width_m;
+                    panel.saved_pose = pose;
+                    panel.temporary_pose = pose;
+                    panel.geometry.pose = pose;
+                    update_dodge_targets(
+                        &mut panel_frames,
+                        &[panel_id],
+                        grab_player_position,
+                        config.window.collision_margin_m,
+                    );
+                    save_dodge_targets(&mut panel_frames, &input)?;
+                }
+            }
         }
         // Update the action set and forward the right controller's aim ray.
         timings.measure("openxr/sync-actions", Duration::ZERO, || {
@@ -806,7 +903,9 @@ pub fn run(
                                 })
                         });
                     } else {
-                        grabbed_panel = None;
+                        if grabbed_panel.take().is_some() {
+                            save_dodge_targets(&mut panel_frames, &input)?;
+                        }
                     }
                 }
                 if trigger.changed_since_last_sync
@@ -834,8 +933,11 @@ pub fn run(
                     }
                 }
                 if trigger.changed_since_last_sync && !trigger.current_state {
-                    resizing_panel = None;
+                    let was_resizing = resizing_panel.take().is_some();
                     resize_geometry = None;
+                    if was_resizing {
+                        save_dodge_targets(&mut panel_frames, &input)?;
+                    }
                 }
                 if trigger.is_active
                     && trigger.current_state
@@ -870,6 +972,7 @@ pub fn run(
                     );
                     if let Some(panel) = panel_frames.get_mut(&panel_id) {
                         panel.geometry.pose = pose;
+                        panel.geometry.logical_size = new_size;
                     }
                     let _ = input.try_send(XrInput::MovePanel { panel_id, pose });
                     let _ = input.try_send(XrInput::ResizePanel {
@@ -950,14 +1053,17 @@ pub fn run(
             }
         } else {
             cursor_ray = None;
-            grabbed_panel = None;
-            resizing_panel = None;
+            if grabbed_panel.take().is_some() || resizing_panel.take().is_some() {
+                save_dodge_targets(&mut panel_frames, &input)?;
+            }
             resize_geometry = None;
             cursor_close_panel = None;
         }
         if !tracked_this_frame {
             cursor_ray = None;
-            grabbed_panel = None;
+            if grabbed_panel.take().is_some() || resizing_panel.take().is_some() {
+                save_dodge_targets(&mut panel_frames, &input)?;
+            }
             if pointer_tracked {
                 input.send(XrInput::PointerLost {
                     time_ms: (frame_state.predicted_display_time.as_nanos() / 1_000_000) as u32,
@@ -967,6 +1073,32 @@ pub fn run(
             }
         }
         pointer_tracked = tracked_this_frame;
+        let active_panel = grabbed_panel.or(resizing_panel);
+        if let Some(panel_id) = active_panel {
+            update_dodge_targets(
+                &mut panel_frames,
+                &[panel_id],
+                grab_player_position,
+                config.window.collision_margin_m,
+            );
+        }
+        let delta_seconds = (frame_state.predicted_display_period.as_nanos() as f32
+            / 1_000_000_000.0)
+            .clamp(0.0, 0.1);
+        let smoothing = if config.window.animation_half_time_s == 0.0 {
+            1.0
+        } else {
+            1.0 - (-std::f32::consts::LN_2 * delta_seconds / config.window.animation_half_time_s)
+                .exp()
+        };
+        for (panel_id, panel) in &mut panel_frames {
+            if Some(*panel_id) == active_panel {
+                panel.geometry.pose = panel.temporary_pose;
+            } else {
+                panel.geometry.pose =
+                    smooth_pose(panel.geometry.pose, panel.temporary_pose, smoothing);
+            }
+        }
         timings.measure("openxr/begin-frame", period, || frame_stream.begin())?;
         if !frame_state.should_render
             || !view_state.contains(

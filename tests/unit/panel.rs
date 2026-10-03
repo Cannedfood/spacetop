@@ -60,6 +60,44 @@ fn placement_slots_are_unique_and_nonoverlapping() {
 }
 
 #[test]
+fn dodge_windows_moves_overlapping_panels_and_keeps_fixed_pose() {
+    let first = panel();
+    let second = PanelGeometry {
+        pose: first.pose,
+        ..first
+    };
+    let moved = dodge_windows(&[(1, first), (2, second)], &[1], Vec3::ZERO, 0.05);
+
+    assert_eq!(moved[&1], first.pose);
+    assert_ne!(moved[&2].center, second.pose.center);
+    assert!((moved[&2].center.length() - second.pose.center.length()).abs() < 1.0e-5);
+}
+
+#[test]
+fn dodge_windows_separates_multiple_panels_with_margin() {
+    let first = panel();
+    let panels = [(1, first), (2, first), (3, first)];
+    let moved = dodge_windows(&panels, &[], Vec3::ZERO, 0.05);
+    let geometries: Vec<_> = panels
+        .iter()
+        .map(|(id, geometry)| PanelGeometry {
+            pose: moved[id],
+            ..*geometry
+        })
+        .collect();
+
+    for first_index in 0..geometries.len() {
+        for second_index in first_index + 1..geometries.len() {
+            let first_angles = PanelPose::spherical_angles(geometries[first_index].pose.center);
+            let second_angles = PanelPose::spherical_angles(geometries[second_index].pose.center);
+            let yaw_distance = PanelPose::wrap_angle(first_angles.x - second_angles.x).abs() * 2.0;
+            let pitch_distance = (first_angles.y - second_angles.y).abs() * 2.0;
+            assert!(yaw_distance > 0.45 || pitch_distance > 0.45);
+        }
+    }
+}
+
+#[test]
 fn grabbed_panel_stays_on_player_sphere_and_faces_player() {
     let player = Vec3::new(0.0, 1.6, 0.0);
     let center = Vec3::new(0.2, 0.4, -2.0);

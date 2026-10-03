@@ -17,7 +17,6 @@ pub struct AppConfig {
     pub background: BackgroundConfig,
     pub floor: FloorConfig,
     pub window: WindowConfig,
-    pub cursor: DistanceConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -67,16 +66,12 @@ impl Default for FloorConfigFields {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
-pub struct DistanceConfig {
-    pub default_distance_m: f32,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(default)]
 pub struct WindowConfig {
     pub default_distance_m: f32,
     pub pixels_per_degree: f32,
     pub padding_px: f32,
+    pub animation_half_time_s: f32,
+    pub collision_margin_m: f32,
     pub border_width_px: f32,
     pub border_color: [f32; 4],
     pub cursor_proximity_radius_px: f32,
@@ -150,20 +145,14 @@ impl<'de> Deserialize<'de> for FloorConfig {
     }
 }
 
-impl Default for DistanceConfig {
-    fn default() -> Self {
-        Self {
-            default_distance_m: DEFAULT_DISTANCE,
-        }
-    }
-}
-
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             default_distance_m: DEFAULT_DISTANCE,
             pixels_per_degree: 32.0,
             padding_px: 12.0,
+            animation_half_time_s: 0.2,
+            collision_margin_m: 0.04,
             border_width_px: 2.0,
             border_color: [0.58, 0.72, 0.74, 1.0],
             cursor_proximity_radius_px: 32.0,
@@ -258,19 +247,25 @@ impl AppConfig {
                 && (0.001..=0.05).contains(&self.floor.reflection_grain_size_m),
             "floor.reflection_grain_size_m must be between 0.001 and 0.05 meters"
         );
-        for (name, distance) in [
-            ("window.default_distance_m", self.window.default_distance_m),
-            ("cursor.default_distance_m", self.cursor.default_distance_m),
-        ] {
-            ensure!(
-                distance.is_finite() && (0.1..=100.0).contains(&distance),
-                "{name} must be between 0.1 and 100 meters"
-            );
-        }
+        ensure!(
+            self.window.default_distance_m.is_finite()
+                && (0.1..=100.0).contains(&self.window.default_distance_m),
+            "window.default_distance_m must be between 0.1 and 100 meters"
+        );
         ensure!(
             self.window.pixels_per_degree.is_finite()
                 && (1.0..=200.0).contains(&self.window.pixels_per_degree),
             "window.pixels_per_degree must be between 1 and 200"
+        );
+        ensure!(
+            self.window.animation_half_time_s.is_finite()
+                && (0.0..=1.0).contains(&self.window.animation_half_time_s),
+            "window.animation_half_time_s must be between 0 and 1 second"
+        );
+        ensure!(
+            self.window.collision_margin_m.is_finite()
+                && (0.0..=0.5).contains(&self.window.collision_margin_m),
+            "window.collision_margin_m must be between 0 and 0.5 meters"
         );
         for (name, value, maximum) in [
             ("window.padding_px", self.window.padding_px, 500.0),
@@ -358,6 +353,16 @@ mod tests {
     }
 
     #[test]
+    fn older_window_settings_use_dodge_defaults() {
+        let config: AppConfig =
+            toml::from_str("[window]\ndefault_distance_m = 2.0\npixels_per_degree = 32.0\n")
+                .unwrap();
+
+        assert_eq!(config.window.animation_half_time_s, 0.2);
+        assert_eq!(config.window.collision_margin_m, 0.04);
+    }
+
+    #[test]
     fn save_rejects_invalid_values_without_replacing_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -425,6 +430,27 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.window.pixels_per_degree = f32::NAN;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_window_animation_and_collision_settings() {
+        let mut config = AppConfig::default();
+        config.window.animation_half_time_s = 1.0;
+        config.window.collision_margin_m = 0.1;
+        assert!(config.validate().is_ok());
+
+        config.window.animation_half_time_s = 0.0;
+        assert!(config.validate().is_ok());
+        config.window.animation_half_time_s = 1.01;
+        assert!(config.validate().is_err());
+        config.window.animation_half_time_s = f32::NAN;
+        assert!(config.validate().is_err());
+
+        config.window.animation_half_time_s = 0.2;
+        config.window.collision_margin_m = -0.01;
+        assert!(config.validate().is_err());
+        config.window.collision_margin_m = f32::NAN;
         assert!(config.validate().is_err());
     }
 

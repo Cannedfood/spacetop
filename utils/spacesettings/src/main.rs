@@ -55,12 +55,13 @@ enum Message {
     WindowDistanceChanged(String),
     WindowPixelsPerDegreeChanged(String),
     WindowPaddingChanged(f32),
+    WindowAnimationHalfTimeChanged(f32),
+    WindowCollisionMarginChanged(f32),
     WindowBorderWidthChanged(f32),
     WindowBorderRadiusChanged(f32),
     WindowCursorProximityChanged(f32),
     WindowCursorCloseBorderWidthChanged(f32),
     WindowGrabbedBorderWidthChanged(f32),
-    CursorDistanceChanged(String),
     Reload,
     Save,
 }
@@ -78,7 +79,6 @@ struct SettingsApp {
     floor_height: String,
     window_distance: String,
     window_pixels_per_degree: String,
-    cursor_distance: String,
     status: String,
     status_is_error: bool,
 }
@@ -100,7 +100,6 @@ impl SettingsApp {
         let floor_height = format!("{}", config.floor.height_m);
         let window_distance = format!("{}", config.window.default_distance_m);
         let window_pixels_per_degree = format!("{}", config.window.pixels_per_degree);
-        let cursor_distance = format!("{}", config.cursor.default_distance_m);
         let mut app = Self {
             config,
             backgrounds,
@@ -114,7 +113,6 @@ impl SettingsApp {
             floor_height,
             window_distance,
             window_pixels_per_degree,
-            cursor_distance,
             status,
             status_is_error,
         };
@@ -140,12 +138,13 @@ impl SettingsApp {
                 | Message::WindowDistanceChanged(_)
                 | Message::WindowPixelsPerDegreeChanged(_)
                 | Message::WindowPaddingChanged(_)
+                | Message::WindowAnimationHalfTimeChanged(_)
+                | Message::WindowCollisionMarginChanged(_)
                 | Message::WindowBorderWidthChanged(_)
                 | Message::WindowBorderRadiusChanged(_)
                 | Message::WindowCursorProximityChanged(_)
                 | Message::WindowCursorCloseBorderWidthChanged(_)
                 | Message::WindowGrabbedBorderWidthChanged(_)
-                | Message::CursorDistanceChanged(_)
         );
         match message {
             Message::BackgroundChanged(selection) => {
@@ -225,6 +224,12 @@ impl SettingsApp {
             Message::WindowDistanceChanged(value) => self.window_distance = value,
             Message::WindowPixelsPerDegreeChanged(value) => self.window_pixels_per_degree = value,
             Message::WindowPaddingChanged(value) => self.config.window.padding_px = value,
+            Message::WindowAnimationHalfTimeChanged(value) => {
+                self.config.window.animation_half_time_s = value
+            }
+            Message::WindowCollisionMarginChanged(value) => {
+                self.config.window.collision_margin_m = value / 100.0
+            }
             Message::WindowBorderWidthChanged(value) => self.config.window.border_width_px = value,
             Message::WindowBorderRadiusChanged(value) => {
                 self.config.window.border_radius_px = value
@@ -238,7 +243,6 @@ impl SettingsApp {
             Message::WindowGrabbedBorderWidthChanged(value) => {
                 self.config.window.grabbed_border_width_px = value
             }
-            Message::CursorDistanceChanged(value) => self.cursor_distance = value,
             Message::Reload => match AppConfig::load() {
                 Ok(config) => {
                     *self = Self::from_config(config, "Configuration reloaded".into(), false)
@@ -364,8 +368,6 @@ impl SettingsApp {
             parse_number("Default window distance", &self.window_distance)?;
         config.window.pixels_per_degree =
             parse_number("Window pixels per degree", &self.window_pixels_per_degree)?;
-        config.cursor.default_distance_m =
-            parse_number("Default cursor distance", &self.cursor_distance)?;
         config
             .validate()
             .map_err(|error| format!("Invalid settings: {error}"))?;
@@ -611,109 +613,124 @@ impl SettingsApp {
             Message::SubmitGrabbedBorderColor,
         );
 
-        let placement = row![
-            section(
-                "WINDOWS",
-                column![
-                    labeled_input(
-                        "DEFAULT DISTANCE (M)",
-                        &self.window_distance,
-                        "1.6",
-                        Message::WindowDistanceChanged,
-                    ),
-                    labeled_input(
-                        "PIXELS PER DEGREE",
-                        &self.window_pixels_per_degree,
-                        "32",
-                        Message::WindowPixelsPerDegreeChanged,
-                    ),
-                    slider_row(
-                        "PADDING (PX)",
-                        self.config.window.padding_px,
-                        0.0,
-                        500.0,
-                        1.0,
-                        Message::WindowPaddingChanged,
-                    ),
-                    slider_row(
-                        "BORDER WIDTH (PX)",
-                        self.config.window.border_width_px,
-                        0.0,
-                        100.0,
-                        1.0,
-                        Message::WindowBorderWidthChanged,
-                    ),
-                    row![
-                        column![
-                            text("BORDER COLOR").size(11).color(MUTED),
-                            window_border_picker
-                        ]
-                        .spacing(8),
-                    ]
-                    .align_y(iced::Alignment::Center),
-                    slider_row(
-                        "BORDER RADIUS (PX)",
-                        self.config.window.border_radius_px,
-                        0.0,
-                        500.0,
-                        1.0,
-                        Message::WindowBorderRadiusChanged,
-                    ),
-                    slider_row(
-                        "CURSOR PROXIMITY (PX)",
-                        self.config.window.cursor_proximity_radius_px,
-                        0.0,
-                        500.0,
-                        1.0,
-                        Message::WindowCursorProximityChanged,
-                    ),
-                    slider_row(
-                        "CLOSE BORDER (PX)",
-                        self.config.window.cursor_close_border_width_px,
-                        0.0,
-                        100.0,
-                        1.0,
-                        Message::WindowCursorCloseBorderWidthChanged,
-                    ),
-                    row![
-                        column![
-                            text("CLOSE BORDER COLOR").size(11).color(MUTED),
-                            cursor_close_border_picker
-                        ]
-                        .spacing(8),
-                    ]
-                    .align_y(iced::Alignment::Center),
-                    slider_row(
-                        "GRABBED BORDER (PX)",
-                        self.config.window.grabbed_border_width_px,
-                        0.0,
-                        100.0,
-                        1.0,
-                        Message::WindowGrabbedBorderWidthChanged,
-                    ),
-                    row![
-                        column![
-                            text("GRABBED BORDER COLOR").size(11).color(MUTED),
-                            grabbed_border_picker
-                        ]
-                        .spacing(8),
-                    ]
-                    .align_y(iced::Alignment::Center),
-                ]
-                .spacing(10),
+        let window_scale = section(
+            "RESOLUTION",
+            labeled_input(
+                "PIXELS PER DEGREE",
+                &self.window_pixels_per_degree,
+                "32",
+                Message::WindowPixelsPerDegreeChanged,
             ),
-            section(
-                "CURSOR",
+        );
+
+        let placement = section(
+            "WINDOW PLACEMENT",
+            column![
                 labeled_input(
                     "DEFAULT DISTANCE (M)",
-                    &self.cursor_distance,
+                    &self.window_distance,
                     "1.6",
-                    Message::CursorDistanceChanged,
+                    Message::WindowDistanceChanged,
                 ),
-            ),
-        ]
-        .spacing(14)
-        .align_y(iced::Alignment::Start);
+                slider_row(
+                    "DODGE HALF-TIME (S)",
+                    self.config.window.animation_half_time_s,
+                    0.0,
+                    5.0,
+                    0.05,
+                    Message::WindowAnimationHalfTimeChanged,
+                ),
+                slider_row(
+                    "DODGE MARGIN (CM)",
+                    self.config.window.collision_margin_m * 100.0,
+                    0.0,
+                    50.0,
+                    1.0,
+                    Message::WindowCollisionMarginChanged,
+                ),
+            ]
+            .spacing(10),
+        );
+
+        let windows = section(
+            "WINDOWS BORDER",
+            column![
+                slider_row(
+                    "CURSOR PROXIMITY (PX)",
+                    self.config.window.cursor_proximity_radius_px,
+                    0.0,
+                    500.0,
+                    1.0,
+                    Message::WindowCursorProximityChanged,
+                ),
+                iced::widget::rule::horizontal(1),
+                slider_row(
+                    "PADDING (PX)",
+                    self.config.window.padding_px,
+                    0.0,
+                    500.0,
+                    1.0,
+                    Message::WindowPaddingChanged,
+                ),
+                slider_row(
+                    "BORDER RADIUS (PX)",
+                    self.config.window.border_radius_px,
+                    0.0,
+                    500.0,
+                    1.0,
+                    Message::WindowBorderRadiusChanged,
+                ),
+                iced::widget::rule::horizontal(1),
+                slider_row(
+                    "BORDER WIDTH (PX)",
+                    self.config.window.border_width_px,
+                    0.0,
+                    100.0,
+                    1.0,
+                    Message::WindowBorderWidthChanged,
+                ),
+                slider_row(
+                    "CLOSE BORDER (PX)",
+                    self.config.window.cursor_close_border_width_px,
+                    0.0,
+                    100.0,
+                    1.0,
+                    Message::WindowCursorCloseBorderWidthChanged,
+                ),
+                slider_row(
+                    "GRABBED BORDER (PX)",
+                    self.config.window.grabbed_border_width_px,
+                    0.0,
+                    100.0,
+                    1.0,
+                    Message::WindowGrabbedBorderWidthChanged,
+                ),
+                iced::widget::rule::horizontal(1),
+                row![
+                    column![
+                        text("BORDER COLOR").size(11).color(MUTED),
+                        window_border_picker
+                    ]
+                    .width(Length::Fill)
+                    .spacing(8),
+                    column![
+                        text("CLOSE BORDER COLOR").size(11).color(MUTED),
+                        cursor_close_border_picker
+                    ]
+                    .width(Length::Fill)
+                    .spacing(8),
+                    column![
+                        text("GRABBED BORDER COLOR").size(11).color(MUTED),
+                        grabbed_border_picker
+                    ]
+                    .width(Length::Fill)
+                    .spacing(8),
+                ]
+                .spacing(16)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(10),
+        );
 
         let status_color = if self.status_is_error {
             Color::from_rgb(0.98, 0.47, 0.39)
@@ -745,12 +762,15 @@ impl SettingsApp {
                     ]
                     .spacing(4),
                     iced::widget::Space::new().width(Length::Fill),
-                    button(text("Open Config").size(13))
+                    button(text("Open in Text Editor").size(13))
                         .on_press(Message::OpenConfigFile)
                         .style(quiet_button),
                 ]
                 .align_y(iced::Alignment::Center),
-                scrollable(column![environment, floor, placement].spacing(14)).height(Length::Fill),
+                scrollable(
+                    column![environment, floor, placement, window_scale, windows].spacing(14),
+                )
+                .height(Length::Fill),
                 footer,
             ]
             .spacing(18)

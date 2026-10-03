@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(config.floor.reflection_grain_size_m, 0.01);
         assert_eq!(config.window.default_distance_m, 2.1);
         assert_eq!(config.window.pixels_per_degree, 40.0);
-        assert_eq!(config.cursor.default_distance_m, 1.9);
+        assert!(!toml::to_string(&config).unwrap().contains("[cursor]"));
     }
 
     #[test]

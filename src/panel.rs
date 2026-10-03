@@ -2,6 +2,7 @@
 
 use glam::{Vec2, Vec3};
 use smithay::utils::Size;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PanelLimits {
@@ -141,6 +142,133 @@ impl PanelPose {
 pub struct PanelGeometry {
     pub pose: PanelPose,
     pub logical_size: Size<i32, smithay::utils::Logical>,
+}
+
+/// Return collision-free target poses, preserving the depth of every panel.
+/// Fixed panels anchor the layout; movable panels are placed at the closest
+/// available angular-space position to their saved pose.
+pub fn dodge_windows(
+    panels: &[(u64, PanelGeometry)],
+    fixed_windows: &[u64],
+    player: Vec3,
+    margin_m: f32,
+) -> BTreeMap<u64, PanelPose> {
+    #[derive(Clone, Copy)]
+    struct Bounds {
+        center: Vec2,
+        half_size: Vec2,
+    }
+
+    let fixed: BTreeSet<_> = fixed_windows.iter().copied().collect();
+    let Some((_, first)) = panels.first() else {
+        return BTreeMap::new();
+    };
+    let reference_yaw = PanelPose::spherical_angles(first.pose.center - player).x;
+    let mut placed = Vec::<Bounds>::new();
+    let mut result = BTreeMap::new();
+    let mut pending = Vec::new();
+
+    for (id, geometry) in panels {
+        let pose = geometry.pose;
+        let offset = pose.center - player;
+        let distance = offset.length().max(f32::EPSILON);
+        let angles = PanelPose::spherical_angles(offset);
+        let height_m = pose.width_m * geometry.logical_size.h.max(1) as f32
+            / geometry.logical_size.w.max(1) as f32;
+        let margin_angle = (margin_m.max(0.0) / distance).atan();
+        let bounds = Bounds {
+            center: Vec2::new(PanelPose::wrap_angle(angles.x - reference_yaw), angles.y),
+            half_size: Vec2::new(
+                (pose.width_m * 0.5 / distance).atan() + margin_angle,
+                (height_m * 0.5 / distance).atan() + margin_angle,
+            ),
+        };
+        if fixed.contains(id) {
+            placed.push(bounds);
+            result.insert(*id, pose);
+        } else {
+            pending.push((*id, pose, distance, bounds));
+        }
+    }
+
+    for (id, pose, distance, original) in pending {
+        let mut x_candidates = vec![original.center.x];
+        let mut y_candidates = vec![original.center.y];
+        for other in &placed {
+            x_candidates.extend([
+                other.center.x - other.half_size.x - original.half_size.x,
+                other.center.x + other.half_size.x + original.half_size.x,
+            ]);
+            y_candidates.extend([
+                other.center.y - other.half_size.y - original.half_size.y,
+                other.center.y + other.half_size.y + original.half_size.y,
+            ]);
+        }
+        if let Some(leftmost) = placed
+            .iter()
+            .map(|bounds| bounds.center.x - bounds.half_size.x)
+            .min_by(f32::total_cmp)
+        {
+            x_candidates.push(leftmost - original.half_size.x);
+        }
+        if let Some(rightmost) = placed
+            .iter()
+            .map(|bounds| bounds.center.x + bounds.half_size.x)
+            .max_by(f32::total_cmp)
+        {
+            x_candidates.push(rightmost + original.half_size.x);
+        }
+        if let Some(lowest) = placed
+            .iter()
+            .map(|bounds| bounds.center.y - bounds.half_size.y)
+            .min_by(f32::total_cmp)
+        {
+            y_candidates.push(lowest - original.half_size.y);
+        }
+        if let Some(highest) = placed
+            .iter()
+            .map(|bounds| bounds.center.y + bounds.half_size.y)
+            .max_by(f32::total_cmp)
+        {
+            y_candidates.push(highest + original.half_size.y);
+        }
+        x_candidates.sort_by(f32::total_cmp);
+        x_candidates.dedup_by(|first, second| (*first - *second).abs() < 1.0e-6);
+        y_candidates.sort_by(f32::total_cmp);
+        y_candidates.dedup_by(|first, second| (*first - *second).abs() < 1.0e-6);
+
+        let target = x_candidates
+            .iter()
+            .flat_map(|x| y_candidates.iter().map(move |y| Vec2::new(*x, *y)))
+            .filter(|center| {
+                placed.iter().all(|other| {
+                    (center.x - other.center.x).abs() >= original.half_size.x + other.half_size.x
+                        || (center.y - other.center.y).abs()
+                            >= original.half_size.y + other.half_size.y
+                })
+            })
+            .min_by(|first, second| {
+                first
+                    .distance_squared(original.center)
+                    .total_cmp(&second.distance_squared(original.center))
+            })
+            .unwrap_or(original.center);
+        let angles = Vec2::new(reference_yaw + target.x, target.y);
+        let target_pose = PanelPose::facing_player(
+            player + PanelPose::direction_from_angles(angles.x, angles.y) * distance,
+            player,
+        );
+        let target_pose = PanelPose {
+            width_m: pose.width_m,
+            ..target_pose
+        };
+        result.insert(id, target_pose);
+        placed.push(Bounds {
+            center: target,
+            ..original
+        });
+    }
+    result
 }
 
 /// A hit on a panel, with top-left-origin Wayland surface coordinates.
