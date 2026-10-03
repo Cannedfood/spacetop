@@ -12,7 +12,7 @@ pub(crate) const FALLBACK_FLOOR_Y: f32 = -1.3;
 
 const SHADER: &str = r#"
 const FLOOR_REFLECTANCE: f32 = 0.18;
-const FLOOR_ROUGHNESS: f32 = 0.25;
+const FLOOR_ROUGHNESS: f32 = 0.1;
 const FLOOR_RAY_COUNT: u32 = 4u;
 const FLOOR_NOISE_CELL_SIZE: f32 = 0.002;
 const PI: f32 = 3.14159265;
