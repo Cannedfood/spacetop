@@ -1,0 +1,8 @@
+[package]
+name = "spacelauncher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+freedesktop-desktop-entry = "0.8"
+iced = { version = "0.14", features = ["image", "svg"] }
