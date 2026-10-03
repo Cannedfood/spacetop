@@ -151,7 +151,7 @@ pub struct PanelGeometry {
 
 /// Return collision-free target poses, preserving the depth of every panel.
 /// Fixed panels anchor the layout; movable panels are placed at the closest
-/// available angular-space position to their saved pose.
+/// available horizontal position to their saved pose.
 pub fn dodge_windows(
     panels: &[(u64, PanelGeometry)],
     fixed_windows: &[u64],
@@ -198,15 +198,10 @@ pub fn dodge_windows(
 
     for (id, pose, distance, original) in pending {
         let mut x_candidates = vec![original.center.x];
-        let mut y_candidates = vec![original.center.y];
         for other in &placed {
             x_candidates.extend([
                 other.center.x - other.half_size.x - original.half_size.x,
                 other.center.x + other.half_size.x + original.half_size.x,
-            ]);
-            y_candidates.extend([
-                other.center.y - other.half_size.y - original.half_size.y,
-                other.center.y + other.half_size.y + original.half_size.y,
             ]);
         }
         if let Some(leftmost) = placed
@@ -223,42 +218,26 @@ pub fn dodge_windows(
         {
             x_candidates.push(rightmost + original.half_size.x);
         }
-        if let Some(lowest) = placed
-            .iter()
-            .map(|bounds| bounds.center.y - bounds.half_size.y)
-            .min_by(f32::total_cmp)
-        {
-            y_candidates.push(lowest - original.half_size.y);
-        }
-        if let Some(highest) = placed
-            .iter()
-            .map(|bounds| bounds.center.y + bounds.half_size.y)
-            .max_by(f32::total_cmp)
-        {
-            y_candidates.push(highest + original.half_size.y);
-        }
         x_candidates.sort_by(f32::total_cmp);
         x_candidates.dedup_by(|first, second| (*first - *second).abs() < 1.0e-6);
-        y_candidates.sort_by(f32::total_cmp);
-        y_candidates.dedup_by(|first, second| (*first - *second).abs() < 1.0e-6);
 
         let target = x_candidates
             .iter()
-            .flat_map(|x| y_candidates.iter().map(move |y| Vec2::new(*x, *y)))
-            .filter(|center| {
+            .filter(|x| {
                 placed.iter().all(|other| {
-                    (center.x - other.center.x).abs() >= original.half_size.x + other.half_size.x
-                        || (center.y - other.center.y).abs()
+                    (**x - other.center.x).abs() >= original.half_size.x + other.half_size.x
+                        || (original.center.y - other.center.y).abs()
                             >= original.half_size.y + other.half_size.y
                 })
             })
             .min_by(|first, second| {
-                first
-                    .distance_squared(original.center)
-                    .total_cmp(&second.distance_squared(original.center))
+                (*first - original.center.x)
+                    .abs()
+                    .total_cmp(&(*second - original.center.x).abs())
             })
-            .unwrap_or(original.center);
-        let angles = Vec2::new(reference_yaw + target.x, target.y);
+            .copied()
+            .unwrap_or(original.center.x);
+        let angles = Vec2::new(reference_yaw + target, original.center.y);
         let target_pose = PanelPose::facing_player(
             player + PanelPose::direction_from_angles(angles.x, angles.y) * distance,
             player,
@@ -269,7 +248,7 @@ pub fn dodge_windows(
         };
         result.insert(id, target_pose);
         placed.push(Bounds {
-            center: target,
+            center: Vec2::new(target, original.center.y),
             ..original
         });
     }
