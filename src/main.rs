@@ -10,10 +10,10 @@ mod xr;
 use bridge::{PanelUpdate, XrInput};
 use panel::{PanelGeometry, PanelPose, Ray3};
 use smithay::{
-    backend::input::ButtonState,
+    backend::input::{Axis, AxisSource, ButtonState},
     delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
     delegate_xdg_shell,
-    input::{Seat, SeatHandler, SeatState, keyboard::XkbConfig},
+    input::{Seat, SeatHandler, SeatState, keyboard::XkbConfig, pointer::AxisFrame},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
         calloop::{
@@ -101,6 +101,10 @@ impl Compositor {
             }
             XrInput::Button { pressed, time_ms } => {
                 self.dispatch_button(pressed, time_ms);
+                Ok(())
+            }
+            XrInput::Scroll { value, time_ms } => {
+                self.dispatch_scroll(value, time_ms);
                 Ok(())
             }
             XrInput::MovePanel { panel_id, pose } => {
@@ -389,6 +393,22 @@ impl Compositor {
             });
             self.set_panel_active(panel_id, SERIAL_COUNTER.next_serial());
         }
+    }
+
+    fn dispatch_scroll(&mut self, value: f64, time_ms: u32) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        if pointer.current_focus().is_none() {
+            return;
+        }
+        pointer.axis(
+            self,
+            AxisFrame::new(time_ms)
+                .source(AxisSource::Continuous)
+                .value(Axis::Vertical, value),
+        );
+        pointer.frame(self);
     }
 }
 

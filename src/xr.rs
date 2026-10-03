@@ -468,6 +468,11 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                     ray: cursor_ray.expect("ray assigned above"),
                     time_ms,
                 });
+                let pointing_at_window = cursor_ray.is_some_and(|ray| {
+                    panel_frames
+                        .values()
+                        .any(|panel| panel.geometry.intersect(ray).is_some())
+                });
                 let grip = grip_action.state(&session, right_hand)?;
                 if grip.changed_since_last_sync {
                     if grip.current_state {
@@ -505,11 +510,11 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                         grabbed_panel = None;
                     }
                 }
+                let delta_seconds = (frame_state.predicted_display_period.as_nanos() as f32
+                    / 1_000_000_000.0)
+                    .clamp(0.0, 0.1);
                 if let Some(panel_id) = grabbed_panel {
                     let stick = stick_action.state(&session, right_hand)?.current_state;
-                    let delta_seconds = (frame_state.predicted_display_period.as_nanos() as f32
-                        / 1_000_000_000.0)
-                        .clamp(0.0, 0.1);
                     grab_radius = (grab_radius + stick.y * delta_seconds * 1.5).clamp(0.6, 5.0);
                     if let Some(ray) = cursor_ray
                         && let Some(panel) = panel_frames.get_mut(&panel_id)
@@ -527,6 +532,14 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                         );
                         panel.geometry.pose = pose;
                         let _ = input.try_send(XrInput::MovePanel { panel_id, pose });
+                    }
+                } else if pointing_at_window {
+                    let stick = stick_action.state(&session, right_hand)?.current_state;
+                    if stick.y.abs() > 0.15 {
+                        let _ = input.try_send(XrInput::Scroll {
+                            value: -f64::from(stick.y) * delta_seconds as f64 * 600.0,
+                            time_ms,
+                        });
                     }
                 }
                 let trigger = trigger_action.state(&session, right_hand)?;

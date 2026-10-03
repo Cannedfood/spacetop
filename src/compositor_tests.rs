@@ -29,6 +29,7 @@ struct TestClient {
     keyboard_entered: bool,
     motions: Vec<(f64, f64)>,
     buttons: Vec<wayland_client::WEnum<wl_pointer::ButtonState>>,
+    axis_values: Vec<f64>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for TestClient {
@@ -105,6 +106,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for TestClient {
                 ..
             } => state.motions.push((surface_x, surface_y)),
             wl_pointer::Event::Button { state: button, .. } => state.buttons.push(button),
+            wl_pointer::Event::Axis {
+                axis: wayland_client::WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } => state.axis_values.push(value),
             wl_pointer::Event::Frame => state.pointer_frames += 1,
             _ => {}
         }
@@ -608,6 +614,9 @@ fn exercise_wayland_app(vulkan: Option<super::gpu::test_support::Vulkan>) {
         );
     }
 
+    compositor.dispatch_scroll(-12.5, 9);
+    compositor.flush_clients();
+    assert!(client.axis_values.is_empty());
     for (step, x) in [0.0, 0.1].into_iter().enumerate() {
         assert!(compositor.dispatch_ray(
             Ray3 {
@@ -623,10 +632,17 @@ fn exercise_wayland_app(vulkan: Option<super::gpu::test_support::Vulkan>) {
     }
     assert!(client.entered);
     assert_eq!(client.motions.last(), Some(&(60.0, 25.0)));
+    compositor.dispatch_scroll(-12.5, 9);
+    compositor.flush_clients();
+    while client.pointer_frames < 3 {
+        queue.blocking_dispatch(&mut client).unwrap();
+    }
+    assert_eq!(client.axis_values, vec![-12.5]);
+    let pointer_frames_before_buttons = client.pointer_frames;
     for (step, pressed) in [true, false].into_iter().enumerate() {
         compositor.dispatch_button(pressed, 10 + step as u32);
         compositor.flush_clients();
-        while client.pointer_frames < step + 3 {
+        while client.pointer_frames < pointer_frames_before_buttons + step + 1 {
             queue.blocking_dispatch(&mut client).unwrap();
         }
     }

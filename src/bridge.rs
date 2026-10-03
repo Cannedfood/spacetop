@@ -21,6 +21,10 @@ pub enum XrInput {
         pressed: bool,
         time_ms: u32,
     },
+    Scroll {
+        value: f64,
+        time_ms: u32,
+    },
     MovePanel {
         panel_id: u64,
         pose: PanelPose,
