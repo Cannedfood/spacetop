@@ -5,7 +5,6 @@ struct Transform {
     emitter_center_width: vec4<f32>,
     emitter_right_height: vec4<f32>,
     emitter_up: vec4<f32>,
-    window_info: vec4<f32>,
     eye_position: vec4<f32>,
 }
 var<immediate> transform: Transform;
@@ -15,6 +14,11 @@ struct FloorMaterial {
     albedo: vec4<f32>,
     controls: vec4<f32>,
     sampling: vec4<f32>,
+    window_style: vec4<f32>,
+    border_color: vec4<f32>,
+    cursor_close_border_color: vec4<f32>,
+    grabbed_style: vec4<f32>,
+    grabbed_border_color: vec4<f32>,
 }
 @group(1) @binding(0) var<uniform> floor_material: FloorMaterial;
 struct SkyVertex {
@@ -95,14 +99,50 @@ struct Vertex {
     result.uv = uv;
     return result;
 }
+fn rounded_box_distance(point: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
+    let half_size = size * 0.5;
+    let q = abs(point - half_size) - (half_size - vec2(radius));
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
 @fragment fn window(input: Vertex) -> @location(0) vec4<f32> {
-    let margin = 0.035;
-    let edge = min(min(input.uv.x, 1.0 - input.uv.x), min(input.uv.y, 1.0 - input.uv.y));
-    if edge < 0.0 { discard; }
-    if transform.window_info.w > 0.5 && edge < margin {
-        return vec4(1.0, 0.9131, 0.0, 1.0);
+    let size = max(transform.eye_position.xy, vec2(1.0));
+    let point = input.uv * size;
+    let radius = min(floor_material.window_style.z, min(size.x, size.y) * 0.5);
+    let outer_distance = rounded_box_distance(point, size, radius);
+    if outer_distance > 0.0 { discard; }
+
+    let close_distance = length(point - transform.emitter_center_width.xy);
+    let proximity_radius = max(floor_material.grabbed_style.y, 0.001);
+    let close_amount = select(
+        0.0,
+        1.0 - smoothstep(0.0, proximity_radius, close_distance),
+        transform.eye_position.w > 0.5 && floor_material.grabbed_style.y > 0.0,
+    );
+    let grabbed = transform.eye_position.z > 0.5;
+    var border_width = mix(
+        floor_material.window_style.y,
+        floor_material.window_style.w,
+        close_amount,
+    );
+    var border_color = mix(
+        floor_material.border_color,
+        floor_material.cursor_close_border_color,
+        close_amount,
+    );
+    if grabbed {
+        border_width = floor_material.grabbed_style.x;
+        border_color = floor_material.grabbed_border_color;
     }
-    let color = textureSample(panel, filtering, (input.uv - vec2(margin)) / (1.0 - 2.0 * margin));
+    if border_width > 0.0 && outer_distance >= -border_width {
+        return border_color;
+    }
+
+    let padding = min(floor_material.window_style.x, (min(size.x, size.y) - 1.0) * 0.5);
+    let content_size = max(size - vec2(2.0 * padding), vec2(1.0));
+    let content_point = point - vec2(padding);
+    let content_radius = max(radius - padding, 0.0);
+    if rounded_box_distance(content_point, content_size, content_radius) > 0.0 { discard; }
+    let color = textureSample(panel, filtering, content_point / content_size);
     if color.a < 0.001 { discard; }
     return color;
 }

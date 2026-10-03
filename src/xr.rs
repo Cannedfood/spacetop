@@ -488,8 +488,12 @@ pub fn run(
     let mut grab_initial_radius = config.window.default_distance_m;
     let mut grab_initial_width = 1.0_f32;
     let mut grab_direction_offset = glam::Vec2::ZERO;
+    let mut resizing_panel = None;
+    let mut resize_geometry = None;
     let mut resize_initial_size = (0_i32, 0_i32);
-    let mut hovered_panel = None;
+    let mut resize_initial_hit = glam::Vec2::ZERO;
+    let mut resize_edges = [false; 4];
+    let mut cursor_close_panel = None;
     let mut timings = crate::timing::Timings::new();
     let mut last_config_check = Instant::now();
 
@@ -527,12 +531,18 @@ pub fn run(
                                     grab_radius = next_config.window.default_distance_m;
                                     grab_initial_radius = next_config.window.default_distance_m;
                                 }
-                                if next_config.window.default_distance_m
+                                let window_config_changed = next_config.window.default_distance_m
                                     != config.window.default_distance_m
+                                    || next_config.window.pixels_per_degree
+                                        != config.window.pixels_per_degree;
+                                if window_config_changed
                                     && let Err(error) = input.send(XrInput::ConfigReloaded {
                                         default_window_distance: next_config
                                             .window
                                             .default_distance_m,
+                                        window_pixels_per_degree: next_config
+                                            .window
+                                            .pixels_per_degree,
                                     })
                                 {
                                     eprintln!(
@@ -722,20 +732,40 @@ pub fn run(
                     ray: cursor_ray.expect("ray assigned above"),
                     time_ms,
                 });
-                hovered_panel = cursor_ray.and_then(|ray| {
+                let nearest_proximity = cursor_ray.and_then(|ray| {
                     panel_frames
                         .iter()
                         .filter_map(|(id, panel)| {
-                            panel
-                                .geometry
-                                .intersect_with_margin(ray, 0.04)
-                                .map(|hit| (*id, hit))
+                            let hit = panel.geometry.intersect_unbounded(ray)?;
+                            let width = panel.geometry.logical_size.w as f32;
+                            let height = panel.geometry.logical_size.h as f32;
+                            let outside_x =
+                                (-hit.surface_px.x).max(hit.surface_px.x - width).max(0.0);
+                            let outside_y =
+                                (-hit.surface_px.y).max(hit.surface_px.y - height).max(0.0);
+                            (outside_x.hypot(outside_y) <= config.window.cursor_proximity_radius_px)
+                                .then_some((*id, hit))
                         })
                         .min_by(|(_, first), (_, second)| {
                             first.distance_m.total_cmp(&second.distance_m)
                         })
-                        .map(|(id, _)| id)
                 });
+                let hovered_panel = nearest_proximity.map(|(id, _)| id);
+                cursor_close_panel = nearest_proximity
+                    .filter(|(id, hit)| {
+                        let Some(panel) = panel_frames.get(id) else {
+                            return false;
+                        };
+                        let width = panel.geometry.logical_size.w as f32;
+                        let height = panel.geometry.logical_size.h as f32;
+                        hit.surface_px
+                            .x
+                            .min(width - hit.surface_px.x)
+                            .min(hit.surface_px.y)
+                            .min(height - hit.surface_px.y)
+                            <= config.window.cursor_proximity_radius_px
+                    })
+                    .map(|(id, hit)| (id, hit.surface_px));
                 let pointing_at_window = hovered_panel.is_some();
                 let trigger = timings.measure("openxr/action-state", Duration::ZERO, || {
                     trigger_action.state(&session, right_hand)
@@ -764,10 +794,6 @@ pub fn run(
                                         .clamp(0.6, 5.0);
                                     grab_initial_radius = grab_radius;
                                     grab_initial_width = panel.geometry.pose.width_m;
-                                    resize_initial_size = (
-                                        panel.geometry.logical_size.w,
-                                        panel.geometry.logical_size.h,
-                                    );
                                     let aim_angles = PanelPose::spherical_angles(ray.direction);
                                     let center_angles = PanelPose::spherical_angles(
                                         panel.geometry.pose.center - grab_player_position,
@@ -783,7 +809,7 @@ pub fn run(
                         grabbed_panel = None;
                     }
                 }
-                if trigger.is_active
+                if trigger.changed_since_last_sync
                     && trigger.current_state
                     && grabbed_panel.is_none()
                     && let Some(panel_id) = hovered_panel
@@ -791,12 +817,65 @@ pub fn run(
                     && let Some(ray) = cursor_ray
                     && let Some(hit) = panel.geometry.intersect_with_margin(ray, 0.04)
                 {
-                    let width = hit.surface_px.x.round() as i32;
-                    let height = hit.surface_px.y.round() as i32;
+                    let width = panel.geometry.logical_size.w as f32;
+                    let height = panel.geometry.logical_size.h as f32;
+                    resize_edges = [
+                        hit.surface_px.x <= width * 0.04,
+                        hit.surface_px.x >= width * 0.96,
+                        hit.surface_px.y <= height * 0.04,
+                        hit.surface_px.y >= height * 0.96,
+                    ];
+                    if resize_edges.into_iter().any(|edge| edge) {
+                        resizing_panel = Some(panel_id);
+                        resize_geometry = Some(panel.geometry);
+                        resize_initial_size =
+                            (panel.geometry.logical_size.w, panel.geometry.logical_size.h);
+                        resize_initial_hit = hit.surface_px;
+                    }
+                }
+                if trigger.changed_since_last_sync && !trigger.current_state {
+                    resizing_panel = None;
+                    resize_geometry = None;
+                }
+                if trigger.is_active
+                    && trigger.current_state
+                    && let Some(panel_id) = resizing_panel
+                    && let Some(geometry) = resize_geometry
+                    && let Some(ray) = cursor_ray
+                    && let Some(hit) = geometry.intersect_unbounded(ray)
+                {
+                    let width = if resize_edges[0] {
+                        resize_initial_size.0 as f32 - (hit.surface_px.x - resize_initial_hit.x)
+                    } else if resize_edges[1] {
+                        resize_initial_size.0 as f32 + (hit.surface_px.x - resize_initial_hit.x)
+                    } else {
+                        resize_initial_size.0 as f32
+                    };
+                    let height = if resize_edges[2] {
+                        resize_initial_size.1 as f32 - (hit.surface_px.y - resize_initial_hit.y)
+                    } else if resize_edges[3] {
+                        resize_initial_size.1 as f32 + (hit.surface_px.y - resize_initial_hit.y)
+                    } else {
+                        resize_initial_size.1 as f32
+                    };
+                    let new_size = (
+                        width.round().max(1.0) as i32,
+                        height.round().max(1.0) as i32,
+                    )
+                        .into();
+                    let pose = geometry.resized_pose_from_edges(
+                        new_size,
+                        resize_edges,
+                        config.window.pixels_per_degree,
+                    );
+                    if let Some(panel) = panel_frames.get_mut(&panel_id) {
+                        panel.geometry.pose = pose;
+                    }
+                    let _ = input.try_send(XrInput::MovePanel { panel_id, pose });
                     let _ = input.try_send(XrInput::ResizePanel {
                         panel_id,
-                        width,
-                        height,
+                        width: new_size.w,
+                        height: new_size.h,
                     });
                 }
                 let delta_seconds = (frame_state.predicted_display_period.as_nanos() as f32
@@ -846,7 +925,7 @@ pub fn run(
                 for (button, down, previous) in [
                     (
                         0x110,
-                        trigger.is_active && trigger.current_state,
+                        trigger.is_active && trigger.current_state && resizing_panel.is_none(),
                         &mut trigger_pressed,
                     ),
                     (
@@ -872,6 +951,9 @@ pub fn run(
         } else {
             cursor_ray = None;
             grabbed_panel = None;
+            resizing_panel = None;
+            resize_geometry = None;
+            cursor_close_panel = None;
         }
         if !tracked_this_frame {
             cursor_ray = None;
@@ -918,7 +1000,12 @@ pub fn run(
             skybox: Some(&skybox),
             panels: &panel_draws,
             cursor: cursor_scene_pose,
-            hovered_panel: hovered_panel
+            cursor_close_panel: cursor_close_panel.and_then(|(id, position)| {
+                panel_frames
+                    .get(&id)
+                    .map(|panel| (panel.geometry, position))
+            }),
+            grabbed_panel: grabbed_panel
                 .and_then(|id| panel_frames.get(&id).map(|panel| panel.geometry)),
             floor_y,
         };

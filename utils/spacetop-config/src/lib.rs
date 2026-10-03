@@ -16,7 +16,7 @@ pub const FALLBACK_FLOOR_HEIGHT: f32 = -1.3;
 pub struct AppConfig {
     pub background: BackgroundConfig,
     pub floor: FloorConfig,
-    pub window: DistanceConfig,
+    pub window: WindowConfig,
     pub cursor: DistanceConfig,
 }
 
@@ -69,6 +69,22 @@ impl Default for FloorConfigFields {
 #[serde(default)]
 pub struct DistanceConfig {
     pub default_distance_m: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct WindowConfig {
+    pub default_distance_m: f32,
+    pub pixels_per_degree: f32,
+    pub padding_px: f32,
+    pub border_width_px: f32,
+    pub border_color: [f32; 4],
+    pub cursor_proximity_radius_px: f32,
+    pub cursor_close_border_width_px: f32,
+    pub cursor_close_border_color: [f32; 4],
+    pub border_radius_px: f32,
+    pub grabbed_border_width_px: f32,
+    pub grabbed_border_color: [f32; 4],
 }
 
 impl Default for BackgroundConfig {
@@ -138,6 +154,24 @@ impl Default for DistanceConfig {
     fn default() -> Self {
         Self {
             default_distance_m: DEFAULT_DISTANCE,
+        }
+    }
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            default_distance_m: DEFAULT_DISTANCE,
+            pixels_per_degree: 32.0,
+            padding_px: 12.0,
+            border_width_px: 2.0,
+            border_color: [0.58, 0.72, 0.74, 1.0],
+            cursor_proximity_radius_px: 32.0,
+            cursor_close_border_width_px: 4.0,
+            cursor_close_border_color: [1.0, 0.9131, 0.0, 1.0],
+            border_radius_px: 16.0,
+            grabbed_border_width_px: 4.0,
+            grabbed_border_color: [0.34, 0.82, 0.72, 1.0],
         }
     }
 }
@@ -233,6 +267,58 @@ impl AppConfig {
                 "{name} must be between 0.1 and 100 meters"
             );
         }
+        ensure!(
+            self.window.pixels_per_degree.is_finite()
+                && (1.0..=200.0).contains(&self.window.pixels_per_degree),
+            "window.pixels_per_degree must be between 1 and 200"
+        );
+        for (name, value, maximum) in [
+            ("window.padding_px", self.window.padding_px, 500.0),
+            ("window.border_width_px", self.window.border_width_px, 100.0),
+            (
+                "window.cursor_proximity_radius_px",
+                self.window.cursor_proximity_radius_px,
+                500.0,
+            ),
+            (
+                "window.cursor_close_border_width_px",
+                self.window.cursor_close_border_width_px,
+                100.0,
+            ),
+            (
+                "window.grabbed_border_width_px",
+                self.window.grabbed_border_width_px,
+                100.0,
+            ),
+            (
+                "window.border_radius_px",
+                self.window.border_radius_px,
+                500.0,
+            ),
+        ] {
+            ensure!(
+                value.is_finite() && (0.0..=maximum).contains(&value),
+                "{name} must be between 0 and {maximum} pixels"
+            );
+        }
+        for (name, color) in [
+            ("window.border_color", self.window.border_color),
+            (
+                "window.cursor_close_border_color",
+                self.window.cursor_close_border_color,
+            ),
+            (
+                "window.grabbed_border_color",
+                self.window.grabbed_border_color,
+            ),
+        ] {
+            ensure!(
+                color
+                    .iter()
+                    .all(|channel| channel.is_finite() && (0.0..=1.0).contains(channel)),
+                "{name} RGBA channels must be finite and between 0 and 1"
+            );
+        }
         Ok(())
     }
 
@@ -326,6 +412,34 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.floor.reflection_grain_size_m = f32::NAN;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_window_pixels_per_degree() {
+        let mut config = AppConfig::default();
+        config.window.pixels_per_degree = 64.0;
+        assert!(config.validate().is_ok());
+
+        config.window.pixels_per_degree = 0.0;
+        assert!(config.validate().is_err());
+
+        config.window.pixels_per_degree = f32::NAN;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_grabbed_border_style() {
+        let mut config = AppConfig::default();
+        config.window.grabbed_border_width_px = 8.0;
+        config.window.grabbed_border_color = [0.2, 0.4, 0.6, 1.0];
+        assert!(config.validate().is_ok());
+
+        config.window.grabbed_border_width_px = 101.0;
+        assert!(config.validate().is_err());
+
+        config.window.grabbed_border_width_px = 4.0;
+        config.window.grabbed_border_color[0] = f32::NAN;
         assert!(config.validate().is_err());
     }
 }

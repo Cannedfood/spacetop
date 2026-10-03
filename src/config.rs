@@ -92,7 +92,7 @@ mod tests {
              [floor]\nheight_m = -1.8\nalbedo = [0.2, 0.3, 0.4, 0.9]\n\
              roughness = 0.6\nreflectance = 0.3\nray_count = 12\n\
              reflection_grain_size_m = 0.01\n\
-             [window]\ndefault_distance_m = 2.1\n\
+             [window]\ndefault_distance_m = 2.1\npixels_per_degree = 40.0\n\
              [cursor]\ndefault_distance_m = 1.9\n",
         )
         .unwrap();
@@ -109,6 +109,7 @@ mod tests {
         assert_eq!(config.floor.ray_count, 12);
         assert_eq!(config.floor.reflection_grain_size_m, 0.01);
         assert_eq!(config.window.default_distance_m, 2.1);
+        assert_eq!(config.window.pixels_per_degree, 40.0);
         assert_eq!(config.cursor.default_distance_m, 1.9);
     }
 

@@ -124,6 +124,13 @@ impl PanelPose {
         base_width * distance / base_distance.max(f32::EPSILON)
     }
 
+    pub fn width_for_pixel_density(pixel_width: f32, distance: f32, pixels_per_degree: f32) -> f32 {
+        let angle = (pixel_width / pixels_per_degree.max(f32::EPSILON))
+            .to_radians()
+            .clamp(0.0, 170.0_f32.to_radians());
+        2.0 * distance.max(f32::EPSILON) * (angle * 0.5).tan()
+    }
+
     pub fn orientation(self) -> glam::Quat {
         glam::Quat::from_rotation_y(self.yaw) * glam::Quat::from_rotation_x(self.pitch)
     }
@@ -145,6 +152,57 @@ pub struct PanelHit {
 }
 
 impl PanelGeometry {
+    pub fn resized_pose_from_edges(
+        self,
+        new_size: Size<i32, smithay::utils::Logical>,
+        resize_edges: [bool; 4],
+        pixels_per_degree: f32,
+    ) -> PanelPose {
+        let initial_width = self.logical_size.w.max(1) as f32;
+        let initial_height = self.logical_size.h.max(1) as f32;
+        let new_width = new_size.w.max(1) as f32;
+        let new_height = new_size.h.max(1) as f32;
+        if new_size == self.logical_size {
+            return self.pose;
+        }
+        let distance = self.pose.center.length().max(f32::EPSILON);
+        let initial_angle_degrees =
+            2.0 * (self.pose.width_m / (2.0 * distance)).atan().to_degrees();
+        let measured_pixels_per_degree = initial_width / initial_angle_degrees.max(f32::EPSILON);
+        let capture_scale = measured_pixels_per_degree / pixels_per_degree.max(f32::EPSILON);
+        let width_m = PanelPose::width_for_pixel_density(
+            new_width * capture_scale,
+            distance,
+            pixels_per_degree,
+        );
+        let height_m = width_m * new_height / new_width;
+        let initial_height_m = self.pose.width_m * initial_height / initial_width;
+        let horizontal_direction = if resize_edges[1] {
+            1.0
+        } else if resize_edges[0] {
+            -1.0
+        } else {
+            0.0
+        };
+        let vertical_direction = if resize_edges[2] {
+            1.0
+        } else if resize_edges[3] {
+            -1.0
+        } else {
+            0.0
+        };
+        let center_offset = Vec3::new(
+            horizontal_direction * (width_m - self.pose.width_m) * 0.5,
+            vertical_direction * (height_m - initial_height_m) * 0.5,
+            0.0,
+        );
+        PanelPose {
+            center: self.pose.center + self.pose.orientation() * center_offset,
+            width_m,
+            ..self.pose
+        }
+    }
+
     pub fn from_bounds(
         root_pose: PanelPose,
         root_size: Size<i32, smithay::utils::Logical>,
@@ -192,6 +250,14 @@ impl PanelGeometry {
 
     /// Intersect the panel and its resize grab margin, measured as a fraction of its size.
     pub fn intersect_with_margin(&self, ray: Ray3, margin: f32) -> Option<PanelHit> {
+        self.intersect_at(ray, Some(margin))
+    }
+
+    pub fn intersect_unbounded(&self, ray: Ray3) -> Option<PanelHit> {
+        self.intersect_at(ray, None)
+    }
+
+    fn intersect_at(&self, ray: Ray3, margin: Option<f32>) -> Option<PanelHit> {
         let pixel_width = self.logical_size.w;
         let pixel_height = self.logical_size.h;
         let physical_width = self.pose.width_m;
@@ -225,16 +291,15 @@ impl PanelGeometry {
         let local_y = local.y;
         let u = local_x / physical_width + 0.5;
         let v = 0.5 - local_y / physical_height;
-        if u < -margin || u > 1.0 + margin || v < -margin || v > 1.0 + margin {
+        if let Some(margin) = margin
+            && (u < -margin || u > 1.0 + margin || v < -margin || v > 1.0 + margin)
+        {
             return None;
         }
 
         Some(PanelHit {
             uv: [u, v],
-            surface_px: Vec2::new(
-                u.clamp(0.0, 1.0) * pixel_width as f32,
-                v.clamp(0.0, 1.0) * pixel_height as f32,
-            ),
+            surface_px: Vec2::new(u * pixel_width as f32, v * pixel_height as f32),
             distance_m: distance,
         })
     }

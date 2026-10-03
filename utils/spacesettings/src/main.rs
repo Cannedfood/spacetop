@@ -38,12 +38,28 @@ enum Message {
     ChooseAlbedoColor,
     SubmitAlbedoColor(Color),
     CancelAlbedoColor,
+    ChooseWindowBorderColor,
+    SubmitWindowBorderColor(Color),
+    CancelWindowBorderColor,
+    ChooseCursorCloseBorderColor,
+    SubmitCursorCloseBorderColor(Color),
+    CancelCursorCloseBorderColor,
+    ChooseGrabbedBorderColor,
+    SubmitGrabbedBorderColor(Color),
+    CancelGrabbedBorderColor,
     FloorHeightChanged(String),
     RoughnessChanged(f32),
     ReflectanceChanged(f32),
     ReflectionGrainSizeChanged(f32),
     RayCountChanged(u32),
     WindowDistanceChanged(String),
+    WindowPixelsPerDegreeChanged(String),
+    WindowPaddingChanged(f32),
+    WindowBorderWidthChanged(f32),
+    WindowBorderRadiusChanged(f32),
+    WindowCursorProximityChanged(f32),
+    WindowCursorCloseBorderWidthChanged(f32),
+    WindowGrabbedBorderWidthChanged(f32),
     CursorDistanceChanged(String),
     Reload,
     Save,
@@ -56,8 +72,12 @@ struct SettingsApp {
     background_preview: Option<iced_image::Handle>,
     background_preview_message: String,
     show_albedo_picker: bool,
+    show_window_border_picker: bool,
+    show_cursor_close_border_picker: bool,
+    show_grabbed_border_picker: bool,
     floor_height: String,
     window_distance: String,
+    window_pixels_per_degree: String,
     cursor_distance: String,
     status: String,
     status_is_error: bool,
@@ -79,6 +99,7 @@ impl SettingsApp {
         let backgrounds = background_files();
         let floor_height = format!("{}", config.floor.height_m);
         let window_distance = format!("{}", config.window.default_distance_m);
+        let window_pixels_per_degree = format!("{}", config.window.pixels_per_degree);
         let cursor_distance = format!("{}", config.cursor.default_distance_m);
         let mut app = Self {
             config,
@@ -87,8 +108,12 @@ impl SettingsApp {
             background_preview: None,
             background_preview_message: String::new(),
             show_albedo_picker: false,
+            show_window_border_picker: false,
+            show_cursor_close_border_picker: false,
+            show_grabbed_border_picker: false,
             floor_height,
             window_distance,
+            window_pixels_per_degree,
             cursor_distance,
             status,
             status_is_error,
@@ -105,11 +130,21 @@ impl SettingsApp {
                 | Message::BackgroundRotationChanged(_)
                 | Message::FloorHeightChanged(_)
                 | Message::SubmitAlbedoColor(_)
+                | Message::SubmitWindowBorderColor(_)
+                | Message::SubmitCursorCloseBorderColor(_)
+                | Message::SubmitGrabbedBorderColor(_)
                 | Message::RoughnessChanged(_)
                 | Message::ReflectanceChanged(_)
                 | Message::ReflectionGrainSizeChanged(_)
                 | Message::RayCountChanged(_)
                 | Message::WindowDistanceChanged(_)
+                | Message::WindowPixelsPerDegreeChanged(_)
+                | Message::WindowPaddingChanged(_)
+                | Message::WindowBorderWidthChanged(_)
+                | Message::WindowBorderRadiusChanged(_)
+                | Message::WindowCursorProximityChanged(_)
+                | Message::WindowCursorCloseBorderWidthChanged(_)
+                | Message::WindowGrabbedBorderWidthChanged(_)
                 | Message::CursorDistanceChanged(_)
         );
         match message {
@@ -162,6 +197,24 @@ impl SettingsApp {
                 self.show_albedo_picker = false;
             }
             Message::CancelAlbedoColor => self.show_albedo_picker = false,
+            Message::ChooseWindowBorderColor => self.show_window_border_picker = true,
+            Message::SubmitWindowBorderColor(color) => {
+                self.config.window.border_color = [color.r, color.g, color.b, color.a];
+                self.show_window_border_picker = false;
+            }
+            Message::CancelWindowBorderColor => self.show_window_border_picker = false,
+            Message::ChooseCursorCloseBorderColor => self.show_cursor_close_border_picker = true,
+            Message::SubmitCursorCloseBorderColor(color) => {
+                self.config.window.cursor_close_border_color = [color.r, color.g, color.b, color.a];
+                self.show_cursor_close_border_picker = false;
+            }
+            Message::CancelCursorCloseBorderColor => self.show_cursor_close_border_picker = false,
+            Message::ChooseGrabbedBorderColor => self.show_grabbed_border_picker = true,
+            Message::SubmitGrabbedBorderColor(color) => {
+                self.config.window.grabbed_border_color = [color.r, color.g, color.b, color.a];
+                self.show_grabbed_border_picker = false;
+            }
+            Message::CancelGrabbedBorderColor => self.show_grabbed_border_picker = false,
             Message::FloorHeightChanged(value) => self.floor_height = value,
             Message::RoughnessChanged(value) => self.config.floor.roughness = value,
             Message::ReflectanceChanged(value) => self.config.floor.reflectance = value,
@@ -170,6 +223,21 @@ impl SettingsApp {
             }
             Message::RayCountChanged(value) => self.config.floor.ray_count = value,
             Message::WindowDistanceChanged(value) => self.window_distance = value,
+            Message::WindowPixelsPerDegreeChanged(value) => self.window_pixels_per_degree = value,
+            Message::WindowPaddingChanged(value) => self.config.window.padding_px = value,
+            Message::WindowBorderWidthChanged(value) => self.config.window.border_width_px = value,
+            Message::WindowBorderRadiusChanged(value) => {
+                self.config.window.border_radius_px = value
+            }
+            Message::WindowCursorProximityChanged(value) => {
+                self.config.window.cursor_proximity_radius_px = value
+            }
+            Message::WindowCursorCloseBorderWidthChanged(value) => {
+                self.config.window.cursor_close_border_width_px = value
+            }
+            Message::WindowGrabbedBorderWidthChanged(value) => {
+                self.config.window.grabbed_border_width_px = value
+            }
             Message::CursorDistanceChanged(value) => self.cursor_distance = value,
             Message::Reload => match AppConfig::load() {
                 Ok(config) => {
@@ -294,6 +362,8 @@ impl SettingsApp {
         config.floor.height_m = parse_number("Fallback floor height", &self.floor_height)?;
         config.window.default_distance_m =
             parse_number("Default window distance", &self.window_distance)?;
+        config.window.pixels_per_degree =
+            parse_number("Window pixels per degree", &self.window_pixels_per_degree)?;
         config.cursor.default_distance_m =
             parse_number("Default cursor distance", &self.cursor_distance)?;
         config
@@ -495,15 +565,142 @@ impl SettingsApp {
             .spacing(18),
         );
 
+        let window_border_color = Color::from_rgba(
+            self.config.window.border_color[0],
+            self.config.window.border_color[1],
+            self.config.window.border_color[2],
+            self.config.window.border_color[3],
+        );
+        let window_border_picker = color_picker(
+            self.show_window_border_picker,
+            window_border_color,
+            button(color_swatch(window_border_color))
+                .on_press(Message::ChooseWindowBorderColor)
+                .style(quiet_button),
+            Message::CancelWindowBorderColor,
+            Message::SubmitWindowBorderColor,
+        );
+        let cursor_close_border_color = Color::from_rgba(
+            self.config.window.cursor_close_border_color[0],
+            self.config.window.cursor_close_border_color[1],
+            self.config.window.cursor_close_border_color[2],
+            self.config.window.cursor_close_border_color[3],
+        );
+        let cursor_close_border_picker = color_picker(
+            self.show_cursor_close_border_picker,
+            cursor_close_border_color,
+            button(color_swatch(cursor_close_border_color))
+                .on_press(Message::ChooseCursorCloseBorderColor)
+                .style(quiet_button),
+            Message::CancelCursorCloseBorderColor,
+            Message::SubmitCursorCloseBorderColor,
+        );
+        let grabbed_border_color = Color::from_rgba(
+            self.config.window.grabbed_border_color[0],
+            self.config.window.grabbed_border_color[1],
+            self.config.window.grabbed_border_color[2],
+            self.config.window.grabbed_border_color[3],
+        );
+        let grabbed_border_picker = color_picker(
+            self.show_grabbed_border_picker,
+            grabbed_border_color,
+            button(color_swatch(grabbed_border_color))
+                .on_press(Message::ChooseGrabbedBorderColor)
+                .style(quiet_button),
+            Message::CancelGrabbedBorderColor,
+            Message::SubmitGrabbedBorderColor,
+        );
+
         let placement = row![
             section(
                 "WINDOWS",
-                labeled_input(
-                    "DEFAULT DISTANCE (M)",
-                    &self.window_distance,
-                    "1.6",
-                    Message::WindowDistanceChanged,
-                ),
+                column![
+                    labeled_input(
+                        "DEFAULT DISTANCE (M)",
+                        &self.window_distance,
+                        "1.6",
+                        Message::WindowDistanceChanged,
+                    ),
+                    labeled_input(
+                        "PIXELS PER DEGREE",
+                        &self.window_pixels_per_degree,
+                        "32",
+                        Message::WindowPixelsPerDegreeChanged,
+                    ),
+                    slider_row(
+                        "PADDING (PX)",
+                        self.config.window.padding_px,
+                        0.0,
+                        500.0,
+                        1.0,
+                        Message::WindowPaddingChanged,
+                    ),
+                    slider_row(
+                        "BORDER WIDTH (PX)",
+                        self.config.window.border_width_px,
+                        0.0,
+                        100.0,
+                        1.0,
+                        Message::WindowBorderWidthChanged,
+                    ),
+                    row![
+                        column![
+                            text("BORDER COLOR").size(11).color(MUTED),
+                            window_border_picker
+                        ]
+                        .spacing(8),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                    slider_row(
+                        "BORDER RADIUS (PX)",
+                        self.config.window.border_radius_px,
+                        0.0,
+                        500.0,
+                        1.0,
+                        Message::WindowBorderRadiusChanged,
+                    ),
+                    slider_row(
+                        "CURSOR PROXIMITY (PX)",
+                        self.config.window.cursor_proximity_radius_px,
+                        0.0,
+                        500.0,
+                        1.0,
+                        Message::WindowCursorProximityChanged,
+                    ),
+                    slider_row(
+                        "CLOSE BORDER (PX)",
+                        self.config.window.cursor_close_border_width_px,
+                        0.0,
+                        100.0,
+                        1.0,
+                        Message::WindowCursorCloseBorderWidthChanged,
+                    ),
+                    row![
+                        column![
+                            text("CLOSE BORDER COLOR").size(11).color(MUTED),
+                            cursor_close_border_picker
+                        ]
+                        .spacing(8),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                    slider_row(
+                        "GRABBED BORDER (PX)",
+                        self.config.window.grabbed_border_width_px,
+                        0.0,
+                        100.0,
+                        1.0,
+                        Message::WindowGrabbedBorderWidthChanged,
+                    ),
+                    row![
+                        column![
+                            text("GRABBED BORDER COLOR").size(11).color(MUTED),
+                            grabbed_border_picker
+                        ]
+                        .spacing(8),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                ]
+                .spacing(10),
             ),
             section(
                 "CURSOR",

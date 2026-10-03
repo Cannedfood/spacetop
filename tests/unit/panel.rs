@@ -121,6 +121,50 @@ fn panel_width_scales_linearly_with_distance() {
 }
 
 #[test]
+fn pixel_density_sets_angular_width_and_resize_grows_the_panel() {
+    let width = PanelPose::width_for_pixel_density(640.0, 2.0, 32.0);
+    let resized = PanelPose::width_for_pixel_density(960.0, 2.0, 32.0);
+    assert!(resized > width);
+    let angle = 2.0 * (width / 4.0).atan().to_degrees();
+    assert!((640.0 / angle - 32.0).abs() < 1.0e-4);
+}
+
+#[test]
+fn edge_resize_keeps_the_opposite_edge_anchored() {
+    let initial = panel();
+    let resized_width = initial.pose.width_m;
+    let unchanged =
+        initial.resized_pose_from_edges(initial.logical_size, [false, true, false, false], 32.0);
+    assert_eq!(unchanged, initial.pose);
+
+    let right_resize =
+        initial.resized_pose_from_edges((1200, 500).into(), [false, true, false, false], 32.0);
+    let right_axis = initial.pose.orientation() * Vec3::X;
+    let initial_left = initial.pose.center.dot(right_axis) - initial.pose.width_m * 0.5;
+    let resized_left = right_resize.center.dot(right_axis) - right_resize.width_m * 0.5;
+    assert!((resized_left - initial_left).abs() < 1.0e-5);
+
+    let left_resize =
+        initial.resized_pose_from_edges((800, 500).into(), [true, false, false, false], 32.0);
+    let initial_right = initial.pose.center.dot(right_axis) + initial.pose.width_m * 0.5;
+    let resized_right = left_resize.center.dot(right_axis) + left_resize.width_m * 0.5;
+    assert!((resized_right - initial_right).abs() < 1.0e-5);
+
+    let bottom_resize =
+        initial.resized_pose_from_edges((1000, 700).into(), [false, false, false, true], 32.0);
+    let up_axis = initial.pose.orientation() * Vec3::Y;
+    let initial_top = initial.pose.center.dot(up_axis) + resized_width * 0.25;
+    let resized_top = bottom_resize.center.dot(up_axis) + bottom_resize.width_m * 0.35;
+    assert!((resized_top - initial_top).abs() < 1.0e-5);
+
+    let top_resize =
+        initial.resized_pose_from_edges((1000, 300).into(), [false, false, true, false], 32.0);
+    let initial_bottom = initial.pose.center.dot(up_axis) - resized_width * 0.25;
+    let resized_bottom = top_resize.center.dot(up_axis) - top_resize.width_m * 0.15;
+    assert!((resized_bottom - initial_bottom).abs() < 1.0e-5);
+}
+
+#[test]
 fn center_ray_hits_center_of_panel() {
     let hit = panel()
         .intersect(Ray3 {
@@ -151,6 +195,17 @@ fn ray_misses_outside_panel_and_behind_origin() {
             })
             .is_none()
     );
+}
+
+#[test]
+fn unbounded_intersection_preserves_outside_panel_coordinates() {
+    let hit = panel()
+        .intersect_unbounded(Ray3 {
+            origin: Vec3::ZERO,
+            direction: Vec3::new(0.6, 0.0, -2.0).normalize(),
+        })
+        .unwrap();
+    assert!(hit.surface_px.x > panel().logical_size.w as f32);
 }
 
 #[test]

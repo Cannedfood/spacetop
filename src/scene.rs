@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use ash::vk;
-use glam::{Mat4, Quat, Vec3, Vec4};
+use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use half::f16;
 use openxr as xr;
 use std::{
@@ -708,7 +708,8 @@ pub(crate) struct SceneFrame<'a> {
     pub skybox: Option<&'a SkyboxTexture>,
     pub panels: &'a [(&'a PanelTexture, PanelGeometry)],
     pub cursor: Option<PanelPose>,
-    pub hovered_panel: Option<PanelGeometry>,
+    pub cursor_close_panel: Option<(PanelGeometry, Vec2)>,
+    pub grabbed_panel: Option<PanelGeometry>,
     pub floor_y: f32,
 }
 
@@ -718,6 +719,11 @@ struct FloorUniform {
     albedo: [f32; 4],
     controls: [f32; 4],
     sampling: [f32; 4],
+    window_style: [f32; 4],
+    border_color: [f32; 4],
+    cursor_close_border_color: [f32; 4],
+    grabbed_style: [f32; 4],
+    grabbed_border_color: [f32; 4],
 }
 
 impl From<&AppConfig> for FloorUniform {
@@ -736,6 +742,21 @@ impl From<&AppConfig> for FloorUniform {
                 0.0,
                 0.0,
             ],
+            window_style: [
+                config.window.padding_px,
+                config.window.border_width_px,
+                config.window.border_radius_px,
+                config.window.cursor_close_border_width_px,
+            ],
+            border_color: config.window.border_color,
+            cursor_close_border_color: config.window.cursor_close_border_color,
+            grabbed_style: [
+                config.window.grabbed_border_width_px,
+                config.window.cursor_proximity_radius_px,
+                0.0,
+                0.0,
+            ],
+            grabbed_border_color: config.window.grabbed_border_color,
         }
     }
 }
@@ -1136,7 +1157,7 @@ impl SceneRenderer {
                 108,
                 floor_height_bytes,
             );
-            let eye = [
+            let mut eye = [
                 view.pose.position.x,
                 view.pose.position.y,
                 view.pose.position.z,
@@ -1215,23 +1236,35 @@ impl SceneRenderer {
                 self.window_pipeline,
             );
             for (texture, geometry) in panels {
-                let outline = [
-                    0.0,
-                    0.0,
-                    0.0,
-                    if frame.hovered_panel == Some(geometry) {
-                        1.0
-                    } else {
-                        0.0
-                    },
-                ];
-                let outline_bytes = std::slice::from_raw_parts(outline.as_ptr().cast::<u8>(), 16);
+                let close_hit = frame
+                    .cursor_close_panel
+                    .filter(|(close_geometry, _)| *close_geometry == geometry);
+                let cursor_position =
+                    close_hit.map_or([0.0; 4], |(_, position)| [position.x, position.y, 0.0, 0.0]);
+                let cursor_position_bytes =
+                    std::slice::from_raw_parts(cursor_position.as_ptr().cast::<u8>(), 16);
                 self.device.cmd_push_constants(
                     command,
                     self.layout,
                     vk::ShaderStageFlags::FRAGMENT,
-                    96,
-                    outline_bytes,
+                    64,
+                    cursor_position_bytes,
+                );
+                eye[0] = geometry.logical_size.w as f32;
+                eye[1] = geometry.logical_size.h as f32;
+                eye[2] = if frame.grabbed_panel == Some(geometry) {
+                    1.0
+                } else {
+                    0.0
+                };
+                eye[3] = if close_hit.is_some() { 1.0 } else { 0.0 };
+                let eye_bytes = std::slice::from_raw_parts(eye.as_ptr().cast::<u8>(), 16);
+                self.device.cmd_push_constants(
+                    command,
+                    self.layout,
+                    vk::ShaderStageFlags::FRAGMENT,
+                    112,
+                    eye_bytes,
                 );
                 self.device.cmd_bind_descriptor_sets(
                     command,

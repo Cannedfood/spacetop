@@ -39,10 +39,11 @@ pub fn run(
                 });
             }
         })?;
-    let mut compositor = Compositor::with_window_distance(
+    let mut compositor = Compositor::with_window_settings(
         display_handle.clone(),
         frame_sender,
         config.window.default_distance_m,
+        config.window.pixels_per_degree,
     );
     input::start(&event_loop.handle())?;
     let socket = ListeningSocketSource::new_auto()?;

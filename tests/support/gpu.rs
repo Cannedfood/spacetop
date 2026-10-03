@@ -260,7 +260,8 @@ impl Vulkan {
                         skybox: scene.skybox.as_deref(),
                         panels: scene.panels,
                         cursor: scene.cursor,
-                        hovered_panel: None,
+                        cursor_close_panel: None,
+                        grabbed_panel: None,
                         floor_y: scene.floor_y,
                     },
                 );

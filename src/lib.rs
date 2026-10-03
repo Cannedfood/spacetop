@@ -110,6 +110,7 @@ struct Compositor {
     frame_sender: bridge::PanelSender,
     panel_limits: panel::PanelLimits,
     default_window_distance: f32,
+    window_pixels_per_degree: f32,
     active_panel: Option<u64>,
     fatal_error: Option<anyhow::Error>,
     started_at: Instant,
@@ -246,8 +247,11 @@ impl Compositor {
             }
             XrInput::ConfigReloaded {
                 default_window_distance,
+                window_pixels_per_degree,
             } => {
                 self.default_window_distance = default_window_distance;
+                self.window_pixels_per_degree = window_pixels_per_degree;
+                self.refresh_panels();
                 Ok(())
             }
             XrInput::FatalError { message } => Err(anyhow::anyhow!(message)),
@@ -265,13 +269,14 @@ impl Compositor {
 
     #[cfg(test)]
     fn new(display_handle: DisplayHandle, frame_sender: bridge::PanelSender) -> Self {
-        Self::with_window_distance(display_handle, frame_sender, config::DEFAULT_DISTANCE)
+        Self::with_window_settings(display_handle, frame_sender, config::DEFAULT_DISTANCE, 32.0)
     }
 
-    fn with_window_distance(
+    fn with_window_settings(
         display_handle: DisplayHandle,
         frame_sender: bridge::PanelSender,
         default_window_distance: f32,
+        window_pixels_per_degree: f32,
     ) -> Self {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
@@ -323,6 +328,7 @@ impl Compositor {
             frame_sender,
             panel_limits: panel::PanelLimits::default(),
             default_window_distance,
+            window_pixels_per_degree,
             active_panel: None,
             fatal_error: None,
             started_at: Instant::now(),
@@ -525,7 +531,7 @@ impl Compositor {
     fn capture_panel(&mut self, index: usize) -> anyhow::Result<()> {
         let surface = self.panels[index].surface.wl_surface().clone();
         let panel_id = self.panels[index].id;
-        let Some((_, buffer_scale)) =
+        let Some((root_size, buffer_scale)) =
             smithay::backend::renderer::utils::with_renderer_surface_state(&surface, |state| {
                 state
                     .surface_size()
@@ -536,7 +542,7 @@ impl Compositor {
             return Ok(());
         };
 
-        let Some(geometry) = self.panels[index].geometry else {
+        let Some(mut geometry) = self.panels[index].geometry else {
             return Ok(());
         };
         let bounds = self.panels[index].bounds;
@@ -566,6 +572,13 @@ impl Compositor {
                 renderer.capture(&surfaces, size, scale)
             })
             .context("mandatory GPU panel capture failed")?;
+        geometry.pose.width_m = PanelPose::width_for_pixel_density(
+            size.w as f32,
+            geometry.pose.center.length(),
+            self.window_pixels_per_degree,
+        );
+        self.panels[index].pose = geometry.root_pose(root_size, bounds);
+        self.panels[index].geometry = Some(geometry);
         let Some(geometry) = self.panels[index].geometry else {
             return Ok(());
         };
