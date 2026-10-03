@@ -70,6 +70,7 @@ fn cursor_pose(
     ray: Ray3,
     player: glam::Vec3,
     panels: impl Iterator<Item = PanelGeometry>,
+    sphere_radius: &mut f32,
 ) -> Option<PanelPose> {
     let direction = ray.direction.try_normalize()?;
     let ray = Ray3 { direction, ..ray };
@@ -77,16 +78,18 @@ fn cursor_pose(
         .filter_map(|geometry| geometry.intersect(ray).map(|hit| (geometry.pose, hit)))
         .min_by(|(_, first), (_, second)| first.distance_m.total_cmp(&second.distance_m));
     if let Some((pose, hit)) = nearest {
+        let center = ray.origin + direction * hit.distance_m;
+        *sphere_radius = center.distance(player);
         return Some(PanelPose {
-            center: ray.origin + direction * hit.distance_m,
+            center,
             width_m: 0.021,
             ..pose
         });
     }
-    let radius = PanelPose::for_slot(0).center.length();
     let offset = ray.origin - player;
     let projection = offset.dot(direction);
-    let discriminant = projection * projection - offset.length_squared() + radius * radius;
+    let discriminant =
+        projection * projection - offset.length_squared() + *sphere_radius * *sphere_radius;
     if discriminant < 0.0 {
         return None;
     }
@@ -415,6 +418,7 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
     let mut exit = false;
     let mut panel_frames = PanelImages::new();
     let mut cursor_ray: Option<Ray3> = None;
+    let mut cursor_sphere_radius = PanelPose::for_slot(0).center.length();
     let mut pointer_tracked = false;
     let mut trigger_pressed = false;
     let mut secondary_pressed = false;
@@ -748,6 +752,7 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                 ray,
                 grab_player_position,
                 panel_frames.values().map(|panel| panel.geometry),
+                &mut cursor_sphere_radius,
             )
         });
         unsafe {

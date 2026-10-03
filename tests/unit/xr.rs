@@ -7,7 +7,8 @@ fn cursor_uses_default_player_sphere_without_a_window() {
         origin: player + glam::Vec3::new(0.3, -0.2, -0.4),
         direction: glam::Vec3::NEG_Z * 2.0,
     };
-    let pose = cursor_pose(ray, player, std::iter::empty()).unwrap();
+    let mut sphere_radius = 1.6;
+    let pose = cursor_pose(ray, player, std::iter::empty(), &mut sphere_radius).unwrap();
     assert!((pose.center.distance(player) - 1.6).abs() < 1.0e-5);
     assert!((pose.center - ray.origin).cross(ray.direction).length() < 1.0e-5);
     let normal = pose.orientation() * glam::Vec3::Z;
@@ -33,17 +34,32 @@ fn cursor_uses_nearest_window_hit_and_orientation() {
         pose: PanelPose::facing_origin(glam::Vec3::new(0.0, 0.0, -2.5)),
         ..near
     };
-    let pose = cursor_pose(ray, glam::Vec3::ZERO, [far, near].into_iter()).unwrap();
+    let mut sphere_radius = 1.6;
+    let pose = cursor_pose(
+        ray,
+        glam::Vec3::ZERO,
+        [far, near].into_iter(),
+        &mut sphere_radius,
+    )
+    .unwrap();
     let hit = near.intersect(ray).unwrap();
     assert!((pose.center - (ray.origin + ray.direction * hit.distance_m)).length() < 1.0e-5);
     assert_eq!(pose.orientation(), near.pose.orientation());
     assert_eq!(pose.width_m, 0.021);
+    assert!((sphere_radius - pose.center.length()).abs() < 1.0e-5);
+    let hovered_radius = sphere_radius;
     let miss = Ray3 {
         direction: glam::Vec3::X,
         ..ray
     };
-    let pose = cursor_pose(miss, glam::Vec3::ZERO, [far, near].into_iter()).unwrap();
-    assert!((pose.center.length() - 1.6).abs() < 1.0e-5);
+    let pose = cursor_pose(
+        miss,
+        glam::Vec3::ZERO,
+        [far, near].into_iter(),
+        &mut sphere_radius,
+    )
+    .unwrap();
+    assert!((pose.center.length() - hovered_radius).abs() < 1.0e-5);
 }
 
 #[test]
@@ -62,7 +78,16 @@ fn cursor_rejects_invalid_rays_and_sphere_misses() {
             direction: glam::Vec3::NEG_Z,
         },
     ] {
-        assert!(cursor_pose(ray, glam::Vec3::ZERO, std::iter::empty()).is_none());
+        let mut sphere_radius = 1.6;
+        assert!(
+            cursor_pose(
+                ray,
+                glam::Vec3::ZERO,
+                std::iter::empty(),
+                &mut sphere_radius
+            )
+            .is_none()
+        );
     }
 }
 
