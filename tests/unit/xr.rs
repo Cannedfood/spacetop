@@ -1,5 +1,4 @@
 use super::*;
-use crate::scene::FALLBACK_FLOOR_Y;
 
 #[test]
 fn resize_release_reliably_sends_the_final_size_when_motion_queue_is_full() {
@@ -170,17 +169,18 @@ fn requires_srgb_swapchain() {
 
 #[test]
 fn stage_floor_uses_valid_height_and_retains_it_during_tracking_loss() {
+    let default_floor_height = crate::config::AppConfig::default().floor.height_m;
     let mut location = xr::SpaceLocation {
         location_flags: xr::SpaceLocationFlags::EMPTY,
         pose: xr::Posef::IDENTITY,
     };
     location.pose.position.y = -1.7;
     assert_eq!(
-        tracked_floor_height(FALLBACK_FLOOR_Y, location),
-        FALLBACK_FLOOR_Y
+        tracked_floor_height(default_floor_height, location),
+        default_floor_height
     );
     location.location_flags = xr::SpaceLocationFlags::POSITION_VALID;
-    assert_eq!(tracked_floor_height(FALLBACK_FLOOR_Y, location), -1.7);
+    assert_eq!(tracked_floor_height(default_floor_height, location), -1.7);
     location.pose.position.y = 0.0;
     assert_eq!(tracked_floor_height(-1.7, location), 0.0);
     location.location_flags = xr::SpaceLocationFlags::ORIENTATION_VALID;

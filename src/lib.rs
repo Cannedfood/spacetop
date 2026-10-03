@@ -302,7 +302,13 @@ impl Compositor {
 
     #[cfg(test)]
     fn new(display_handle: DisplayHandle, frame_sender: bridge::PanelSender) -> Self {
-        Self::with_window_settings(display_handle, frame_sender, config::DEFAULT_DISTANCE, 32.0)
+        let defaults = config::AppConfig::default();
+        Self::with_window_settings(
+            display_handle,
+            frame_sender,
+            defaults.window.default_distance_m,
+            defaults.window.pixels_per_degree,
+        )
     }
 
     fn with_window_settings(

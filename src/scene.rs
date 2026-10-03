@@ -16,9 +16,6 @@ use crate::{
     panel::{PanelGeometry, PanelPose},
 };
 
-#[cfg(test)]
-pub(crate) const FALLBACK_FLOOR_Y: f32 = spacetop_config::FALLBACK_FLOOR_HEIGHT;
-
 const SHADER: &str = include_str!("scene.wgsl");
 static NEXT_PANEL_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 

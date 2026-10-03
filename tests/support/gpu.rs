@@ -1,9 +1,7 @@
 use super::*;
 use crate::{
     panel::{PanelGeometry, PanelPose},
-    scene::{
-        FALLBACK_FLOOR_Y, PanelTexture, RenderTarget, SceneFrame, SceneRenderer, SkyboxTexture,
-    },
+    scene::{PanelTexture, RenderTarget, SceneFrame, SceneRenderer, SkyboxTexture},
 };
 
 struct SceneReadback<'a> {
@@ -13,6 +11,10 @@ struct SceneReadback<'a> {
     panels: &'a [(&'a PanelTexture, PanelGeometry)],
     cursor: Option<PanelPose>,
     floor_y: f32,
+}
+
+fn default_floor_height() -> f32 {
+    crate::config::AppConfig::default().floor.height_m
 }
 
 #[test]
@@ -504,7 +506,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             skybox: Some(&mut skybox),
             panels: &panels,
             cursor: Some(cursor),
-            floor_y: FALLBACK_FLOOR_Y,
+            floor_y: default_floor_height(),
         }),
     )?;
     let pixel = |pixels: &[u8], horizontal: usize, vertical: usize| {
@@ -528,7 +530,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             skybox: Some(&mut skybox),
             panels: &panels,
             cursor: Some(cursor),
-            floor_y: FALLBACK_FLOOR_Y,
+            floor_y: default_floor_height(),
         }),
     )?;
     assert_eq!(
@@ -546,7 +548,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             skybox: Some(&mut skybox),
             panels: &[(&background, near)],
             cursor: None,
-            floor_y: FALLBACK_FLOOR_Y,
+            floor_y: default_floor_height(),
         }),
     )?;
     let mut translucent_border_config = window_test_config.clone();
@@ -563,7 +565,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             skybox: Some(&mut skybox),
             panels: &[(&background, near)],
             cursor: None,
-            floor_y: FALLBACK_FLOOR_Y,
+            floor_y: default_floor_height(),
         }),
     )?;
     let outer_translucent_border = (0..512)
@@ -594,7 +596,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             skybox: Some(&mut skybox),
             panels: &panels,
             cursor: None,
-            floor_y: FALLBACK_FLOOR_Y,
+            floor_y: default_floor_height(),
         }),
     )?;
     assert_eq!(pixel(&moved, 380, 200), [0, 0, 0, 255]);
@@ -620,7 +622,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
                 skybox: Some(skybox),
                 panels,
                 cursor: None,
-                floor_y: FALLBACK_FLOOR_Y,
+                floor_y: default_floor_height(),
             }),
         )
     };
@@ -675,7 +677,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             skybox: Some(&mut skybox),
             panels: &[(&background, emitter)],
             cursor: None,
-            floor_y: FALLBACK_FLOOR_Y,
+            floor_y: default_floor_height(),
         }),
     )?;
     let mut anchored_pixels = 0;
@@ -762,10 +764,10 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     )?;
     assert_eq!(pixel(&lowered, 256, 450), empty_floor_pixel);
     let mut stage_view = view;
-    stage_view.pose.position.y = -FALLBACK_FLOOR_Y;
+    stage_view.pose.position.y = -default_floor_height();
     let stage_emitter = PanelGeometry {
         pose: PanelPose {
-            center: emitter.pose.center - glam::Vec3::Y * FALLBACK_FLOOR_Y,
+            center: emitter.pose.center - glam::Vec3::Y * default_floor_height(),
             ..emitter.pose
         },
         ..emitter
@@ -824,7 +826,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
             skybox: Some(&mut skybox),
             panels: &[],
             cursor: None,
-            floor_y: FALLBACK_FLOOR_Y,
+            floor_y: default_floor_height(),
         }),
     )?;
     assert!(
@@ -876,7 +878,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
             skybox: Some(&mut skybox),
             panels: &[],
             cursor: None,
-            floor_y: FALLBACK_FLOOR_Y,
+            floor_y: default_floor_height(),
         }),
     )?;
     assert!(
@@ -896,7 +898,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
             skybox: Some(&mut skybox),
             panels: &[],
             cursor: None,
-            floor_y: FALLBACK_FLOOR_Y,
+            floor_y: default_floor_height(),
         }),
     )?;
     assert_ne!(
@@ -918,7 +920,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
             skybox: Some(&mut skybox),
             panels: &[],
             cursor: None,
-            floor_y: FALLBACK_FLOOR_Y,
+            floor_y: default_floor_height(),
         }),
     )?;
     let sky_only_pixels = vulkan.readback_image(
@@ -1005,12 +1007,12 @@ fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
             }),
         )
     };
-    let head_target = glam::Vec3::new(0.0, FALLBACK_FLOOR_Y, -2.0);
+    let head_target = glam::Vec3::new(0.0, default_floor_height(), -2.0);
     let head_view = view_at(head_target, glam::Vec3::new(0.0, 0.0, -2.0));
     let grazing_view = view_at(head_target, glam::Vec3::new(5.0, 0.0, -2.0));
-    let head_on = render(&head_view, FALLBACK_FLOOR_Y)?;
+    let head_on = render(&head_view, default_floor_height())?;
     let head_sky = render(&head_view, f32::NAN)?;
-    let grazing = render(&grazing_view, FALLBACK_FLOOR_Y)?;
+    let grazing = render(&grazing_view, default_floor_height())?;
     let grazing_sky = render(&grazing_view, f32::NAN)?;
     let center = (64 * 128 + 64) * 4;
     let decode = |channel: u8| {
@@ -1037,9 +1039,9 @@ fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
         head_albedo,
         recovered_albedo(&grazing, &grazing_sky)
     );
-    let distant_target = glam::Vec3::new(0.0, FALLBACK_FLOOR_Y, -45.0);
+    let distant_target = glam::Vec3::new(0.0, default_floor_height(), -45.0);
     let distant_view = view_at(distant_target, glam::Vec3::ZERO);
-    let distant_floor = render(&distant_view, FALLBACK_FLOOR_Y)?;
+    let distant_floor = render(&distant_view, default_floor_height())?;
     let distant_sky = render(&distant_view, f32::NAN)?;
     assert_ne!(
         &distant_floor[center..center + 3],

@@ -41,7 +41,7 @@ fn config_reload_updates_default_window_distance() {
 
     compositor.handle_xr_input(crate::XrInput::ConfigReloaded {
         default_window_distance: 2.4,
-        window_pixels_per_degree: 32.0,
+        window_pixels_per_degree: 25.0,
     });
 
     assert_eq!(compositor.default_window_distance, 2.4);

@@ -6,8 +6,6 @@ use std::{
 
 use anyhow::{Context, Result};
 pub(crate) use spacetop_config::AppConfig;
-#[cfg(test)]
-pub(crate) use spacetop_config::DEFAULT_DISTANCE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ConfigStamp {
@@ -79,7 +77,10 @@ mod tests {
 
         assert_eq!(config.floor.roughness, 0.4);
         assert_eq!(config.floor.albedo, AppConfig::default().floor.albedo);
-        assert_eq!(config.background.image, "random");
+        assert_eq!(
+            config.background.image,
+            AppConfig::default().background.image
+        );
     }
 
     #[test]

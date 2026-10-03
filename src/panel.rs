@@ -62,7 +62,12 @@ pub struct PanelPose {
 impl PanelPose {
     #[cfg(test)]
     pub fn for_slot(slot: usize) -> Self {
-        Self::for_slot_at_distance(slot, crate::config::DEFAULT_DISTANCE)
+        Self::for_slot_at_distance(
+            slot,
+            crate::config::AppConfig::default()
+                .window
+                .default_distance_m,
+        )
     }
 
     pub fn for_slot_at_distance(slot: usize, distance: f32) -> Self {
