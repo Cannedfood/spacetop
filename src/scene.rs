@@ -8,8 +8,25 @@ use crate::{
     panel::{PanelGeometry, PanelPose},
 };
 
+pub(crate) const FALLBACK_FLOOR_Y: f32 = -1.3;
+
 const SHADER: &str = r#"
-struct Transform { matrix: mat4x4<f32> }
+const FLOOR_REFLECTANCE: f32 = 0.18;
+const FLOOR_ROUGHNESS: f32 = 0.25;
+const FLOOR_RAY_COUNT: u32 = 4u;
+const FLOOR_NOISE_CELL_SIZE: f32 = 0.002;
+const PI: f32 = 3.14159265;
+const_assert FLOOR_RAY_COUNT > 0u;
+const_assert FLOOR_ROUGHNESS >= 0.0 && FLOOR_ROUGHNESS <= 1.0;
+const_assert FLOOR_REFLECTANCE >= 0.0 && FLOOR_REFLECTANCE <= 1.0;
+
+struct Transform {
+    matrix: mat4x4<f32>,
+    emitter_center_width: vec4<f32>,
+    emitter_right_height: vec4<f32>,
+    emitter_up: vec4<f32>,
+    eye_position: vec4<f32>,
+}
 var<immediate> transform: Transform;
 @group(0) @binding(0) var panel: texture_2d<f32>;
 @group(0) @binding(1) var filtering: sampler;
@@ -36,6 +53,98 @@ struct Vertex {
     let stroke = max(vec2(0.5 / 21.0), fwidth(input.uv) * 0.75);
     if all(abs(input.uv - vec2(0.5)) > stroke) { discard; }
     return vec4(1.0, 0.9131, 0.0, 1.0);
+}
+struct FloorVertex {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world: vec3<f32>,
+}
+@vertex fn floor_vertex(@builtin(vertex_index) index: u32) -> FloorVertex {
+    let corners = array<vec2<f32>, 6>(
+        vec2(0.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 0.0),
+        vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
+    let world = vec3((corners[index].x - 0.5) * 60.0, transform.emitter_up.w,
+        (corners[index].y - 0.5) * 60.0);
+    var result: FloorVertex;
+    result.position = transform.matrix * vec4(world, 1.0);
+    result.world = world;
+    return result;
+}
+fn sample_ggx_visible_normal(view: vec3<f32>, sample_uv: vec2<f32>, alpha: f32) -> vec3<f32> {
+    let stretched = normalize(vec3(alpha * view.x, alpha * view.z, view.y));
+    let tangent_length_squared = dot(stretched.xy, stretched.xy);
+    var tangent = vec3(1.0, 0.0, 0.0);
+    if tangent_length_squared > 0.0 {
+        tangent = vec3(-stretched.y, stretched.x, 0.0) * inverseSqrt(tangent_length_squared);
+    }
+    let bitangent = cross(stretched, tangent);
+    let radius = sqrt(sample_uv.x);
+    let angle = 2.0 * PI * sample_uv.y;
+    let disk_x = radius * cos(angle);
+    let blend = 0.5 * (1.0 + stretched.z);
+    let disk_y = (1.0 - blend) * sqrt(max(0.0, 1.0 - disk_x * disk_x))
+        + blend * radius * sin(angle);
+    let hemisphere = tangent * disk_x + bitangent * disk_y
+        + stretched * sqrt(max(0.0, 1.0 - disk_x * disk_x - disk_y * disk_y));
+    let local_normal = normalize(vec3(alpha * hemisphere.xy, max(0.0, hemisphere.z)));
+    return vec3(local_normal.x, local_normal.z, local_normal.y);
+}
+fn ggx_masking(cosine: f32, alpha_squared: f32) -> f32 {
+    return 2.0 * cosine / (cosine + sqrt(alpha_squared + (1.0 - alpha_squared) * cosine * cosine));
+}
+fn sample_hash(value: u32) -> u32 {
+    let state = value * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
+    let cell = bitcast<vec2<u32>>(vec2<i32>(round(position.xz / FLOOR_NOISE_CELL_SIZE)));
+    let seed = sample_hash(cell.x ^ sample_hash(cell.y) ^ sample_hash(index + 0x9e3779b9u));
+    let random = vec2(sample_hash(seed), sample_hash(seed ^ 0x85ebca6bu));
+    return vec2<f32>(random >> vec2(8u)) / 16777216.0;
+}
+@fragment fn floor_light(input: FloorVertex) -> @location(0) vec4<f32> {
+    let center = transform.emitter_center_width.xyz;
+    let width = transform.emitter_center_width.w;
+    let right = transform.emitter_right_height.xyz;
+    let height = transform.emitter_right_height.w;
+    let up = transform.emitter_up.xyz;
+    let normal = cross(right, up);
+    let to_eye = transform.eye_position.xyz - input.world;
+    if to_eye.y <= 0.0 { return vec4(0.0); }
+    let view = normalize(to_eye);
+    let alpha = max(0.001, FLOOR_ROUGHNESS * FLOOR_ROUGHNESS);
+    let alpha_squared = alpha * alpha;
+    let view_masking = ggx_masking(view.y, alpha_squared);
+    let rows = max(1u, u32(sqrt(f32(FLOOR_RAY_COUNT))));
+    let short_row_count = FLOOR_RAY_COUNT / rows;
+    let long_rows = FLOOR_RAY_COUNT % rows;
+    var sum = vec3(0.0);
+    for (var index = 0u; index < FLOOR_RAY_COUNT; index += 1u) {
+        let row = index % rows;
+        let columns = short_row_count + select(0u, 1u, row < long_rows);
+        let row_offset = row * short_row_count + min(row, long_rows);
+        let jitter = sample_jitter(input.world, index);
+        let sample_uv = vec2(
+            (f32(index / rows) + jitter.x) / f32(columns),
+            (f32(row_offset) + jitter.y * f32(columns)) / f32(FLOOR_RAY_COUNT));
+        let half_vector = sample_ggx_visible_normal(view, sample_uv, alpha);
+        let ray = reflect(-view, half_vector);
+        let denominator = dot(ray, normal);
+        if denominator >= -0.00001 || ray.y <= 0.0 { continue; }
+        let distance = dot(center - input.world, normal) / denominator;
+        if distance <= 0.0 { continue; }
+        let hit = input.world + ray * distance - center;
+        let uv = vec2(dot(hit, right) / width + 0.5, 0.5 - dot(hit, up) / height);
+        if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) { continue; }
+        let color = textureSampleLevel(panel, filtering, uv, 0.0);
+        let view_half = clamp(dot(view, half_vector), 0.0, 1.0);
+        let fresnel = FLOOR_REFLECTANCE + (1.0 - FLOOR_REFLECTANCE) * pow(1.0 - view_half, 5.0);
+        let light_masking = ggx_masking(ray.y, alpha_squared);
+        let weight = fresnel * light_masking
+            / (view_masking + light_masking - view_masking * light_masking);
+        sum += color.rgb * weight;
+    }
+    return vec4(sum / f32(FLOOR_RAY_COUNT), 0.0);
 }
 "#;
 
@@ -354,6 +463,7 @@ pub(crate) struct SceneRenderer {
     layout: vk::PipelineLayout,
     window_pipeline: vk::Pipeline,
     cursor_pipeline: vk::Pipeline,
+    floor_light_pipeline: vk::Pipeline,
 }
 
 impl SceneRenderer {
@@ -367,6 +477,7 @@ impl SceneRenderer {
             layout: vk::PipelineLayout::null(),
             window_pipeline: vk::Pipeline::null(),
             cursor_pipeline: vk::Pipeline::null(),
+            floor_light_pipeline: vk::Pipeline::null(),
         };
         let attachments = [
             vk::AttachmentDescription::default()
@@ -444,8 +555,8 @@ impl SceneRenderer {
                 None,
             )?;
             let constants = [vk::PushConstantRange::default()
-                .stage_flags(vk::ShaderStageFlags::VERTEX)
-                .size(64)];
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+                .size(128)];
             renderer.layout = device.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
                     .set_layouts(&[renderer.descriptor_layout])
@@ -455,11 +566,17 @@ impl SceneRenderer {
         }
         renderer.window_pipeline = renderer.pipeline("window")?;
         renderer.cursor_pipeline = renderer.pipeline("cursor")?;
+        renderer.floor_light_pipeline = renderer.pipeline("floor_light")?;
         Ok(renderer)
     }
 
     fn pipeline(&self, fragment: &str) -> Result<vk::Pipeline> {
-        let vertex_code = shader("vertex", naga::ShaderStage::Vertex)?;
+        let vertex_name = if fragment == "floor_light" {
+            c"floor_vertex"
+        } else {
+            c"vertex"
+        };
+        let vertex_code = shader(vertex_name.to_str()?, naga::ShaderStage::Vertex)?;
         let fragment_code = shader(fragment, naga::ShaderStage::Fragment)?;
         let vertex = unsafe {
             self.device.create_shader_module(
@@ -479,7 +596,7 @@ impl SceneRenderer {
                 vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::VERTEX)
                     .module(vertex)
-                    .name(c"vertex"),
+                    .name(vertex_name),
                 vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::FRAGMENT)
                     .module(fragment_module)
@@ -501,15 +618,26 @@ impl SceneRenderer {
                 .depth_test_enable(true)
                 .depth_write_enable(fragment == "window")
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+            let additive = fragment == "floor_light";
             let attachments = [vk::PipelineColorBlendAttachmentState::default()
                 .blend_enable(true)
                 .src_color_blend_factor(vk::BlendFactor::ONE)
-                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .dst_color_blend_factor(if additive {
+                    vk::BlendFactor::ONE
+                } else {
+                    vk::BlendFactor::ONE_MINUS_SRC_ALPHA
+                })
                 .color_blend_op(vk::BlendOp::ADD)
                 .src_alpha_blend_factor(vk::BlendFactor::ONE)
                 .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
                 .alpha_blend_op(vk::BlendOp::ADD)
-                .color_write_mask(vk::ColorComponentFlags::RGBA)];
+                .color_write_mask(if additive {
+                    vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                } else {
+                    vk::ColorComponentFlags::RGBA
+                })];
             let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
             let dynamic = vk::PipelineDynamicStateCreateInfo::default()
                 .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
@@ -557,6 +685,7 @@ impl SceneRenderer {
         view: &xr::View,
         panels: impl Iterator<Item = (&'a PanelTexture, PanelGeometry)>,
         cursor: Option<PanelPose>,
+        floor_y: f32,
     ) {
         let projection = view_projection(view);
         let mut panels = panels.collect::<Vec<_>>();
@@ -605,6 +734,63 @@ impl SceneRenderer {
             self.device.cmd_bind_pipeline(
                 command,
                 vk::PipelineBindPoint::GRAPHICS,
+                self.floor_light_pipeline,
+            );
+            let eye = [
+                view.pose.position.x,
+                view.pose.position.y,
+                view.pose.position.z,
+                0.0,
+            ];
+            let eye_bytes = std::slice::from_raw_parts(eye.as_ptr().cast::<u8>(), 16);
+            self.device.cmd_push_constants(
+                command,
+                self.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                112,
+                eye_bytes,
+            );
+            for (texture, geometry) in &panels {
+                let pose = geometry.pose;
+                let right = pose.orientation() * Vec3::X;
+                let up = pose.orientation() * Vec3::Y;
+                let height =
+                    pose.width_m * geometry.logical_size.h as f32 / geometry.logical_size.w as f32;
+                let emitter = [
+                    pose.center.x,
+                    pose.center.y,
+                    pose.center.z,
+                    pose.width_m,
+                    right.x,
+                    right.y,
+                    right.z,
+                    height,
+                    up.x,
+                    up.y,
+                    up.z,
+                    floor_y,
+                ];
+                let bytes = std::slice::from_raw_parts(emitter.as_ptr().cast::<u8>(), 48);
+                self.device.cmd_push_constants(
+                    command,
+                    self.layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    64,
+                    bytes,
+                );
+                self.device.cmd_bind_descriptor_sets(
+                    command,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.layout,
+                    0,
+                    &[texture.descriptor],
+                    &[],
+                );
+                self.draw_panel(command, projection);
+            }
+            self.device.cmd_bind_pipeline(
+                command,
+                vk::PipelineBindPoint::GRAPHICS,
                 self.window_pipeline,
             );
             for (texture, geometry) in panels {
@@ -645,7 +831,7 @@ impl SceneRenderer {
             self.device.cmd_push_constants(
                 command,
                 self.layout,
-                vk::ShaderStageFlags::VERTEX,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 0,
                 bytes,
             );
@@ -657,6 +843,8 @@ impl SceneRenderer {
 impl Drop for SceneRenderer {
     fn drop(&mut self) {
         unsafe {
+            self.device
+                .destroy_pipeline(self.floor_light_pipeline, None);
             self.device.destroy_pipeline(self.cursor_pipeline, None);
             self.device.destroy_pipeline(self.window_pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
@@ -678,6 +866,8 @@ mod tests {
             ("vertex", naga::ShaderStage::Vertex),
             ("window", naga::ShaderStage::Fragment),
             ("cursor", naga::ShaderStage::Fragment),
+            ("floor_vertex", naga::ShaderStage::Vertex),
+            ("floor_light", naga::ShaderStage::Fragment),
         ] {
             assert_eq!(shader(entry, stage).unwrap()[0], 0x0723_0203);
         }

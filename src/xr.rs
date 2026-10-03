@@ -10,7 +10,7 @@ use std::{
 use crate::bridge::{PanelReceiver, PanelUpdate, XrInput};
 use crate::gpu::{self, SharedImage};
 use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3};
-use crate::scene::{PanelTexture, RenderTarget, SceneRenderer};
+use crate::scene::{FALLBACK_FLOOR_Y, PanelTexture, RenderTarget, SceneRenderer};
 use anyhow::{Context, Result, ensure};
 use ash::{
     Entry as VkEntry,
@@ -81,6 +81,19 @@ impl Drop for XrEye {
 }
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
+
+fn tracked_floor_height(previous: f32, location: xr::SpaceLocation) -> f32 {
+    let height = location.pose.position.y;
+    if location
+        .location_flags
+        .contains(xr::SpaceLocationFlags::POSITION_VALID)
+        && height.is_finite()
+    {
+        height
+    } else {
+        previous
+    }
+}
 
 fn cursor_pose(
     ray: Ray3,
@@ -347,6 +360,22 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
         .context("request GPU compositing")?;
     let space =
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
+    let stage_space = if session
+        .enumerate_reference_spaces()?
+        .contains(&xr::ReferenceSpaceType::STAGE)
+    {
+        match session.create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY) {
+            Ok(stage) => Some(stage),
+            Err(error) => {
+                eprintln!("OpenXR STAGE floor unavailable: {error}; using fallback floor height");
+                None
+            }
+        }
+    } else {
+        eprintln!("OpenXR STAGE unsupported; using fallback floor height {FALLBACK_FLOOR_Y}m");
+        None
+    };
+    let mut floor_y = FALLBACK_FLOOR_Y;
     let action_set = instance.create_action_set("spacetop", "Spacetop input", 0)?;
     let right_hand = instance.string_to_path("/user/hand/right")?;
     let aim_action =
@@ -552,6 +581,12 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
         let (view_state, views) = timings.measure("openxr/locate-views", Duration::ZERO, || {
             session.locate_views(VIEW_TYPE, frame_state.predicted_display_time, &space)
         })?;
+        if let Some(stage) = &stage_space {
+            let location = timings.measure("openxr/locate-floor", Duration::ZERO, || {
+                stage.locate(&space, frame_state.predicted_display_time)
+            })?;
+            floor_y = tracked_floor_height(floor_y, location);
+        }
         if view_state.contains(xr::ViewStateFlags::POSITION_VALID) && !views.is_empty() {
             grab_player_position = views
                 .iter()
@@ -792,6 +827,7 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                         .values()
                         .map(|panel| (&panel.texture, panel.geometry)),
                     cursor_scene_pose,
+                    floor_y,
                 );
             }
             for panel in panel_frames.values() {
@@ -864,7 +900,14 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
         }
         drop(eyes);
         drop(scene);
-        drop((aim_space, space, frame_waiter, frame_stream, session));
+        drop((
+            aim_space,
+            stage_space,
+            space,
+            frame_waiter,
+            frame_stream,
+            session,
+        ));
         device.destroy_fence(fence, None);
         device.destroy_command_pool(command_pool, None);
         device.destroy_device(None);

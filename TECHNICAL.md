@@ -111,6 +111,38 @@ FOV. The scene uses depth testing, back-to-front premultiplied-alpha blending,
 and transparent-fragment rejection; the cursor has a minimum screen-space stroke.
 WGSL shaders are compiled to SPIR-V with Naga.
 
+The floor is reflection-only: there is no base/albedo color or ambient fill.
+It occupies a 60-meter square. When OpenXR STAGE space is supported, its floor
+origin (STAGE Y = 0) is located relative to LOCAL space at each frame's predicted
+display time; that position's Y coordinate sets the rendered floor height.
+Panels, views, and input remain in LOCAL space, preserving window placement.
+The last valid calibrated height is retained during tracking loss. Before a
+valid STAGE position is available, or if STAGE cannot be created, the fallback is
+LOCAL-space Y = -1.3 meters. Each window adds a separate RGB-only additive pass
+with no depth writes. Rays follow an isotropic GGX visible-normal distribution:
+the shader samples view-visible microfacet normals and reflects the eye direction
+about each one. Analytic ray/quad intersections provide window texture coordinates;
+misses contribute zero, and the sum is divided by the total ray count.
+Schlick Fresnel and height-correlated Smith masking provide the BRDF/PDF weight
+`F * G2 / G1(view)`. There is no extra area or inverse-square multiplier: distance
+changes the window's angular coverage instead. Premultiplied texture colors
+include transparency, and windows emit from their front side only.
+
+Material and sampling constants are at the top of the WGSL shader:
+`FLOOR_ROUGHNESS` defaults to 0.25 (GGX alpha is roughness squared),
+`FLOOR_REFLECTANCE` defaults to 0.18 and denotes normal-incidence Fresnel
+reflectance, and `FLOOR_RAY_COUNT` defaults to four. Lower roughness concentrates
+rays near the mirror direction; higher roughness broadens the reflection.
+Other windows do not block these rays; there are no shadow queries or ray-tracing
+extensions. Each ray gets an independent pseudorandom jitter inside its equal-area
+sample stratum, seeded by floor-world X/Z coordinates rounded to 2 mm cells and
+ray index with an integer PCG hash. `FLOOR_NOISE_CELL_SIZE` controls this spacing.
+Signed coordinates remain distinct, and height recalibration does not reseed the
+pattern. Seeds follow the floor rather than framebuffer pixels or headset motion;
+GGX reflection directions still respond to the eye position. Four samples remain
+noisy; increasing the ray count improves coverage.
+There is no temporal accumulation or denoising.
+
 GPU-backed Wayland client buffers are supported through `linux-dmabuf` with
 device feedback. Shared-memory client buffers still require an upload to GLES.
 The GLES renderer and Vulkan session use the same DRM render node; the XR

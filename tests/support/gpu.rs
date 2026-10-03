@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     panel::{PanelGeometry, PanelPose},
-    scene::{PanelTexture, RenderTarget, SceneRenderer},
+    scene::{FALLBACK_FLOOR_Y, PanelTexture, RenderTarget, SceneRenderer},
 };
 
 struct SceneReadback<'a> {
@@ -9,6 +9,7 @@ struct SceneReadback<'a> {
     view: &'a openxr::View,
     panels: &'a [(&'a PanelTexture, PanelGeometry)],
     cursor: Option<PanelPose>,
+    floor_y: f32,
 }
 
 #[test]
@@ -247,6 +248,7 @@ impl Vulkan {
                     scene.view,
                     scene.panels.iter().copied(),
                     scene.cursor,
+                    scene.floor_y,
                 );
                 for (texture, _) in scene.panels {
                     texture.ownership(command, self.queue_family, false);
@@ -398,6 +400,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     };
     let foreground = make_texture(true)?;
     let background = make_texture(false)?;
+    let second_background = make_texture(false)?;
     let near = PanelGeometry {
         pose: PanelPose {
             center: glam::Vec3::new(0.0, 0.0, -1.0),
@@ -438,6 +441,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             view: &view,
             panels: &panels,
             cursor: Some(cursor),
+            floor_y: FALLBACK_FLOOR_Y,
         }),
     )?;
     let pixel = |pixels: &[u8], horizontal: usize, vertical: usize| {
@@ -463,9 +467,161 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             view: &view,
             panels: &panels,
             cursor: None,
+            floor_y: FALLBACK_FLOOR_Y,
         }),
     )?;
     assert_eq!(pixel(&moved, 380, 200), [0, 0, 0, 255]);
     assert_eq!(pixel(&moved, 200, 200), [255, 0, 0, 255]);
+    view.pose = openxr::Posef::IDENTITY;
+    let emitter = PanelGeometry {
+        pose: PanelPose {
+            center: glam::Vec3::new(0.0, 0.0, -3.0),
+            ..near.pose
+        },
+        ..near
+    };
+    let floor_pixels = |panels: &[(&PanelTexture, PanelGeometry)]| {
+        vulkan.readback_image(
+            None,
+            (512, 512).into(),
+            None,
+            Some(SceneReadback {
+                renderer: &scene,
+                view: &view,
+                panels,
+                cursor: None,
+                floor_y: FALLBACK_FLOOR_Y,
+            }),
+        )
+    };
+    let empty = floor_pixels(&[])?;
+    assert_eq!(pixel(&empty, 256, 450), [0, 0, 0, 255]);
+    let lit = floor_pixels(&[(&background, emitter)])?;
+    let repeated = floor_pixels(&[(&background, emitter)])?;
+    assert_eq!(lit, repeated);
+    let mut shifted_view = view;
+    shifted_view.fov.angle_left = (-1.0_f32 - 16.0 / 256.0).atan();
+    shifted_view.fov.angle_right = (1.0_f32 - 16.0 / 256.0).atan();
+    let shifted = vulkan.readback_image(
+        None,
+        (512, 512).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &scene,
+            view: &shifted_view,
+            panels: &[(&background, emitter)],
+            cursor: None,
+            floor_y: FALLBACK_FLOOR_Y,
+        }),
+    )?;
+    let mut anchored_pixels = 0;
+    for vertical in 430..470 {
+        for horizontal in 240..272 {
+            if pixel(&lit, horizontal, vertical) == pixel(&shifted, horizontal + 16, vertical) {
+                anchored_pixels += 1;
+            }
+        }
+    }
+    assert!(
+        anchored_pixels >= 1250,
+        "reflection noise must follow floor positions when their screen coordinates change"
+    );
+    let mut isolated_variations = 0;
+    for vertical in 430..470 {
+        for horizontal in 240..272 {
+            let left = i32::from(pixel(&lit, horizontal - 1, vertical)[0]);
+            let middle = i32::from(pixel(&lit, horizontal, vertical)[0]);
+            let right = i32::from(pixel(&lit, horizontal + 1, vertical)[0]);
+            if (middle - left > 12 && middle - right > 12)
+                || (left - middle > 12 && right - middle > 12)
+            {
+                isolated_variations += 1;
+            }
+        }
+    }
+    assert!(
+        isolated_variations > 100,
+        "GGX samples must vary per pixel, not form coherent repeated reflections"
+    );
+    let doubled = floor_pixels(&[(&background, emitter), (&second_background, emitter)])?;
+    let colored = floor_pixels(&[(&foreground, emitter)])?;
+    let backwards = floor_pixels(&[(
+        &background,
+        PanelGeometry {
+            pose: PanelPose {
+                yaw: std::f32::consts::PI,
+                ..emitter.pose
+            },
+            ..emitter
+        },
+    )])?;
+    let decode = |channel: u8| {
+        let encoded = f32::from(channel) / 255.0;
+        if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let floor_pixel = pixel(&lit, 256, 450);
+    assert!(floor_pixel[0] > 0);
+    assert_eq!(floor_pixel[0], floor_pixel[1]);
+    assert_eq!(floor_pixel[1], floor_pixel[2]);
+    assert_eq!(floor_pixel[3], 255);
+    assert_eq!(pixel(&backwards, 256, 450), [0, 0, 0, 255]);
+    assert_eq!(pixel(&lit, 256, 300), [0, 0, 0, 255]);
+    let twice = pixel(&doubled, 256, 450);
+    let quantization =
+        |channel: u8| decode(channel.saturating_add(1)) - decode(channel.saturating_sub(1));
+    assert!(
+        (decode(twice[0]) - 2.0 * decode(floor_pixel[0])).abs()
+            <= quantization(twice[0]) + 2.0 * quantization(floor_pixel[0])
+    );
+    assert_eq!(twice[3], 255);
+    let colored_pixel = pixel(&colored, 256, 450);
+    assert!(colored_pixel[..3].iter().any(|channel| *channel > 0));
+    assert!(
+        colored_pixel[..3]
+            .iter()
+            .zip(&floor_pixel[..3])
+            .all(|(colored, white)| colored <= white)
+    );
+    assert_ne!(colored_pixel, floor_pixel);
+    let lowered = vulkan.readback_image(
+        None,
+        (512, 512).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &scene,
+            view: &view,
+            panels: &[(&background, emitter)],
+            cursor: None,
+            floor_y: -2.6,
+        }),
+    )?;
+    assert_eq!(pixel(&lowered, 256, 450), [0, 0, 0, 255]);
+    let mut stage_view = view;
+    stage_view.pose.position.y = -FALLBACK_FLOOR_Y;
+    let stage_emitter = PanelGeometry {
+        pose: PanelPose {
+            center: emitter.pose.center - glam::Vec3::Y * FALLBACK_FLOOR_Y,
+            ..emitter.pose
+        },
+        ..emitter
+    };
+    let calibrated = vulkan.readback_image(
+        None,
+        (512, 512).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &scene,
+            view: &stage_view,
+            panels: &[(&background, stage_emitter)],
+            cursor: None,
+            floor_y: 0.0,
+        }),
+    )?;
+    assert_eq!(pixel(&calibrated, 256, 450), floor_pixel);
+    assert_eq!(pixel(&calibrated, 256, 256), pixel(&lit, 256, 256));
     Ok(())
 }

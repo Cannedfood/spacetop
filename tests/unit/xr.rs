@@ -104,3 +104,27 @@ fn requires_srgb_swapchain() {
     assert!(panel_swapchain_format(&[linear.as_raw() as u32]).is_err());
     assert!(panel_swapchain_format(&[]).is_err());
 }
+
+#[test]
+fn stage_floor_uses_valid_height_and_retains_it_during_tracking_loss() {
+    let mut location = xr::SpaceLocation {
+        location_flags: xr::SpaceLocationFlags::EMPTY,
+        pose: xr::Posef::IDENTITY,
+    };
+    location.pose.position.y = -1.7;
+    assert_eq!(
+        tracked_floor_height(FALLBACK_FLOOR_Y, location),
+        FALLBACK_FLOOR_Y
+    );
+    location.location_flags = xr::SpaceLocationFlags::POSITION_VALID;
+    assert_eq!(tracked_floor_height(FALLBACK_FLOOR_Y, location), -1.7);
+    location.pose.position.y = 0.0;
+    assert_eq!(tracked_floor_height(-1.7, location), 0.0);
+    location.location_flags = xr::SpaceLocationFlags::ORIENTATION_VALID;
+    assert_eq!(tracked_floor_height(-1.7, location), -1.7);
+    location.location_flags = xr::SpaceLocationFlags::POSITION_VALID;
+    for height in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        location.pose.position.y = height;
+        assert_eq!(tracked_floor_height(-1.7, location), -1.7);
+    }
+}
