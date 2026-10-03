@@ -37,6 +37,11 @@ pub enum XrInput {
         panel_id: u64,
         pose: PanelPose,
     },
+    ResizePanel {
+        panel_id: u64,
+        width: i32,
+        height: i32,
+    },
     GpuDevice {
         render_node: std::path::PathBuf,
         limits: PanelLimits,

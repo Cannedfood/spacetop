@@ -708,6 +708,7 @@ pub(crate) struct SceneFrame<'a> {
     pub skybox: Option<&'a SkyboxTexture>,
     pub panels: &'a [(&'a PanelTexture, PanelGeometry)],
     pub cursor: Option<PanelPose>,
+    pub hovered_panel: Option<PanelGeometry>,
     pub floor_y: f32,
 }
 
@@ -1214,6 +1215,15 @@ impl SceneRenderer {
                 self.window_pipeline,
             );
             for (texture, geometry) in panels {
+                let outline = [0.0, 0.0, 0.0, if frame.hovered_panel == Some(geometry) { 1.0 } else { 0.0 }];
+                let outline_bytes = std::slice::from_raw_parts(outline.as_ptr().cast::<u8>(), 16);
+                self.device.cmd_push_constants(
+                    command,
+                    self.layout,
+                    vk::ShaderStageFlags::FRAGMENT,
+                    96,
+                    outline_bytes,
+                );
                 self.device.cmd_bind_descriptor_sets(
                     command,
                     vk::PipelineBindPoint::GRAPHICS,

@@ -488,6 +488,8 @@ pub fn run(
     let mut grab_initial_radius = config.window.default_distance_m;
     let mut grab_initial_width = 1.0_f32;
     let mut grab_direction_offset = glam::Vec2::ZERO;
+    let mut resize_initial_size = (0_i32, 0_i32);
+    let mut hovered_panel = None;
     let mut timings = crate::timing::Timings::new();
     let mut last_config_check = Instant::now();
 
@@ -720,11 +722,19 @@ pub fn run(
                     ray: cursor_ray.expect("ray assigned above"),
                     time_ms,
                 });
-                let pointing_at_window = cursor_ray.is_some_and(|ray| {
+                hovered_panel = cursor_ray.and_then(|ray| {
                     panel_frames
-                        .values()
-                        .any(|panel| panel.geometry.intersect(ray).is_some())
+                        .iter()
+                        .filter_map(|(id, panel)| {
+                            panel.geometry.intersect_with_margin(ray, 0.04).map(|hit| (*id, hit))
+                        })
+                        .min_by(|(_, first), (_, second)| first.distance_m.total_cmp(&second.distance_m))
+                        .map(|(id, _)| id)
                 });
+                let pointing_at_window = hovered_panel.is_some();
+                let trigger = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    trigger_action.state(&session, right_hand)
+                })?;
                 let grip = timings.measure("openxr/action-state", Duration::ZERO, || {
                     grip_action.state(&session, right_hand)
                 })?;
@@ -749,6 +759,7 @@ pub fn run(
                                         .clamp(0.6, 5.0);
                                     grab_initial_radius = grab_radius;
                                     grab_initial_width = panel.geometry.pose.width_m;
+                                    resize_initial_size = (panel.geometry.logical_size.w, panel.geometry.logical_size.h);
                                     let aim_angles = PanelPose::spherical_angles(ray.direction);
                                     let center_angles = PanelPose::spherical_angles(
                                         panel.geometry.pose.center - grab_player_position,
@@ -763,6 +774,18 @@ pub fn run(
                     } else {
                         grabbed_panel = None;
                     }
+                }
+                if trigger.is_active
+                    && trigger.current_state
+                    && grabbed_panel.is_none()
+                    && let Some(panel_id) = hovered_panel
+                    && let Some(panel) = panel_frames.get(&panel_id)
+                    && let Some(ray) = cursor_ray
+                    && let Some(hit) = panel.geometry.intersect_with_margin(ray, 0.04)
+                {
+                    let width = hit.surface_px.x.round() as i32;
+                    let height = hit.surface_px.y.round() as i32;
+                    let _ = input.try_send(XrInput::ResizePanel { panel_id, width, height });
                 }
                 let delta_seconds = (frame_state.predicted_display_period.as_nanos() as f32
                     / 1_000_000_000.0)
@@ -805,9 +828,6 @@ pub fn run(
                         });
                     }
                 }
-                let trigger = timings.measure("openxr/action-state", Duration::ZERO, || {
-                    trigger_action.state(&session, right_hand)
-                })?;
                 let secondary = timings.measure("openxr/action-state", Duration::ZERO, || {
                     secondary_action.state(&session, right_hand)
                 })?;
@@ -886,6 +906,7 @@ pub fn run(
             skybox: Some(&skybox),
             panels: &panel_draws,
             cursor: cursor_scene_pose,
+            hovered_panel: hovered_panel.and_then(|id| panel_frames.get(&id).map(|panel| panel.geometry)),
             floor_y,
         };
         unsafe {

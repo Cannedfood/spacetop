@@ -187,6 +187,11 @@ impl PanelGeometry {
     /// Intersect a ray with this panel. Returns `None` for parallel, behind-ray,
     /// or out-of-bounds intersections.
     pub fn intersect(&self, ray: Ray3) -> Option<PanelHit> {
+        self.intersect_with_margin(ray, 0.0)
+    }
+
+    /// Intersect the panel and its resize grab margin, measured as a fraction of its size.
+    pub fn intersect_with_margin(&self, ray: Ray3, margin: f32) -> Option<PanelHit> {
         let pixel_width = self.logical_size.w;
         let pixel_height = self.logical_size.h;
         let physical_width = self.pose.width_m;
@@ -220,13 +225,16 @@ impl PanelGeometry {
         let local_y = local.y;
         let u = local_x / physical_width + 0.5;
         let v = 0.5 - local_y / physical_height;
-        if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+        if u < -margin || u > 1.0 + margin || v < -margin || v > 1.0 + margin {
             return None;
         }
 
         Some(PanelHit {
             uv: [u, v],
-            surface_px: Vec2::new(u * pixel_width as f32, v * pixel_height as f32),
+            surface_px: Vec2::new(
+                u.clamp(0.0, 1.0) * pixel_width as f32,
+                v.clamp(0.0, 1.0) * pixel_height as f32,
+            ),
             distance_m: distance,
         })
     }

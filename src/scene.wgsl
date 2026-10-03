@@ -5,6 +5,7 @@ struct Transform {
     emitter_center_width: vec4<f32>,
     emitter_right_height: vec4<f32>,
     emitter_up: vec4<f32>,
+    window_info: vec4<f32>,
     eye_position: vec4<f32>,
 }
 var<immediate> transform: Transform;
@@ -95,7 +96,13 @@ struct Vertex {
     return result;
 }
 @fragment fn window(input: Vertex) -> @location(0) vec4<f32> {
-    let color = textureSample(panel, filtering, input.uv);
+    let margin = 0.035;
+    let edge = min(min(input.uv.x, 1.0 - input.uv.x), min(input.uv.y, 1.0 - input.uv.y));
+    if edge < 0.0 { discard; }
+    if transform.window_info.w > 0.5 && edge < margin {
+        return vec4(1.0, 0.9131, 0.0, 1.0);
+    }
+    let color = textureSample(panel, filtering, (input.uv - vec2(margin)) / (1.0 - 2.0 * margin));
     if color.a < 0.001 { discard; }
     return color;
 }

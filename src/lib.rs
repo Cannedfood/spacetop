@@ -194,6 +194,26 @@ impl Compositor {
                 self.dispatch_scroll(value, time_ms);
                 Ok(())
             }
+            XrInput::ResizePanel { panel_id, width, height } => {
+                if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == panel_id) {
+                    match &panel.surface {
+                        x11::PanelSurface::X11 { window, .. } => {
+                            let mut geometry = window.geometry();
+                            geometry.size.w = width.max(1);
+                            geometry.size.h = height.max(1);
+                            if let Err(error) = window.configure(geometry) {
+                                eprintln!("failed to resize X11 window: {error}");
+                            }
+                        }
+                        x11::PanelSurface::Wayland(surface) => {
+                            surface.with_pending_state(|state| state.size = Some((width.max(1), height.max(1)).into()));
+                            surface.send_configure();
+                        }
+                        x11::PanelSurface::Popup(_) => {}
+                    }
+                }
+                Ok(())
+            }
             XrInput::MovePanel { panel_id, pose } => {
                 if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == panel_id)
                     && let Some(geometry) = panel.geometry.as_mut()
