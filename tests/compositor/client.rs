@@ -33,6 +33,7 @@ pub(super) struct TestClient {
     pub(super) modifier_masks: Vec<u32>,
     pub(super) pointer_surface: Option<wl_surface::WlSurface>,
     pub(super) popup_configures: Vec<(i32, i32, i32, i32)>,
+    pub(super) toplevel_configures: Vec<(i32, i32)>,
     pub(super) popup_done: usize,
     pub(super) repositioned: Vec<u32>,
     pub(super) motions: Vec<(f64, f64)>,
@@ -277,7 +278,20 @@ delegate_noop!(TestClient: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(TestClient: ignore wl_buffer::WlBuffer);
 delegate_noop!(TestClient: ignore wl_seat::WlSeat);
 delegate_noop!(TestClient: ignore xdg_wm_base::XdgWmBase);
-delegate_noop!(TestClient: ignore xdg_toplevel::XdgToplevel);
+impl Dispatch<xdg_toplevel::XdgToplevel, ()> for TestClient {
+    fn event(
+        state: &mut Self,
+        _toplevel: &xdg_toplevel::XdgToplevel,
+        event: xdg_toplevel::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_toplevel::Event::Configure { width, height, .. } = event {
+            state.toplevel_configures.push((width, height));
+        }
+    }
+}
 delegate_noop!(TestClient: ignore zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1);
 delegate_noop!(TestClient: ignore zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1);
 

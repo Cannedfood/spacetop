@@ -2,6 +2,68 @@ use super::*;
 use crate::scene::FALLBACK_FLOOR_Y;
 
 #[test]
+fn resize_release_reliably_sends_the_final_size_when_motion_queue_is_full() {
+    let (input, receiver) = crate::bridge::input_channel();
+    for time_ms in 0..16 {
+        input.try_send(XrInput::PointerLost { time_ms }).unwrap();
+    }
+    let geometry = PanelGeometry {
+        pose: PanelPose::facing_origin(glam::Vec3::new(0.0, 0.0, -1.6)),
+        logical_size: (100, 50).into(),
+    };
+    let edges = [false, true, false, true];
+    let mut resizing_panel = Some(7);
+    finish_resize(
+        &mut PanelImages::new(),
+        &input,
+        &mut resizing_panel,
+        Some(geometry),
+        edges,
+        Some((140, 90)),
+    )
+    .unwrap();
+    assert!(resizing_panel.is_none());
+    for _ in 0..16 {
+        let event = receiver.try_recv().unwrap();
+        input.received(&event);
+        assert!(matches!(event, XrInput::PointerLost { .. }));
+    }
+    let event = receiver.try_recv().unwrap();
+    input.received(&event);
+    let XrInput::ResizePanel {
+        panel_id,
+        width,
+        height,
+        anchor,
+    } = event
+    else {
+        panic!("resize release must send the final request");
+    };
+    assert_eq!(panel_id, 7);
+    assert_eq!((width, height), (140, 90));
+    assert_eq!(anchor, Some((geometry, edges)));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn resize_snapshot_uses_committed_pose_without_animation() {
+    let mut current = PanelGeometry {
+        pose: PanelPose::facing_origin(glam::Vec3::new(0.0, 0.0, -1.6)),
+        logical_size: (100, 50).into(),
+    };
+    let mut saved = current.pose;
+    let mut temporary = current.pose;
+    let committed = PanelGeometry {
+        pose: current.resized_pose_from_edges((120, 70).into(), [false, true, false, true], 32.0),
+        logical_size: (120, 70).into(),
+    };
+    reconcile_panel_geometry(&mut current, &mut saved, &mut temporary, committed, true);
+    assert_eq!(current, committed);
+    assert_eq!(saved, committed.pose);
+    assert_eq!(temporary, committed.pose);
+}
+
+#[test]
 fn cursor_uses_default_player_sphere_without_a_window() {
     let player = glam::Vec3::new(0.4, 1.7, 0.2);
     let ray = Ray3 {

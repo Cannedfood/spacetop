@@ -44,6 +44,7 @@ pub fn run(
         frame_sender,
         config.window.default_distance_m,
         config.window.pixels_per_degree,
+        config.window.padding_px,
     );
     input::start(&event_loop.handle())?;
     let socket = ListeningSocketSource::new_auto()?;

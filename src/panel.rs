@@ -280,6 +280,17 @@ pub struct PanelHit {
 }
 
 impl PanelGeometry {
+    pub fn content_coordinates(self, point: Vec2, padding_px: f32) -> Option<Vec2> {
+        let size = Vec2::new(self.logical_size.w as f32, self.logical_size.h as f32);
+        let padding = padding_px.min((size.min_element() - 1.0) * 0.5);
+        let content_size = (size - Vec2::splat(2.0 * padding)).max(Vec2::ONE);
+        let content_point = point - Vec2::splat(padding);
+        if content_point.min_element() < 0.0 || content_point.cmpgt(content_size).any() {
+            return None;
+        }
+        Some(content_point / content_size * size)
+    }
+
     pub fn resized_pose_from_edges(
         self,
         new_size: Size<i32, smithay::utils::Logical>,
@@ -297,7 +308,7 @@ impl PanelGeometry {
         let initial_angle_degrees =
             2.0 * (self.pose.width_m / (2.0 * distance)).atan().to_degrees();
         let measured_pixels_per_degree = initial_width / initial_angle_degrees.max(f32::EPSILON);
-        let capture_scale = measured_pixels_per_degree / pixels_per_degree.max(f32::EPSILON);
+        let capture_scale = pixels_per_degree.max(f32::EPSILON) / measured_pixels_per_degree;
         let width_m = PanelPose::width_for_pixel_density(
             new_width * capture_scale,
             distance,

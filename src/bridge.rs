@@ -41,6 +41,7 @@ pub enum XrInput {
         panel_id: u64,
         width: i32,
         height: i32,
+        anchor: Option<(PanelGeometry, [bool; 4])>,
     },
     GpuDevice {
         render_node: std::path::PathBuf,
@@ -49,6 +50,7 @@ pub enum XrInput {
     ConfigReloaded {
         default_window_distance: f32,
         window_pixels_per_degree: f32,
+        window_padding_px: f32,
     },
     FatalError {
         message: String,

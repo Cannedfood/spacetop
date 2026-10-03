@@ -86,6 +86,8 @@ struct ToplevelPanel {
     surface: PanelSurface,
     pose: PanelPose,
     geometry: Option<PanelGeometry>,
+    pose_is_explicit: bool,
+    resize_anchor: Option<(PanelGeometry, [bool; 4])>,
     id: u64,
     bounds: Rectangle<i32, Logical>,
 }
@@ -111,6 +113,7 @@ struct Compositor {
     panel_limits: panel::PanelLimits,
     default_window_distance: f32,
     window_pixels_per_degree: f32,
+    window_padding_px: f32,
     active_panel: Option<u64>,
     fatal_error: Option<anyhow::Error>,
     started_at: Instant,
@@ -199,8 +202,13 @@ impl Compositor {
                 panel_id,
                 width,
                 height,
+                anchor,
             } => {
                 if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == panel_id) {
+                    if let Some(anchor) = anchor {
+                        panel.resize_anchor = Some(anchor);
+                        panel.pose_is_explicit = true;
+                    }
                     match &panel.surface {
                         x11::PanelSurface::X11 { window, .. } => {
                             let mut geometry = window.geometry();
@@ -211,8 +219,25 @@ impl Compositor {
                             }
                         }
                         x11::PanelSurface::Wayland(surface) => {
+                            let window_bounds = with_states(surface.wl_surface(), |states| {
+                                states
+                                    .cached_state
+                                    .get::<SurfaceCachedState>()
+                                    .current()
+                                    .geometry
+                            })
+                            .map(|geometry| {
+                                geometry.intersection(panel.bounds).unwrap_or(panel.bounds)
+                            })
+                            .unwrap_or_else(|| {
+                                bbox_from_surface_tree(surface.wl_surface(), (0, 0))
+                            });
+                            let padding = panel.bounds.size - window_bounds.size;
                             surface.with_pending_state(|state| {
-                                state.size = Some((width.max(1), height.max(1)).into())
+                                state.size = Some(
+                                    ((width - padding.w).max(1), (height - padding.h).max(1))
+                                        .into(),
+                                )
                             });
                             surface.send_configure();
                         }
@@ -226,6 +251,8 @@ impl Compositor {
                     && let Some(geometry) = panel.geometry.as_mut()
                 {
                     geometry.pose = pose;
+                    panel.pose_is_explicit = true;
+                    panel.resize_anchor = None;
                     if let Some(root_size) =
                         smithay::backend::renderer::utils::with_renderer_surface_state(
                             panel.surface.wl_surface(),
@@ -248,9 +275,18 @@ impl Compositor {
             XrInput::ConfigReloaded {
                 default_window_distance,
                 window_pixels_per_degree,
+                window_padding_px,
             } => {
+                if self.default_window_distance != default_window_distance
+                    || self.window_pixels_per_degree != window_pixels_per_degree
+                {
+                    for panel in &mut self.panels {
+                        panel.pose_is_explicit = false;
+                    }
+                }
                 self.default_window_distance = default_window_distance;
                 self.window_pixels_per_degree = window_pixels_per_degree;
+                self.window_padding_px = window_padding_px;
                 self.refresh_panels();
                 Ok(())
             }
@@ -269,7 +305,13 @@ impl Compositor {
 
     #[cfg(test)]
     fn new(display_handle: DisplayHandle, frame_sender: bridge::PanelSender) -> Self {
-        Self::with_window_settings(display_handle, frame_sender, config::DEFAULT_DISTANCE, 32.0)
+        Self::with_window_settings(
+            display_handle,
+            frame_sender,
+            config::DEFAULT_DISTANCE,
+            32.0,
+            0.0,
+        )
     }
 
     fn with_window_settings(
@@ -277,6 +319,7 @@ impl Compositor {
         frame_sender: bridge::PanelSender,
         default_window_distance: f32,
         window_pixels_per_degree: f32,
+        window_padding_px: f32,
     ) -> Self {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
@@ -329,6 +372,7 @@ impl Compositor {
             panel_limits: panel::PanelLimits::default(),
             default_window_distance,
             window_pixels_per_degree,
+            window_padding_px,
             active_panel: None,
             fatal_error: None,
             started_at: Instant::now(),
@@ -443,7 +487,17 @@ impl Compositor {
                 },
             );
             self.panels[index].bounds = bounds;
-            PanelGeometry::from_bounds(self.panels[index].pose, logical_size, bounds)
+            let mut geometry =
+                PanelGeometry::from_bounds(self.panels[index].pose, logical_size, bounds);
+            if let Some((anchor, edges)) = self.panels[index].resize_anchor {
+                geometry.pose = anchor.resized_pose_from_edges(
+                    bounds.size,
+                    edges,
+                    self.window_pixels_per_degree,
+                );
+                self.panels[index].pose = geometry.root_pose(logical_size, bounds);
+            }
+            geometry
         });
         if self.active_panel == Some(self.panels[index].id) && logical_size.is_none() && was_mapped
         {
@@ -572,11 +626,13 @@ impl Compositor {
                 renderer.capture(&surfaces, size, scale)
             })
             .context("mandatory GPU panel capture failed")?;
-        geometry.pose.width_m = PanelPose::width_for_pixel_density(
-            size.w as f32,
-            geometry.pose.center.length(),
-            self.window_pixels_per_degree,
-        );
+        if !self.panels[index].pose_is_explicit {
+            geometry.pose.width_m = PanelPose::width_for_pixel_density(
+                size.w as f32,
+                geometry.pose.center.length(),
+                self.window_pixels_per_degree,
+            );
+        }
         self.panels[index].pose = geometry.root_pose(root_size, bounds);
         self.panels[index].geometry = Some(geometry);
         let Some(geometry) = self.panels[index].geometry else {
@@ -622,8 +678,11 @@ impl Compositor {
             .iter()
             .filter(|panel| panel.surface.alive())
             .filter_map(|panel| {
-                let hit = panel.geometry?.intersect(ray)?;
-                let point = Point::from((hit.surface_px.x as f64, hit.surface_px.y as f64))
+                let geometry = panel.geometry?;
+                let hit = geometry.intersect(ray)?;
+                let content_point =
+                    geometry.content_coordinates(hit.surface_px, self.window_padding_px)?;
+                let point = Point::from((content_point.x as f64, content_point.y as f64))
                     + panel.bounds.loc.to_f64();
                 let index = self
                     .panels
@@ -860,6 +919,8 @@ impl XdgShellHandler for Compositor {
             surface: PanelSurface::Wayland(surface.clone()),
             pose,
             geometry: None,
+            pose_is_explicit: false,
+            resize_anchor: None,
             id: panel_id,
             bounds: Rectangle::default(),
         });

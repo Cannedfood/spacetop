@@ -13,6 +13,55 @@ fn panel() -> PanelGeometry {
 }
 
 #[test]
+fn edge_resize_preserves_the_existing_scale_for_small_size_changes() {
+    let geometry = panel();
+    for width_m in [0.5, 1.0, 2.0] {
+        let geometry = PanelGeometry {
+            pose: PanelPose {
+                width_m,
+                ..geometry.pose
+            },
+            ..geometry
+        };
+        let resized = geometry.resized_pose_from_edges(
+            (geometry.logical_size.w + 1, geometry.logical_size.h).into(),
+            [false, true, false, false],
+            32.0,
+        );
+        assert!(resized.width_m > width_m);
+        assert!(resized.width_m < width_m * 1.01);
+    }
+}
+
+#[test]
+fn padded_content_coordinates_match_displayed_corners_and_center() {
+    let geometry = panel();
+    for (point, expected) in [
+        ((12.0, 12.0), (0.0, 0.0)),
+        ((988.0, 12.0), (1000.0, 0.0)),
+        ((12.0, 488.0), (0.0, 500.0)),
+        ((988.0, 488.0), (1000.0, 500.0)),
+        ((500.0, 250.0), (500.0, 250.0)),
+    ] {
+        let actual = geometry.content_coordinates(point.into(), 12.0).unwrap();
+        assert!((actual - Vec2::from(expected)).length() < 0.001);
+    }
+    for point in [(11.0, 250.0), (989.0, 250.0), (500.0, 11.0), (500.0, 489.0)] {
+        assert!(geometry.content_coordinates(point.into(), 12.0).is_none());
+    }
+    let point = Vec2::new(750.0, 100.0);
+    assert_eq!(geometry.content_coordinates(point, 0.0), Some(point));
+    let tiny = PanelGeometry {
+        logical_size: (10, 5).into(),
+        ..geometry
+    };
+    assert_eq!(
+        tiny.content_coordinates(Vec2::new(5.0, 2.5), 12.0),
+        Some(Vec2::new(5.0, 2.5))
+    );
+}
+
+#[test]
 fn expanded_bounds_preserve_root_placement_and_pixel_scale() {
     let root = panel();
     let bounds = smithay::utils::Rectangle::new((-200, -100).into(), (1500, 800).into());

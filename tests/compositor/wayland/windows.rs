@@ -5,6 +5,126 @@ use glam::Vec3;
 use std::{io::Write, os::fd::AsFd};
 use wayland_client::protocol::wl_shm;
 
+#[test]
+fn pointer_coordinates_match_padded_window_content() {
+    let mut app = super::fixture::WaylandApp::new(None);
+    let panel_id = app.compositor.panels[0].id;
+    let pose = app.compositor.panels[0].geometry.unwrap().pose;
+    app.compositor
+        .handle_xr_input(crate::XrInput::MovePanel { panel_id, pose });
+    app.compositor
+        .handle_xr_input(crate::XrInput::ConfigReloaded {
+            default_window_distance: app.compositor.default_window_distance,
+            window_pixels_per_degree: app.compositor.window_pixels_per_degree,
+            window_padding_px: 12.0,
+        });
+    let geometry = app.compositor.panels[0].geometry.unwrap();
+    let ray_for_point = |x: f32, y: f32| Ray3 {
+        origin: geometry.pose.center
+            + geometry.pose.orientation()
+                * Vec3::new(
+                    (x / 100.0 - 0.5) * geometry.pose.width_m,
+                    (0.5 - y / 50.0) * geometry.pose.width_m * 0.5,
+                    1.0,
+                ),
+        direction: geometry.pose.orientation() * Vec3::NEG_Z,
+    };
+    for (x, y) in [
+        (10.0, 10.0),
+        (90.0, 10.0),
+        (10.0, 40.0),
+        (90.0, 40.0),
+        (50.0, 25.0),
+    ] {
+        assert!(
+            app.compositor
+                .dispatch_ray(ray_for_point(12.0 + x * 0.76, 12.0 + y * 0.52), 1)
+        );
+        pump(
+            &mut app.display,
+            &mut app.compositor,
+            &mut app.queue,
+            &mut app.client,
+            &app.connection,
+        );
+        let &(actual_x, actual_y) = app.client.motions.last().unwrap();
+        assert!(
+            (actual_x - x as f64).abs() <= 1.0 / 256.0,
+            "expected x={x}, got {actual_x}"
+        );
+        assert!(
+            (actual_y - y as f64).abs() <= 1.0 / 256.0,
+            "expected y={y}, got {actual_y}"
+        );
+    }
+    assert!(!app.compositor.dispatch_ray(ray_for_point(6.0, 25.0), 2));
+    assert!(
+        app.compositor
+            .seat
+            .get_pointer()
+            .unwrap()
+            .current_focus()
+            .is_none()
+    );
+    app.compositor
+        .handle_xr_input(crate::XrInput::ConfigReloaded {
+            default_window_distance: app.compositor.default_window_distance,
+            window_pixels_per_degree: app.compositor.window_pixels_per_degree,
+            window_padding_px: 0.0,
+        });
+    assert!(app.compositor.panels[0].pose_is_explicit);
+    assert!(app.compositor.dispatch_ray(ray_for_point(10.0, 10.0), 3));
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    let &(actual_x, actual_y) = app.client.motions.last().unwrap();
+    assert!((actual_x - 10.0).abs() <= 1.0 / 256.0);
+    assert!((actual_y - 10.0).abs() <= 1.0 / 256.0);
+}
+
+#[test]
+fn resize_panel_excludes_wayland_window_padding() {
+    let mut app = super::fixture::WaylandApp::new(None);
+    let panel_id = app.compositor.panels[0].id;
+    for (geometry, requested, expected) in [
+        (None, (120, 70), (120, 70)),
+        (Some((10, 5, 80, 40)), (100, 50), (80, 40)),
+        (Some((10, 5, 80, 40)), (120, 70), (100, 60)),
+        (Some((10, 5, 80, 40)), (130, 80), (110, 70)),
+        (Some((10, 5, 80, 40)), (1, 1), (1, 1)),
+    ] {
+        if let Some((x, y, width, height)) = geometry {
+            app.xdg_surface.set_window_geometry(x, y, width, height);
+            app.surface.commit();
+        }
+        pump(
+            &mut app.display,
+            &mut app.compositor,
+            &mut app.queue,
+            &mut app.client,
+            &app.connection,
+        );
+        app.compositor.handle_xr_input(crate::XrInput::ResizePanel {
+            panel_id,
+            width: requested.0,
+            height: requested.1,
+            anchor: None,
+        });
+        pump(
+            &mut app.display,
+            &mut app.compositor,
+            &mut app.queue,
+            &mut app.client,
+            &app.connection,
+        );
+        assert_eq!(app.client.toplevel_configures.last(), Some(&expected));
+    }
+}
+
 pub(super) fn exercise(app: &mut WaylandApp) {
     let WaylandApp {
         display,

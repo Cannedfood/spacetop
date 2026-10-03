@@ -25,6 +25,7 @@ struct XrPanel {
     geometry: PanelGeometry,
     saved_pose: PanelPose,
     temporary_pose: PanelPose,
+    resize_pending: bool,
 }
 
 struct XrEye {
@@ -77,6 +78,26 @@ impl XrEye {
 
 type PanelImages = std::collections::BTreeMap<u64, XrPanel>;
 
+fn reconcile_panel_geometry(
+    current: &mut PanelGeometry,
+    saved_pose: &mut PanelPose,
+    temporary_pose: &mut PanelPose,
+    committed: PanelGeometry,
+    resizing: bool,
+) {
+    if resizing {
+        *current = committed;
+        *saved_pose = committed.pose;
+        *temporary_pose = committed.pose;
+        return;
+    }
+    let animated_pose = current.pose;
+    *current = committed;
+    current.pose = animated_pose;
+    saved_pose.width_m = committed.pose.width_m;
+    temporary_pose.width_m = committed.pose.width_m;
+}
+
 fn update_dodge_targets(
     panels: &mut PanelImages,
     fixed_windows: &[u64],
@@ -109,12 +130,46 @@ fn update_dodge_targets(
 }
 
 fn save_dodge_targets(panels: &mut PanelImages, input: &crate::bridge::InputSender) -> Result<()> {
+    save_dodge_targets_except(panels, input, None)
+}
+
+fn save_dodge_targets_except(
+    panels: &mut PanelImages,
+    input: &crate::bridge::InputSender,
+    excluded_panel: Option<u64>,
+) -> Result<()> {
     for (panel_id, panel) in panels {
+        if Some(*panel_id) == excluded_panel {
+            continue;
+        }
+        panel.resize_pending = false;
         panel.saved_pose = panel.temporary_pose;
         input.send(XrInput::MovePanel {
             panel_id: *panel_id,
             pose: panel.saved_pose,
         })?;
+    }
+    Ok(())
+}
+
+fn finish_resize(
+    panels: &mut PanelImages,
+    input: &crate::bridge::InputSender,
+    resizing_panel: &mut Option<u64>,
+    geometry: Option<PanelGeometry>,
+    edges: [bool; 4],
+    requested_size: Option<(i32, i32)>,
+) -> Result<()> {
+    if let Some(panel_id) = resizing_panel.take() {
+        if let Some((geometry, (width, height))) = geometry.zip(requested_size) {
+            input.send(XrInput::ResizePanel {
+                panel_id,
+                width,
+                height,
+                anchor: Some((geometry, edges)),
+            })?;
+        }
+        save_dodge_targets_except(panels, input, Some(panel_id))?;
     }
     Ok(())
 }
@@ -571,6 +626,7 @@ pub fn run(
     let mut resize_initial_size = (0_i32, 0_i32);
     let mut resize_initial_hit = glam::Vec2::ZERO;
     let mut resize_edges = [false; 4];
+    let mut resize_requested_size = None;
     let mut cursor_close_panel = None;
     let mut timings = crate::timing::Timings::new();
     let mut last_config_check = Instant::now();
@@ -612,7 +668,8 @@ pub fn run(
                                 let window_config_changed = next_config.window.default_distance_m
                                     != config.window.default_distance_m
                                     || next_config.window.pixels_per_degree
-                                        != config.window.pixels_per_degree;
+                                        != config.window.pixels_per_degree
+                                    || next_config.window.padding_px != config.window.padding_px;
                                 if window_config_changed
                                     && let Err(error) = input.send(XrInput::ConfigReloaded {
                                         default_window_distance: next_config
@@ -621,6 +678,7 @@ pub fn run(
                                         window_pixels_per_degree: next_config
                                             .window
                                             .pixels_per_degree,
+                                        window_padding_px: next_config.window.padding_px,
                                     })
                                 {
                                     eprintln!(
@@ -715,11 +773,13 @@ pub fn run(
                     })?;
                     timings.measure("gpu/panel-replace", Duration::ZERO, || {
                         if let Some(panel) = panel_frames.get_mut(&panel_id) {
-                            let animated_pose = panel.geometry.pose;
-                            panel.geometry = geometry;
-                            panel.geometry.pose = animated_pose;
-                            panel.saved_pose.width_m = geometry.pose.width_m;
-                            panel.temporary_pose.width_m = geometry.pose.width_m;
+                            reconcile_panel_geometry(
+                                &mut panel.geometry,
+                                &mut panel.saved_pose,
+                                &mut panel.temporary_pose,
+                                geometry,
+                                panel.resize_pending,
+                            );
                             panel.texture = texture;
                         } else {
                             panel_frames.insert(
@@ -729,6 +789,7 @@ pub fn run(
                                     geometry,
                                     saved_pose: geometry.pose,
                                     temporary_pose: geometry.pose,
+                                    resize_pending: false,
                                 },
                             );
                             pending_spawn.insert(panel_id);
@@ -905,7 +966,9 @@ pub fn run(
                                     first.distance_m.total_cmp(&second.distance_m)
                                 })
                                 .map(|(id, _hit)| {
-                                    let panel = &panel_frames[&id];
+                                    let panel =
+                                        panel_frames.get_mut(&id).expect("hit panel exists");
+                                    panel.resize_pending = false;
                                     grab_radius = panel
                                         .geometry
                                         .pose
@@ -953,14 +1016,23 @@ pub fn run(
                         resize_initial_size =
                             (panel.geometry.logical_size.w, panel.geometry.logical_size.h);
                         resize_initial_hit = hit.surface_px;
+                        resize_requested_size = None;
+                        if let Some(panel) = panel_frames.get_mut(&panel_id) {
+                            panel.resize_pending = true;
+                        }
                     }
                 }
                 if trigger.changed_since_last_sync && !trigger.current_state {
-                    let was_resizing = resizing_panel.take().is_some();
+                    finish_resize(
+                        &mut panel_frames,
+                        &input,
+                        &mut resizing_panel,
+                        resize_geometry,
+                        resize_edges,
+                        resize_requested_size,
+                    )?;
                     resize_geometry = None;
-                    if was_resizing {
-                        save_dodge_targets(&mut panel_frames, &input)?;
-                    }
+                    resize_requested_size = None;
                 }
                 if trigger.is_active
                     && trigger.current_state
@@ -986,23 +1058,16 @@ pub fn run(
                     let new_size = (
                         width.round().max(1.0) as i32,
                         height.round().max(1.0) as i32,
-                    )
-                        .into();
-                    let pose = geometry.resized_pose_from_edges(
-                        new_size,
-                        resize_edges,
-                        config.window.pixels_per_degree,
                     );
-                    if let Some(panel) = panel_frames.get_mut(&panel_id) {
-                        panel.geometry.pose = pose;
-                        panel.geometry.logical_size = new_size;
+                    if resize_requested_size != Some(new_size) {
+                        resize_requested_size = Some(new_size);
+                        let _ = input.try_send(XrInput::ResizePanel {
+                            panel_id,
+                            width: new_size.0,
+                            height: new_size.1,
+                            anchor: Some((geometry, resize_edges)),
+                        });
                     }
-                    let _ = input.try_send(XrInput::MovePanel { panel_id, pose });
-                    let _ = input.try_send(XrInput::ResizePanel {
-                        panel_id,
-                        width: new_size.w,
-                        height: new_size.h,
-                    });
                 }
                 let delta_seconds = (frame_state.predicted_display_period.as_nanos() as f32
                     / 1_000_000_000.0)
@@ -1076,17 +1141,36 @@ pub fn run(
             }
         } else {
             cursor_ray = None;
-            if grabbed_panel.take().is_some() || resizing_panel.take().is_some() {
-                save_dodge_targets(&mut panel_frames, &input)?;
+            if grabbed_panel.take().is_some() {
+                save_dodge_targets_except(&mut panel_frames, &input, resizing_panel)?;
             }
+            finish_resize(
+                &mut panel_frames,
+                &input,
+                &mut resizing_panel,
+                resize_geometry,
+                resize_edges,
+                resize_requested_size,
+            )?;
             resize_geometry = None;
+            resize_requested_size = None;
             cursor_close_panel = None;
         }
         if !tracked_this_frame {
             cursor_ray = None;
-            if grabbed_panel.take().is_some() || resizing_panel.take().is_some() {
-                save_dodge_targets(&mut panel_frames, &input)?;
+            if grabbed_panel.take().is_some() {
+                save_dodge_targets_except(&mut panel_frames, &input, resizing_panel)?;
             }
+            finish_resize(
+                &mut panel_frames,
+                &input,
+                &mut resizing_panel,
+                resize_geometry,
+                resize_edges,
+                resize_requested_size,
+            )?;
+            resize_geometry = None;
+            resize_requested_size = None;
             if pointer_tracked {
                 input.send(XrInput::PointerLost {
                     time_ms: (frame_state.predicted_display_time.as_nanos() / 1_000_000) as u32,

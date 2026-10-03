@@ -280,6 +280,8 @@ impl Compositor {
             },
             pose,
             geometry: None,
+            pose_is_explicit: false,
+            resize_anchor: None,
             id: self.next_panel_id,
             bounds: Rectangle::default(),
         });
