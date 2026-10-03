@@ -11,12 +11,39 @@ use iced::{
     widget::{button, column, container, grid, image, row, scrollable, svg, text, text_input},
 };
 
+const SEARCH_INPUT_ID: &str = "app-search";
+const GRID_COLUMNS: usize = 5;
+
+fn result_id(index: usize) -> String {
+    format!("app-result-{index}")
+}
+
 const ACCENT: Color = Color::from_rgb(0.40, 0.78, 0.98);
 const TEXT: Color = Color::from_rgb(0.94, 0.96, 1.0);
 const MUTED: Color = Color::from_rgb(0.66, 0.72, 0.81);
 const GLASS: Color = Color::from_rgba(0.035, 0.055, 0.09, 0.50);
 const TILE: Color = Color::from_rgba(0.12, 0.16, 0.23, 0.76);
 const TILE_HOVER: Color = Color::from_rgba(0.19, 0.26, 0.36, 0.94);
+const TILE_FOCUSED: Color = Color::from_rgba(0.16, 0.24, 0.34, 0.96);
+
+#[derive(Debug, Clone)]
+struct CardFocusState {
+    focused: bool,
+}
+
+impl iced::advanced::widget::operation::Focusable for CardFocusState {
+    fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    fn focus(&mut self) {
+        self.focused = true;
+    }
+
+    fn unfocus(&mut self) {
+        self.focused = false;
+    }
+}
 
 #[derive(Debug, Clone)]
 struct AppEntry {
@@ -28,15 +55,177 @@ struct AppEntry {
     terminal: bool,
 }
 
+struct FocusableCard<'a, Message: Clone + 'static> {
+    content: Element<'a, Message>,
+    id: iced::advanced::widget::Id,
+}
+
+impl<'a, Message: Clone + 'static> FocusableCard<'a, Message> {
+    fn new(content: impl Into<Element<'a, Message>>, id: String) -> Self {
+        Self {
+            content: content.into(),
+            id: iced::advanced::widget::Id::from(id),
+        }
+    }
+}
+
+impl<Message: Clone + 'static> iced::advanced::Widget<Message, Theme, iced::Renderer>
+    for FocusableCard<'_, Message>
+where
+    Message: Clone + 'static,
+{
+    fn tag(&self) -> iced::advanced::widget::tree::Tag {
+        iced::advanced::widget::tree::Tag::of::<CardFocusState>()
+    }
+
+    fn state(&self) -> iced::advanced::widget::tree::State {
+        iced::advanced::widget::tree::State::new(CardFocusState { focused: false })
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn size(&self) -> iced::Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        operation.focusable(
+            Some(&self.id),
+            layout.bounds(),
+            tree.state.downcast_mut::<CardFocusState>(),
+        );
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &iced::Rectangle,
+        translation: iced::Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
+}
+
+impl<'a, Message: Clone + 'static> From<FocusableCard<'a, Message>>
+    for Element<'a, Message, Theme, iced::Renderer>
+where
+    Message: Clone + 'static,
+{
+    fn from(card: FocusableCard<'a, Message>) -> Self {
+        Self::new(card)
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     SearchChanged(String),
+    Keyboard(iced::keyboard::Event),
+    RefreshSearchFocus,
+    SearchFocusChanged(bool),
+    LaunchFocused,
     Launch(usize),
 }
 
 struct Launcher {
     apps: Vec<AppEntry>,
     query: String,
+    result_focus: Option<usize>,
+    search_focused: bool,
     status: String,
 }
 
@@ -47,22 +236,143 @@ impl Launcher {
         Self {
             apps,
             query: String::new(),
+            result_focus: None,
+            search_focused: false,
             status: String::new(),
         }
     }
 
-    fn update(&mut self, message: Message) {
+    fn update(&mut self, message: Message) -> iced::Task<Message> {
         match message {
-            Message::SearchChanged(query) => self.query = query,
-            Message::Launch(index) => {
-                let Some(app) = self.filtered_apps().get(index).cloned() else {
-                    return;
+            Message::SearchChanged(query) => {
+                self.query = query;
+                self.result_focus = None;
+                self.search_focused = true;
+            }
+            Message::RefreshSearchFocus => {
+                return iced::widget::operation::is_focused(SEARCH_INPUT_ID)
+                    .map(Message::SearchFocusChanged);
+            }
+            Message::SearchFocusChanged(focused) => self.search_focused = focused,
+            Message::Keyboard(iced::keyboard::Event::KeyPressed { key, text, .. }) => {
+                if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) {
+                    self.query.clear();
+                    self.result_focus = None;
+                    self.search_focused = true;
+                    return iced::widget::operation::focus(SEARCH_INPUT_ID)
+                        .chain(iced::widget::operation::move_cursor_to_end(SEARCH_INPUT_ID));
+                }
+
+                if let iced::keyboard::Key::Named(named) = key
+                    && named == iced::keyboard::key::Named::Enter
+                    && let Some(index) = self.result_focus
+                    && !self.search_focused
+                {
+                    self.launch_index(index);
+                    return iced::Task::none();
+                }
+
+                if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab)
+                    && self.search_focused
+                {
+                    let result_index = self.result_focus.unwrap_or(0);
+                    self.result_focus = Some(result_index);
+                    return iced::widget::operation::focus(result_id(result_index));
+                }
+
+                let key_step = match key {
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowDown) => {
+                        Some(GRID_COLUMNS as isize)
+                    }
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowUp) => {
+                        Some(-(GRID_COLUMNS as isize))
+                    }
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowRight) => Some(1),
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowLeft) => Some(-1),
+                    _ => None,
                 };
-                match launch(app) {
-                    Ok(()) => self.status = format!("Started {}", app.name),
-                    Err(error) => self.status = format!("Could not start {}: {error}", app.name),
+
+                if !self.search_focused
+                    && self.result_focus.is_some()
+                    && matches!(key, iced::keyboard::Key::Character(_))
+                    && let Some(typed) = text
+                    && !typed.is_empty()
+                    && typed.chars().all(|character| !character.is_control())
+                {
+                    self.query.push_str(&typed);
+                    self.search_focused = true;
+                    self.result_focus = None;
+                    return iced::widget::operation::focus(SEARCH_INPUT_ID)
+                        .chain(iced::widget::operation::move_cursor_to_end(SEARCH_INPUT_ID));
+                }
+
+                if let Some(step) = key_step {
+                    let apps_len = self.filtered_apps().len();
+                    if apps_len == 0 {
+                        return iced::Task::none();
+                    }
+
+                    if self.search_focused {
+                        if step == -(GRID_COLUMNS as isize) {
+                            return iced::Task::none();
+                        }
+
+                        let next = (self.result_focus.unwrap_or(0) as isize + step)
+                            .clamp(0, apps_len.saturating_sub(1) as isize)
+                            as usize;
+                        self.search_focused = false;
+                        self.result_focus = Some(next);
+                        return iced::widget::operation::focus(result_id(next));
+                    }
+
+                    if let Some(index) = self.result_focus {
+                        if step == -(GRID_COLUMNS as isize) && index < GRID_COLUMNS {
+                            self.result_focus = None;
+                            self.search_focused = true;
+                            return iced::widget::operation::focus(SEARCH_INPUT_ID).chain(
+                                iced::widget::operation::move_cursor_to_end(SEARCH_INPUT_ID),
+                            );
+                        }
+
+                        let next = (index as isize + step)
+                            .clamp(0, apps_len.saturating_sub(1) as isize)
+                            as usize;
+                        self.result_focus = Some(next);
+                        return iced::widget::operation::focus(result_id(next));
+                    }
+
+                    let first_index = if step < 0 { apps_len - 1 } else { 0 };
+                    self.search_focused = false;
+                    self.result_focus = Some(first_index);
+                    return iced::widget::operation::focus(result_id(first_index));
+                } else if !self.search_focused
+                    && key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
+                    && let Some(index) = self.result_focus
+                {
+                    self.launch_index(index);
                 }
             }
+            Message::Keyboard(_) => {}
+            Message::LaunchFocused => self.launch_focused(),
+            Message::Launch(index) => {
+                self.launch_index(index);
+            }
+        }
+        iced::Task::none()
+    }
+
+    fn launch_focused(&mut self) {
+        let index = self.result_focus.unwrap_or(0);
+        self.launch_index(index);
+    }
+
+    fn launch_index(&mut self, index: usize) {
+        let Some(app) = self.filtered_apps().get(index).cloned() else {
+            return;
+        };
+        match launch(app) {
+            Ok(()) => self.status = format!("Started {}", app.name),
+            Err(error) => self.status = format!("Could not start {}: {error}", app.name),
         }
     }
 
@@ -78,11 +388,23 @@ impl Launcher {
         let apps = self.filtered_apps();
         let mut cards = grid::Grid::new().fluid(160).spacing(14);
         for (index, app) in apps.iter().enumerate() {
-            cards = cards.push(app_card(app, index));
+            let hinted = self.search_focused
+                && !self.query.trim().is_empty()
+                && self.result_focus.is_none()
+                && index == 0;
+            let keyboard_focused = self.result_focus == Some(index);
+            cards = cards.push(app_card(
+                app,
+                index,
+                hinted || keyboard_focused,
+                keyboard_focused,
+            ));
         }
 
         let search = text_input("Search applications…", &self.query)
+            .id(SEARCH_INPUT_ID)
             .on_input(Message::SearchChanged)
+            .on_submit(Message::LaunchFocused)
             .padding([13, 16])
             .size(16)
             .style(|theme: &Theme, status| {
@@ -96,6 +418,21 @@ impl Launcher {
                 style
             });
 
+        let input_hint = self.search_focused && !self.query.trim().is_empty();
+        let search = search.style(move |theme: &Theme, status| {
+            let mut style = text_input::default(theme, status);
+            style.background = Background::Color(TILE);
+            style.border = Border {
+                color: if input_hint {
+                    ACCENT
+                } else {
+                    Color::from_rgba(0.55, 0.72, 0.95, 0.23)
+                },
+                width: 1.0,
+                radius: 14.0.into(),
+            };
+            style
+        });
         let count = format!("{} APPLICATIONS", apps.len());
         let footer = row![
             text(count).size(11).color(MUTED),
@@ -125,7 +462,12 @@ impl Launcher {
     }
 }
 
-fn app_card<'a>(app: &&'a AppEntry, index: usize) -> Element<'a, Message> {
+fn app_card<'a>(
+    app: &&'a AppEntry,
+    index: usize,
+    highlighted: bool,
+    keyboard_focused: bool,
+) -> Element<'a, Message> {
     let icon: Element<'a, Message> = match app.icon.as_deref() {
         Some(path) if path.extension().is_some_and(|extension| extension == "svg") => {
             svg(svg::Handle::from_path(path))
@@ -155,28 +497,37 @@ fn app_card<'a>(app: &&'a AppEntry, index: usize) -> Element<'a, Message> {
     .spacing(12)
     .align_x(iced::Alignment::Center);
 
-    button(contents)
+    let card = button(contents)
         .width(Length::Fill)
         .height(Length::Fixed(150.0))
         .padding(14)
         .on_press(Message::Launch(index))
-        .style(|_theme: &Theme, status| {
-            let background = match status {
-                button::Status::Hovered | button::Status::Pressed => TILE_HOVER,
-                _ => TILE,
+        .style(move |_theme: &Theme, status| {
+            let background = if highlighted {
+                TILE_FOCUSED
+            } else {
+                match status {
+                    button::Status::Hovered | button::Status::Pressed => TILE_HOVER,
+                    _ => TILE,
+                }
             };
             button::Style {
                 background: Some(Background::Color(background)),
                 text_color: TEXT,
                 border: Border {
-                    color: Color::from_rgba(0.58, 0.73, 0.94, 0.22),
-                    width: 1.0,
+                    color: if keyboard_focused {
+                        ACCENT
+                    } else {
+                        Color::from_rgba(0.58, 0.73, 0.94, 0.22)
+                    },
+                    width: if keyboard_focused { 2.0 } else { 1.0 },
                     radius: 20.0.into(),
                 },
                 ..Default::default()
             }
-        })
-        .into()
+        });
+
+    FocusableCard::new(card, result_id(index)).into()
 }
 
 fn monogram(name: &str) -> String {
@@ -332,6 +683,16 @@ fn launch(app: &AppEntry) -> std::io::Result<()> {
 
 fn main() -> iced::Result {
     iced::application(Launcher::new, Launcher::update, Launcher::view)
+        .subscription(|_| {
+            iced::event::listen_raw(|event, _, _| match event {
+                iced::Event::Keyboard(keyboard_event) => Some(Message::Keyboard(keyboard_event)),
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
+                | iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => {
+                    Some(Message::RefreshSearchFocus)
+                }
+                _ => None,
+            })
+        })
         .title("Spacetop App Launcher")
         .window_size((920.0, 680.0))
         .transparent(true)

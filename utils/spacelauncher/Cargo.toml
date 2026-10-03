@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 freedesktop-desktop-entry = "0.8"
-iced = { version = "0.14", features = ["image", "svg"] }
+iced = { version = "0.14", features = ["advanced", "image", "svg"] }
