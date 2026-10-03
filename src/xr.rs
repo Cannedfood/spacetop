@@ -536,7 +536,7 @@ pub fn run(frames: PanelReceiver, input: calloop::channel::SyncSender<XrInput>) 
                 } else if pointing_at_window {
                     let stick = stick_action.state(&session, right_hand)?.current_state;
                     if stick.y.abs() > 0.15 {
-                        let scroll_input = stick.y.signum() * stick.y.abs().powf(2.0);
+                        let scroll_input = stick.y.powf(3.0);
                         let _ = input.try_send(XrInput::Scroll {
                             value: -f64::from(scroll_input) * delta_seconds as f64 * 1800.0,
                             time_ms,
