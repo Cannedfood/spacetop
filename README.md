@@ -36,6 +36,39 @@ DISPLAY=<x11-display> X11_APP
 
 See [TECHNICAL.md](TECHNICAL.md) for runtime requirements, renderer details, and tests.
 
+## Configuration
+
+On first startup Spacetop creates `~/.config/spacetop/config.toml` with defaults.
+Changes are picked up automatically while running (polled every 250 ms). Invalid
+settings or an unreadable replacement background leave the current settings active;
+the default window distance applies to windows opened after the reload.
+The background image can be `"random"` to select an EXR from
+`~/.config/spacetop/backgrounds/`, or a path to a specific image (including
+`~/` paths). The floor height is used when OpenXR does not provide a STAGE floor.
+
+```toml
+[background]
+image = "random"
+
+[floor]
+height_m = -1.3
+albedo = [0.12, 0.12, 0.12]
+roughness = 0.1
+reflectance = 0.18
+transparency = 0.25
+ray_count = 4
+
+[window]
+default_distance_m = 1.6
+
+[cursor]
+default_distance_m = 1.6
+```
+
+Floor albedo, roughness, reflectance, and transparency must be between `0` and
+`1`; `ray_count` must be between `1` and `64`; window and cursor distances must
+be between `0.1` and `100` meters.
+
 ## Keyboard And Pointer Input
 
 Point with the right controller and pull the trigger to click. Secondary click

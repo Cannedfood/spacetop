@@ -20,6 +20,8 @@ image = { version = "0.25", default-features = false, features = ["exr"] }
 naga = { version = "29", features = ["wgsl-in", "spv-out"] }
 openxr = { version = "0.22", default-features = false, features = ["loaded"] }
 smithay = { version = "0.7.0", default-features = false, features = ["desktop", "wayland_frontend", "renderer_gl", "backend_gbm", "backend_gbm_has_create_with_modifiers2", "backend_gbm_has_fd_for_plane", "xwayland"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

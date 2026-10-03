@@ -59,9 +59,14 @@ pub struct PanelPose {
 }
 
 impl PanelPose {
+    #[cfg(test)]
     pub fn for_slot(slot: usize) -> Self {
+        Self::for_slot_at_distance(slot, crate::config::DEFAULT_DISTANCE)
+    }
+
+    pub fn for_slot_at_distance(slot: usize, distance: f32) -> Self {
         let column = slot.div_ceil(2) as f32 * if slot.is_multiple_of(2) { -1.0 } else { 1.0 };
-        Self::facing_origin(Vec3::new(column * 1.1, 0.0, -1.6))
+        Self::facing_origin(Vec3::new(column * 1.1, 0.0, -distance))
     }
 
     /// Place a panel at `center` and orient its front toward the local-space origin.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::scene::FALLBACK_FLOOR_Y;
 
 #[test]
 fn cursor_uses_default_player_sphere_without_a_window() {

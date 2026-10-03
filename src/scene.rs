@@ -10,6 +10,7 @@ use std::{
 };
 
 use crate::{
+    config::FloorConfig,
     gpu::SharedImage,
     panel::{PanelGeometry, PanelPose},
 };
@@ -139,6 +140,19 @@ fn random_background() -> Result<PathBuf> {
     Ok(backgrounds.swap_remove((u64::from_ne_bytes(random) % backgrounds.len() as u64) as usize))
 }
 
+fn background_path(image: &str) -> Result<PathBuf> {
+    if image == "random" {
+        return random_background();
+    }
+    if let Some(relative) = image.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .context("HOME is not set; cannot expand background path")?;
+        return Ok(home.join(relative));
+    }
+    Ok(PathBuf::from(image))
+}
+
 fn memory_type(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
@@ -172,8 +186,9 @@ impl SkyboxTexture {
         renderer: &SceneRenderer,
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
+        image: &str,
     ) -> Result<Self> {
-        let path = random_background()?;
+        let path = background_path(image)?;
         let pixels = image::ImageReader::open(&path)
             .with_context(|| format!("open skybox {}", path.display()))?
             .with_guessed_format()
@@ -674,6 +689,11 @@ pub(crate) struct SceneRenderer {
     format: vk::Format,
     render_pass: vk::RenderPass,
     descriptor_layout: vk::DescriptorSetLayout,
+    floor_descriptor_layout: vk::DescriptorSetLayout,
+    floor_pool: vk::DescriptorPool,
+    floor_descriptor: vk::DescriptorSet,
+    floor_buffer: vk::Buffer,
+    floor_memory: vk::DeviceMemory,
     sampler: vk::Sampler,
     sky_sampler: vk::Sampler,
     layout: vk::PipelineLayout,
@@ -690,13 +710,45 @@ pub(crate) struct SceneFrame<'a> {
     pub floor_y: f32,
 }
 
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+struct FloorUniform {
+    albedo: [f32; 4],
+    controls: [f32; 4],
+}
+
+impl From<&FloorConfig> for FloorUniform {
+    fn from(config: &FloorConfig) -> Self {
+        Self {
+            albedo: [config.albedo[0], config.albedo[1], config.albedo[2], 0.0],
+            controls: [
+                config.transparency,
+                config.reflectance,
+                config.roughness,
+                config.ray_count as f32,
+            ],
+        }
+    }
+}
+
 impl SceneRenderer {
-    pub fn new(device: &ash::Device, format: vk::Format) -> Result<Self> {
+    pub fn new(
+        device: &ash::Device,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        format: vk::Format,
+        floor_config: &FloorConfig,
+    ) -> Result<Self> {
         let mut renderer = Self {
             device: device.clone(),
             format,
             render_pass: vk::RenderPass::null(),
             descriptor_layout: vk::DescriptorSetLayout::null(),
+            floor_descriptor_layout: vk::DescriptorSetLayout::null(),
+            floor_pool: vk::DescriptorPool::null(),
+            floor_descriptor: vk::DescriptorSet::null(),
+            floor_buffer: vk::Buffer::null(),
+            floor_memory: vk::DeviceMemory::null(),
             sampler: vk::Sampler::null(),
             sky_sampler: vk::Sampler::null(),
             layout: vk::PipelineLayout::null(),
@@ -771,6 +823,74 @@ impl SceneRenderer {
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
                 None,
             )?;
+            renderer.floor_descriptor_layout = device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(0)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                ]),
+                None,
+            )?;
+            let uniform = FloorUniform::from(floor_config);
+            renderer.floor_buffer = device.create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(std::mem::size_of::<FloorUniform>() as u64)
+                    .usage(vk::BufferUsageFlags::UNIFORM_BUFFER),
+                None,
+            )?;
+            let requirements = device.get_buffer_memory_requirements(renderer.floor_buffer);
+            renderer.floor_memory = device.allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(requirements.size)
+                    .memory_type_index(memory_type(
+                        instance,
+                        physical_device,
+                        requirements.memory_type_bits,
+                        vk::MemoryPropertyFlags::HOST_VISIBLE
+                            | vk::MemoryPropertyFlags::HOST_COHERENT,
+                    )?),
+                None,
+            )?;
+            device.bind_buffer_memory(renderer.floor_buffer, renderer.floor_memory, 0)?;
+            let mapped = device.map_memory(
+                renderer.floor_memory,
+                0,
+                std::mem::size_of::<FloorUniform>() as u64,
+                vk::MemoryMapFlags::empty(),
+            )?;
+            std::ptr::copy_nonoverlapping(
+                (&uniform as *const FloorUniform).cast::<u8>(),
+                mapped.cast::<u8>(),
+                std::mem::size_of::<FloorUniform>(),
+            );
+            device.unmap_memory(renderer.floor_memory);
+            renderer.floor_pool = device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(1)
+                    .pool_sizes(&[vk::DescriptorPoolSize {
+                        ty: vk::DescriptorType::UNIFORM_BUFFER,
+                        descriptor_count: 1,
+                    }]),
+                None,
+            )?;
+            renderer.floor_descriptor = device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(renderer.floor_pool)
+                    .set_layouts(&[renderer.floor_descriptor_layout]),
+            )?[0];
+            let buffers = [vk::DescriptorBufferInfo::default()
+                .buffer(renderer.floor_buffer)
+                .range(std::mem::size_of::<FloorUniform>() as u64)];
+            device.update_descriptor_sets(
+                &[vk::WriteDescriptorSet::default()
+                    .dst_set(renderer.floor_descriptor)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&buffers)],
+                &[],
+            );
             renderer.sampler = device.create_sampler(
                 &vk::SamplerCreateInfo::default()
                     .mag_filter(vk::Filter::LINEAR)
@@ -794,7 +914,7 @@ impl SceneRenderer {
                 .size(128)];
             renderer.layout = device.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&[renderer.descriptor_layout])
+                    .set_layouts(&[renderer.descriptor_layout, renderer.floor_descriptor_layout])
                     .push_constant_ranges(&constants),
                 None,
             )?;
@@ -804,6 +924,25 @@ impl SceneRenderer {
         renderer.cursor_pipeline = renderer.pipeline("cursor")?;
         renderer.floor_light_pipeline = renderer.pipeline("floor_light")?;
         Ok(renderer)
+    }
+
+    pub fn update_floor_config(&self, floor_config: &FloorConfig) -> Result<()> {
+        let uniform = FloorUniform::from(floor_config);
+        unsafe {
+            let mapped = self.device.map_memory(
+                self.floor_memory,
+                0,
+                std::mem::size_of::<FloorUniform>() as u64,
+                vk::MemoryMapFlags::empty(),
+            )?;
+            std::ptr::copy_nonoverlapping(
+                (&uniform as *const FloorUniform).cast::<u8>(),
+                mapped.cast::<u8>(),
+                std::mem::size_of::<FloorUniform>(),
+            );
+            self.device.unmap_memory(self.floor_memory);
+        }
+        Ok(())
     }
 
     fn pipeline(&self, fragment: &str) -> Result<vk::Pipeline> {
@@ -970,6 +1109,14 @@ impl SceneRenderer {
                 }],
             );
             self.device.cmd_set_scissor(command, 0, &[area]);
+            self.device.cmd_bind_descriptor_sets(
+                command,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.layout,
+                1,
+                &[self.floor_descriptor],
+                &[],
+            );
             let floor_height = [frame.floor_y];
             let floor_height_bytes =
                 std::slice::from_raw_parts(floor_height.as_ptr().cast::<u8>(), 4);
@@ -1114,8 +1261,21 @@ impl Drop for SceneRenderer {
             self.device.destroy_pipeline(self.cursor_pipeline, None);
             self.device.destroy_pipeline(self.window_pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
+            if self.floor_pool != vk::DescriptorPool::null() {
+                self.device.destroy_descriptor_pool(self.floor_pool, None);
+            }
+            if self.floor_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.floor_buffer, None);
+            }
+            if self.floor_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.floor_memory, None);
+            }
             self.device.destroy_sampler(self.sampler, None);
             self.device.destroy_sampler(self.sky_sampler, None);
+            if self.floor_descriptor_layout != vk::DescriptorSetLayout::null() {
+                self.device
+                    .destroy_descriptor_set_layout(self.floor_descriptor_layout, None);
+            }
             self.device
                 .destroy_descriptor_set_layout(self.descriptor_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);

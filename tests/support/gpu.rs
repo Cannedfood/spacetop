@@ -370,7 +370,13 @@ impl Drop for Vulkan {
 #[ignore = "requires a Vulkan/GLES GPU with DMA-BUF sharing"]
 fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     let vulkan = Vulkan::new()?;
-    let scene = SceneRenderer::new(&vulkan.device, vk::Format::R8G8B8A8_SRGB)?;
+    let scene = SceneRenderer::new(
+        &vulkan.device,
+        &vulkan.instance,
+        vulkan.physical_device,
+        vk::Format::R8G8B8A8_SRGB,
+        &crate::config::FloorConfig::default(),
+    )?;
     let mut producer = GpuRenderer::new(&vulkan.render_node)?;
     let mut make_texture = |quadrants: bool| -> Result<PanelTexture> {
         let buffer =
@@ -654,8 +660,19 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
 #[ignore = "requires Vulkan DMA-BUF support and a configured EXR skybox"]
 fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
     let vulkan = Vulkan::new()?;
-    let renderer = SceneRenderer::new(&vulkan.device, vk::Format::R8G8B8A8_SRGB)?;
-    let mut skybox = SkyboxTexture::new(&renderer, &vulkan.instance, vulkan.physical_device)?;
+    let renderer = SceneRenderer::new(
+        &vulkan.device,
+        &vulkan.instance,
+        vulkan.physical_device,
+        vk::Format::R8G8B8A8_SRGB,
+        &crate::config::FloorConfig::default(),
+    )?;
+    let mut skybox = SkyboxTexture::new(
+        &renderer,
+        &vulkan.instance,
+        vulkan.physical_device,
+        "random",
+    )?;
     let view = openxr::View {
         pose: openxr::Posef::IDENTITY,
         fov: openxr::Fovf {
@@ -711,8 +728,26 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
 #[ignore = "requires Vulkan DMA-BUF support and a configured EXR skybox"]
 fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
     let vulkan = Vulkan::new()?;
-    let renderer = SceneRenderer::new(&vulkan.device, vk::Format::R8G8B8A8_SRGB)?;
-    let mut skybox = SkyboxTexture::new(&renderer, &vulkan.instance, vulkan.physical_device)?;
+    let floor_config = crate::config::FloorConfig {
+        albedo: [0.2, 0.3, 0.4],
+        reflectance: 0.12,
+        transparency: 0.4,
+        ..crate::config::FloorConfig::default()
+    };
+    let renderer = SceneRenderer::new(
+        &vulkan.device,
+        &vulkan.instance,
+        vulkan.physical_device,
+        vk::Format::R8G8B8A8_SRGB,
+        &crate::config::FloorConfig::default(),
+    )?;
+    renderer.update_floor_config(&floor_config)?;
+    let mut skybox = SkyboxTexture::new(
+        &renderer,
+        &vulkan.instance,
+        vulkan.physical_device,
+        "random",
+    )?;
     let view_at = |target: glam::Vec3, eye: glam::Vec3| {
         let orientation =
             glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, (target - eye).normalize());
@@ -765,12 +800,20 @@ fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
             ((encoded + 0.055) / 1.055).powf(2.4)
         }
     };
-    let recovered_albedo =
-        |floor: &[u8], sky: &[u8]| (decode(floor[center]) - 0.25 * decode(sky[center])) / 0.75;
+    let recovered_albedo = |floor: &[u8], sky: &[u8]| {
+        (decode(floor[center]) - floor_config.transparency * decode(sky[center]))
+            / (1.0 - floor_config.transparency)
+    };
+    let head_albedo = recovered_albedo(&head_on, &head_sky);
+    let expected_head_albedo = floor_config.albedo[0] * (1.0 - floor_config.reflectance);
     assert!(
-        recovered_albedo(&head_on, &head_sky) > recovered_albedo(&grazing, &grazing_sky),
+        (head_albedo - expected_head_albedo).abs() < 0.02,
+        "runtime floor settings should reach the shader: expected={expected_head_albedo}, actual={head_albedo}"
+    );
+    assert!(
+        head_albedo > recovered_albedo(&grazing, &grazing_sky),
         "floor albedo should dim at grazing angles: head-on={}, grazing={}",
-        recovered_albedo(&head_on, &head_sky),
+        head_albedo,
         recovered_albedo(&grazing, &grazing_sky)
     );
     let distant_target = glam::Vec3::new(0.0, FALLBACK_FLOOR_Y, -45.0);

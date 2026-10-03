@@ -270,7 +270,7 @@ impl Compositor {
         }
         self.output.enter(&surface);
         let pose = (0..=self.panels.len())
-            .map(PanelPose::for_slot)
+            .map(|slot| PanelPose::for_slot_at_distance(slot, self.default_window_distance))
             .find(|pose| self.panels.iter().all(|panel| panel.pose != *pose))
             .expect("an unused panel placement exists");
         self.panels.push(ToplevelPanel {

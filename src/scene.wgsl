@@ -1,15 +1,5 @@
-const FLOOR_REFLECTANCE: f32 = 0.18;
-const FLOOR_ROUGHNESS: f32 = 0.1;
-const FLOOR_RAY_COUNT: u32 = 4u;
 const FLOOR_NOISE_CELL_SIZE: f32 = 0.002;
-const FLOOR_ALBEDO: vec3<f32> = vec3(0.12, 0.12, 0.12);
-const FLOOR_TRANSPARENCY: f32 = 0.25;
 const PI: f32 = 3.14159265;
-const_assert FLOOR_RAY_COUNT > 0u;
-const_assert FLOOR_ROUGHNESS >= 0.0 && FLOOR_ROUGHNESS <= 1.0;
-const_assert FLOOR_REFLECTANCE >= 0.0 && FLOOR_REFLECTANCE <= 1.0;
-const_assert all(FLOOR_ALBEDO >= vec3(0.0)) && all(FLOOR_ALBEDO <= vec3(1.0));
-const_assert FLOOR_TRANSPARENCY >= 0.0 && FLOOR_TRANSPARENCY <= 1.0;
 
 struct Transform {
     matrix: mat4x4<f32>,
@@ -21,6 +11,11 @@ struct Transform {
 var<immediate> transform: Transform;
 @group(0) @binding(0) var panel: texture_2d<f32>;
 @group(0) @binding(1) var filtering: sampler;
+struct FloorMaterial {
+    albedo: vec4<f32>,
+    controls: vec4<f32>,
+}
+@group(1) @binding(0) var<uniform> floor_material: FloorMaterial;
 struct SkyVertex {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -39,7 +34,8 @@ struct SkyVertex {
 }
 fn fresnel_schlick(cosine: f32) -> f32 {
     let grazing = pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
-    return FLOOR_REFLECTANCE + (1.0 - FLOOR_REFLECTANCE) * grazing;
+    let reflectance = floor_material.controls.y;
+    return reflectance + (1.0 - reflectance) * grazing;
 }
 @fragment fn sky(input: SkyVertex) -> @location(0) vec4<f32> {
     let direction = normalize(input.direction);
@@ -51,9 +47,9 @@ fn fresnel_schlick(cosine: f32) -> f32 {
     let floor_distance = (transform.emitter_up.w - transform.eye_position.y) / direction.y;
     if direction.y < 0.0 && floor_distance > 0.0 {
         let fresnel = fresnel_schlick(-direction.y);
-        let albedo = FLOOR_ALBEDO * (1.0 - fresnel);
+        let albedo = floor_material.albedo.rgb * (1.0 - fresnel);
         return vec4(
-            albedo * (1.0 - FLOOR_TRANSPARENCY) + background * FLOOR_TRANSPARENCY,
+            albedo * (1.0 - floor_material.controls.x) + background * floor_material.controls.x,
             1.0);
     }
     return vec4(background, 1.0);
@@ -129,21 +125,23 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
     if floor_distance <= 0.0 { return vec4(0.0); }
     let world = eye + incident * floor_distance;
     let view = -incident;
-    let alpha = max(0.001, FLOOR_ROUGHNESS * FLOOR_ROUGHNESS);
+    let roughness = floor_material.controls.z;
+    let ray_count = u32(floor_material.controls.w);
+    let alpha = max(0.001, roughness * roughness);
     let alpha_squared = alpha * alpha;
     let view_masking = ggx_masking(view.y, alpha_squared);
-    let rows = max(1u, u32(sqrt(f32(FLOOR_RAY_COUNT))));
-    let short_row_count = FLOOR_RAY_COUNT / rows;
-    let long_rows = FLOOR_RAY_COUNT % rows;
+    let rows = max(1u, u32(sqrt(f32(ray_count))));
+    let short_row_count = ray_count / rows;
+    let long_rows = ray_count % rows;
     var sum = vec3(0.0);
-    for (var index = 0u; index < FLOOR_RAY_COUNT; index += 1u) {
+    for (var index = 0u; index < ray_count; index += 1u) {
         let row = index % rows;
         let columns = short_row_count + select(0u, 1u, row < long_rows);
         let row_offset = row * short_row_count + min(row, long_rows);
         let jitter = sample_jitter(world, index);
         let sample_uv = vec2(
             (f32(index / rows) + jitter.x) / f32(columns),
-            (f32(row_offset) + jitter.y * f32(columns)) / f32(FLOOR_RAY_COUNT));
+            (f32(row_offset) + jitter.y * f32(columns)) / f32(ray_count));
         let half_vector = sample_ggx_visible_normal(view, sample_uv, alpha);
         let ray = reflect(-view, half_vector);
         let denominator = dot(ray, normal);
@@ -161,5 +159,5 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
             / (view_masking + light_masking - view_masking * light_masking);
         sum += color.rgb * weight;
     }
-    return vec4(sum / f32(FLOOR_RAY_COUNT), 0.0);
+    return vec4(sum / f32(ray_count), 0.0);
 }

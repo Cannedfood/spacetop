@@ -8,7 +8,7 @@ use smithay::{
     wayland::socket::ListeningSocketSource,
 };
 
-use crate::{ClientState, Compositor, XrInput, bridge, input, x11, xr};
+use crate::{ClientState, Compositor, XrInput, bridge, config::AppConfig, input, x11, xr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayNames {
@@ -21,6 +21,7 @@ pub(crate) type ReadyCallback = Box<dyn FnOnce(Option<String>) -> anyhow::Result
 pub fn run(
     on_ready: impl FnOnce(DisplayNames) -> anyhow::Result<()> + 'static,
 ) -> anyhow::Result<()> {
+    let config = AppConfig::load()?;
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
     let display: Display<Compositor> = Display::new()?;
     let display_handle = display.handle();
@@ -28,16 +29,21 @@ pub fn run(
     let (input_sender, input_receiver) = bridge::input_channel();
     let xr_input_sender = input_sender.clone();
     let xr_error_sender = input_sender.clone();
+    let xr_config = config.clone();
     thread::Builder::new()
         .name("spacetop-openxr".into())
         .spawn(move || {
-            if let Err(error) = xr::run(frame_receiver, xr_input_sender) {
+            if let Err(error) = xr::run(frame_receiver, xr_input_sender, xr_config) {
                 let _ = xr_error_sender.send(XrInput::FatalError {
                     message: format!("OpenXR client stopped: {error:#}"),
                 });
             }
         })?;
-    let mut compositor = Compositor::new(display_handle.clone(), frame_sender);
+    let mut compositor = Compositor::with_window_distance(
+        display_handle.clone(),
+        frame_sender,
+        config.window.default_distance_m,
+    );
     input::start(&event_loop.handle())?;
     let socket = ListeningSocketSource::new_auto()?;
     let wayland_display = socket.socket_name().to_os_string();
@@ -110,6 +116,7 @@ pub fn run(
 }
 
 pub fn run_xr_client() -> anyhow::Result<()> {
+    let config = AppConfig::load()?;
     let (_frame_sender, frame_receiver) = bridge::panel_channel();
-    xr::run(frame_receiver, bridge::InputSender::discarded())
+    xr::run(frame_receiver, bridge::InputSender::discarded(), config)
 }

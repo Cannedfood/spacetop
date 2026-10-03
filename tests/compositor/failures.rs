@@ -34,6 +34,20 @@ fn readiness_callback_errors_are_returned() {
 }
 
 #[test]
+fn config_reload_updates_default_window_distance() {
+    let display = Display::<Compositor>::new().unwrap();
+    let (sender, _receiver) = bridge::panel_channel();
+    let mut compositor = Compositor::new(display.handle(), sender);
+
+    compositor.handle_xr_input(crate::XrInput::ConfigReloaded {
+        default_window_distance: 2.4,
+    });
+
+    assert_eq!(compositor.default_window_distance, 2.4);
+    assert!(compositor.fatal_error.is_none());
+}
+
+#[test]
 fn gpu_and_xr_failures_are_fatal() {
     let directory = tempfile::tempdir().unwrap();
     for command in [

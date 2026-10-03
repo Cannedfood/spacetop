@@ -8,11 +8,10 @@ use std::{
 };
 
 use crate::bridge::{PanelReceiver, PanelUpdate, XrInput};
+use crate::config::{AppConfig, ConfigWatcher};
 use crate::gpu::{self, SharedImage};
 use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3};
-use crate::scene::{
-    FALLBACK_FLOOR_Y, PanelTexture, RenderTarget, SceneFrame, SceneRenderer, SkyboxTexture,
-};
+use crate::scene::{PanelTexture, RenderTarget, SceneFrame, SceneRenderer, SkyboxTexture};
 use anyhow::{Context, Result, ensure};
 use ash::{
     Entry as VkEntry,
@@ -147,7 +146,12 @@ fn panel_swapchain_format(formats: &[u32]) -> Result<vk::Format> {
 ///
 /// It renders captured Wayland panels into a Vulkan stereo projection layer and
 /// forwards the right-hand aim/select controller actions to the compositor.
-pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<()> {
+pub fn run(
+    frames: PanelReceiver,
+    input: crate::bridge::InputSender,
+    mut config: AppConfig,
+) -> Result<()> {
+    let mut config_watcher = ConfigWatcher::new_default()?;
     let xr_entry = unsafe { xr::Entry::load(&()) }.context("load OpenXR loader")?;
     let available = xr_entry
         .enumerate_extensions()
@@ -335,8 +339,19 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
         .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT),
         "Vulkan GPU lacks D32 depth attachment support"
     );
-    let scene = SceneRenderer::new(&device, format)?;
-    let mut skybox = SkyboxTexture::new(&scene, &vk_instance, physical_device)?;
+    let scene = SceneRenderer::new(
+        &device,
+        &vk_instance,
+        physical_device,
+        format,
+        &config.floor,
+    )?;
+    let mut skybox = SkyboxTexture::new(
+        &scene,
+        &vk_instance,
+        physical_device,
+        &config.background.image,
+    )?;
     let view_configuration = instance.enumerate_view_configuration_views(system, VIEW_TYPE)?;
     ensure!(
         view_configuration.len() == 2,
@@ -370,15 +385,22 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
         match session.create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY) {
             Ok(stage) => Some(stage),
             Err(error) => {
-                eprintln!("OpenXR STAGE floor unavailable: {error}; using fallback floor height");
+                eprintln!(
+                    "OpenXR STAGE floor unavailable: {error}; using fallback floor height {}m",
+                    config.floor.height_m
+                );
                 None
             }
         }
     } else {
-        eprintln!("OpenXR STAGE unsupported; using fallback floor height {FALLBACK_FLOOR_Y}m");
+        eprintln!(
+            "OpenXR STAGE unsupported; using fallback floor height {}m",
+            config.floor.height_m
+        );
         None
     };
-    let mut floor_y = FALLBACK_FLOOR_Y;
+    let mut floor_y = config.floor.height_m;
+    let mut stage_floor_calibrated = false;
     let action_set = instance.create_action_set("spacetop", "Spacetop input", 0)?;
     let right_hand = instance.string_to_path("/user/hand/right")?;
     let aim_action =
@@ -462,19 +484,77 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
     let mut exit = false;
     let mut panel_frames = PanelImages::new();
     let mut cursor_ray: Option<Ray3> = None;
-    let mut cursor_sphere_radius = PanelPose::for_slot(0).center.length();
+    let mut cursor_sphere_radius = config.cursor.default_distance_m;
     let mut pointer_tracked = false;
     let mut trigger_pressed = false;
     let mut secondary_pressed = false;
     let mut grabbed_panel: Option<u64> = None;
-    let mut grab_radius = 1.6_f32;
+    let mut grab_radius = config.window.default_distance_m;
     let mut grab_player_position = glam::Vec3::ZERO;
-    let mut grab_initial_radius = 1.6_f32;
+    let mut grab_initial_radius = config.window.default_distance_m;
     let mut grab_initial_width = 1.0_f32;
     let mut grab_direction_offset = glam::Vec2::ZERO;
     let mut timings = crate::timing::Timings::new();
+    let mut last_config_check = Instant::now();
 
     while !exit {
+        if last_config_check.elapsed() >= Duration::from_millis(250) {
+            last_config_check = Instant::now();
+            if let Some(reload) = config_watcher.reload_if_changed() {
+                match reload {
+                    Ok(next_config) => {
+                        let result: Result<Option<SkyboxTexture>> = (|| {
+                            let next_skybox =
+                                if next_config.background.image != config.background.image {
+                                    Some(SkyboxTexture::new(
+                                        &scene,
+                                        &vk_instance,
+                                        physical_device,
+                                        &next_config.background.image,
+                                    )?)
+                                } else {
+                                    None
+                                };
+                            scene.update_floor_config(&next_config.floor)?;
+                            Ok(next_skybox)
+                        })();
+                        match result {
+                            Ok(next_skybox) => {
+                                if let Some(next_skybox) = next_skybox {
+                                    skybox = next_skybox;
+                                }
+                                if stage_space.is_none() || !stage_floor_calibrated {
+                                    floor_y = next_config.floor.height_m;
+                                }
+                                cursor_sphere_radius = next_config.cursor.default_distance_m;
+                                if grabbed_panel.is_none() {
+                                    grab_radius = next_config.window.default_distance_m;
+                                    grab_initial_radius = next_config.window.default_distance_m;
+                                }
+                                if next_config.window.default_distance_m
+                                    != config.window.default_distance_m
+                                    && let Err(error) = input.send(XrInput::ConfigReloaded {
+                                        default_window_distance: next_config
+                                            .window
+                                            .default_distance_m,
+                                    })
+                                {
+                                    eprintln!(
+                                        "failed to notify compositor of config reload: {error}"
+                                    );
+                                }
+                                config = next_config;
+                                eprintln!("Reloaded configuration");
+                            }
+                            Err(error) => {
+                                eprintln!("configuration reload rejected: {error:#}");
+                            }
+                        }
+                    }
+                    Err(error) => eprintln!("configuration reload rejected: {error:#}"),
+                }
+            }
+        }
         while let Some(event) = timings.measure("openxr/poll-event", Duration::ZERO, || {
             instance.poll_event(&mut events)
         })? {
@@ -588,6 +668,13 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
             let location = timings.measure("openxr/locate-floor", Duration::ZERO, || {
                 stage.locate(&space, frame_state.predicted_display_time)
             })?;
+            if location
+                .location_flags
+                .contains(xr::SpaceLocationFlags::POSITION_VALID)
+                && location.pose.position.y.is_finite()
+            {
+                stage_floor_calibrated = true;
+            }
             floor_y = tracked_floor_height(floor_y, location);
         }
         if view_state.contains(xr::ViewStateFlags::POSITION_VALID) && !views.is_empty() {

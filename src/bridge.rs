@@ -41,6 +41,9 @@ pub enum XrInput {
         render_node: std::path::PathBuf,
         limits: PanelLimits,
     },
+    ConfigReloaded {
+        default_window_distance: f32,
+    },
     FatalError {
         message: String,
     },

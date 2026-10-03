@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::Context;
 mod bridge;
+mod config;
 mod gpu;
 mod input;
 mod panel;
@@ -108,6 +109,7 @@ struct Compositor {
     next_panel_id: u64,
     frame_sender: bridge::PanelSender,
     panel_limits: panel::PanelLimits,
+    default_window_distance: f32,
     active_panel: Option<u64>,
     fatal_error: Option<anyhow::Error>,
     started_at: Instant,
@@ -216,6 +218,12 @@ impl Compositor {
                 self.panel_limits = limits;
                 self.configure_gpu(&render_node)
             }
+            XrInput::ConfigReloaded {
+                default_window_distance,
+            } => {
+                self.default_window_distance = default_window_distance;
+                Ok(())
+            }
             XrInput::FatalError { message } => Err(anyhow::anyhow!(message)),
         };
         if let Err(error) = result {
@@ -229,7 +237,16 @@ impl Compositor {
         }
     }
 
+    #[cfg(test)]
     fn new(display_handle: DisplayHandle, frame_sender: bridge::PanelSender) -> Self {
+        Self::with_window_distance(display_handle, frame_sender, config::DEFAULT_DISTANCE)
+    }
+
+    fn with_window_distance(
+        display_handle: DisplayHandle,
+        frame_sender: bridge::PanelSender,
+        default_window_distance: f32,
+    ) -> Self {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
@@ -279,6 +296,7 @@ impl Compositor {
             next_panel_id: 1,
             frame_sender,
             panel_limits: panel::PanelLimits::default(),
+            default_window_distance,
             active_panel: None,
             fatal_error: None,
             started_at: Instant::now(),
@@ -796,7 +814,7 @@ impl XdgShellHandler for Compositor {
         self.output.enter(surface.wl_surface());
         let panel_id = self.next_panel_id;
         let pose = (0..=self.panels.len())
-            .map(PanelPose::for_slot)
+            .map(|slot| PanelPose::for_slot_at_distance(slot, self.default_window_distance))
             .find(|pose| self.panels.iter().all(|panel| panel.pose != *pose))
             .expect("an unused panel placement exists");
         self.panels.push(ToplevelPanel {
