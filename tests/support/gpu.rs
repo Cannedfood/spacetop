@@ -507,7 +507,11 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         )
     };
     let empty = floor_pixels(&[])?;
-    assert_eq!(pixel(&empty, 256, 450), [0, 0, 0, 255]);
+    let empty_floor_pixel = pixel(&empty, 256, 450);
+    assert!(empty_floor_pixel[0] > 0);
+    assert_eq!(empty_floor_pixel[0], empty_floor_pixel[1]);
+    assert_eq!(empty_floor_pixel[1], empty_floor_pixel[2]);
+    assert_eq!(empty_floor_pixel[3], 255);
     let lit = floor_pixels(&[(&background, emitter)])?;
     let repeated = floor_pixels(&[(&background, emitter)])?;
     assert_eq!(lit, repeated);
@@ -545,9 +549,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             let left = i32::from(pixel(&lit, horizontal - 1, vertical)[0]);
             let middle = i32::from(pixel(&lit, horizontal, vertical)[0]);
             let right = i32::from(pixel(&lit, horizontal + 1, vertical)[0]);
-            if (middle - left > 12 && middle - right > 12)
-                || (left - middle > 12 && right - middle > 12)
-            {
+            if (middle > left && middle > right) || (middle < left && middle < right) {
                 isolated_variations += 1;
             }
         }
@@ -578,16 +580,20 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     };
     let floor_pixel = pixel(&lit, 256, 450);
     assert!(floor_pixel[0] > 0);
+    assert!(floor_pixel[0] > empty_floor_pixel[0]);
     assert_eq!(floor_pixel[0], floor_pixel[1]);
     assert_eq!(floor_pixel[1], floor_pixel[2]);
     assert_eq!(floor_pixel[3], 255);
-    assert_eq!(pixel(&backwards, 256, 450), [0, 0, 0, 255]);
-    assert_eq!(pixel(&lit, 256, 300), [0, 0, 0, 255]);
+    assert_eq!(pixel(&backwards, 256, 450), empty_floor_pixel);
+    assert!(
+        pixel(&lit, 256, 300)[0] < empty_floor_pixel[0],
+        "floor albedo should dim toward grazing angles"
+    );
     let twice = pixel(&doubled, 256, 450);
     let quantization =
         |channel: u8| decode(channel.saturating_add(1)) - decode(channel.saturating_sub(1));
     assert!(
-        (decode(twice[0]) - 2.0 * decode(floor_pixel[0])).abs()
+        (decode(twice[0]) - (2.0 * decode(floor_pixel[0]) - decode(empty_floor_pixel[0]))).abs()
             <= quantization(twice[0]) + 2.0 * quantization(floor_pixel[0])
     );
     assert_eq!(twice[3], 255);
@@ -613,7 +619,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
             floor_y: -2.6,
         }),
     )?;
-    assert_eq!(pixel(&lowered, 256, 450), [0, 0, 0, 255]);
+    assert_eq!(pixel(&lowered, 256, 450), empty_floor_pixel);
     let mut stage_view = view;
     stage_view.pose.position.y = -FALLBACK_FLOOR_Y;
     let stage_emitter = PanelGeometry {
@@ -669,7 +675,13 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
             floor_y: FALLBACK_FLOOR_Y,
         }),
     )?;
-    assert!(pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+    assert!(
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == 255)
+    );
     let colors = pixels
         .as_chunks::<4>()
         .0
@@ -677,5 +689,71 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
         .map(|pixel| [pixel[0], pixel[1], pixel[2]])
         .collect::<std::collections::HashSet<_>>();
     assert!(colors.len() > 8, "skybox should vary across the view");
+    let ground_colors = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| index / 128 >= 56)
+        .map(|(_, pixel)| [pixel[0], pixel[1], pixel[2]])
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        ground_colors.len() > 1,
+        "transparent floor should reveal variations in the skybox"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires Vulkan DMA-BUF support"]
+fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
+    let vulkan = Vulkan::new()?;
+    let renderer = SceneRenderer::new(&vulkan.device, vk::Format::R8G8B8A8_SRGB)?;
+    let target = glam::Vec3::new(0.0, FALLBACK_FLOOR_Y, -2.0);
+    let view_at = |eye: glam::Vec3| {
+        let orientation =
+            glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, (target - eye).normalize());
+        let mut view = openxr::View {
+            pose: openxr::Posef::IDENTITY,
+            fov: openxr::Fovf {
+                angle_left: -std::f32::consts::FRAC_PI_4,
+                angle_right: std::f32::consts::FRAC_PI_4,
+                angle_up: std::f32::consts::FRAC_PI_4,
+                angle_down: -std::f32::consts::FRAC_PI_4,
+            },
+        };
+        view.pose.position.x = eye.x;
+        view.pose.position.y = eye.y;
+        view.pose.position.z = eye.z;
+        view.pose.orientation.x = orientation.x;
+        view.pose.orientation.y = orientation.y;
+        view.pose.orientation.z = orientation.z;
+        view.pose.orientation.w = orientation.w;
+        view
+    };
+    let render = |view: &openxr::View| {
+        vulkan.readback_image(
+            None,
+            (128, 128).into(),
+            None,
+            Some(SceneReadback {
+                renderer: &renderer,
+                view,
+                skybox: None,
+                panels: &[],
+                cursor: None,
+                floor_y: FALLBACK_FLOOR_Y,
+            }),
+        )
+    };
+    let head_on = render(&view_at(glam::Vec3::new(0.0, 0.0, -2.0)))?;
+    let grazing = render(&view_at(glam::Vec3::new(5.0, 0.0, -2.0)))?;
+    let center = (64 * 128 + 64) * 4;
+    assert!(
+        head_on[center] > grazing[center],
+        "floor albedo should dim at grazing angles: head-on={}, grazing={}",
+        head_on[center],
+        grazing[center]
+    );
     Ok(())
 }

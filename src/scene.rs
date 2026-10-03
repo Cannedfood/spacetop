@@ -21,10 +21,14 @@ const FLOOR_REFLECTANCE: f32 = 0.18;
 const FLOOR_ROUGHNESS: f32 = 0.1;
 const FLOOR_RAY_COUNT: u32 = 4u;
 const FLOOR_NOISE_CELL_SIZE: f32 = 0.002;
+const FLOOR_ALBEDO: vec3<f32> = vec3(0.12, 0.12, 0.12);
+const FLOOR_TRANSPARENCY: f32 = 0.25;
 const PI: f32 = 3.14159265;
 const_assert FLOOR_RAY_COUNT > 0u;
 const_assert FLOOR_ROUGHNESS >= 0.0 && FLOOR_ROUGHNESS <= 1.0;
 const_assert FLOOR_REFLECTANCE >= 0.0 && FLOOR_REFLECTANCE <= 1.0;
+const_assert all(FLOOR_ALBEDO >= vec3(0.0)) && all(FLOOR_ALBEDO <= vec3(1.0));
+const_assert FLOOR_TRANSPARENCY >= 0.0 && FLOOR_TRANSPARENCY <= 1.0;
 
 struct Transform {
     matrix: mat4x4<f32>,
@@ -99,6 +103,16 @@ struct FloorVertex {
     result.world = world;
     return result;
 }
+@fragment fn floor_albedo(input: FloorVertex) -> @location(0) vec4<f32> {
+    let to_eye = transform.eye_position.xyz - input.world;
+    if to_eye.y <= 0.0 { return vec4(0.0); }
+    let fresnel = fresnel_schlick(normalize(to_eye).y);
+    return vec4(FLOOR_ALBEDO * (1.0 - fresnel), 1.0 - FLOOR_TRANSPARENCY);
+}
+fn fresnel_schlick(cosine: f32) -> f32 {
+    let grazing = pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
+    return FLOOR_REFLECTANCE + (1.0 - FLOOR_REFLECTANCE) * grazing;
+}
 fn sample_ggx_visible_normal(view: vec3<f32>, sample_uv: vec2<f32>, alpha: f32) -> vec3<f32> {
     let stretched = normalize(vec3(alpha * view.x, alpha * view.z, view.y));
     let tangent_length_squared = dot(stretched.xy, stretched.xy);
@@ -168,7 +182,7 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
         if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) { continue; }
         let color = textureSampleLevel(panel, filtering, uv, 0.0);
         let view_half = clamp(dot(view, half_vector), 0.0, 1.0);
-        let fresnel = FLOOR_REFLECTANCE + (1.0 - FLOOR_REFLECTANCE) * pow(1.0 - view_half, 5.0);
+        let fresnel = fresnel_schlick(view_half);
         let light_masking = ggx_masking(ray.y, alpha_squared);
         let weight = fresnel * light_masking
             / (view_masking + light_masking - view_masking * light_masking);
@@ -841,6 +855,7 @@ pub(crate) struct SceneRenderer {
     sky_pipeline: vk::Pipeline,
     cursor_pipeline: vk::Pipeline,
     floor_light_pipeline: vk::Pipeline,
+    floor_albedo_pipeline: vk::Pipeline,
 }
 
 pub(crate) struct SceneFrame<'a> {
@@ -864,6 +879,7 @@ impl SceneRenderer {
             sky_pipeline: vk::Pipeline::null(),
             cursor_pipeline: vk::Pipeline::null(),
             floor_light_pipeline: vk::Pipeline::null(),
+            floor_albedo_pipeline: vk::Pipeline::null(),
         };
         let attachments = [
             vk::AttachmentDescription::default()
@@ -963,11 +979,13 @@ impl SceneRenderer {
         renderer.sky_pipeline = renderer.pipeline("sky")?;
         renderer.cursor_pipeline = renderer.pipeline("cursor")?;
         renderer.floor_light_pipeline = renderer.pipeline("floor_light")?;
+        renderer.floor_albedo_pipeline = renderer.pipeline("floor_albedo")?;
         Ok(renderer)
     }
 
     fn pipeline(&self, fragment: &str) -> Result<vk::Pipeline> {
-        let vertex_name = if fragment == "floor_light" {
+        let floor = fragment == "floor_light" || fragment == "floor_albedo";
+        let vertex_name = if floor {
             c"floor_vertex"
         } else if fragment == "sky" {
             c"sky_vertex"
@@ -1017,9 +1035,14 @@ impl SceneRenderer {
                 .depth_write_enable(fragment == "window")
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
             let additive = fragment == "floor_light";
+            let alpha_blend = fragment == "floor_albedo";
             let attachments = [vk::PipelineColorBlendAttachmentState::default()
                 .blend_enable(true)
-                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .src_color_blend_factor(if alpha_blend {
+                    vk::BlendFactor::SRC_ALPHA
+                } else {
+                    vk::BlendFactor::ONE
+                })
                 .dst_color_blend_factor(if additive {
                     vk::BlendFactor::ONE
                 } else {
@@ -1143,11 +1166,6 @@ impl SceneRenderer {
                 );
                 self.draw_panel(command, sky_matrix(view));
             }
-            self.device.cmd_bind_pipeline(
-                command,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.floor_light_pipeline,
-            );
             let eye = [
                 view.pose.position.x,
                 view.pose.position.y,
@@ -1161,6 +1179,27 @@ impl SceneRenderer {
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 112,
                 eye_bytes,
+            );
+            let floor_height = [frame.floor_y];
+            let floor_height_bytes =
+                std::slice::from_raw_parts(floor_height.as_ptr().cast::<u8>(), 4);
+            self.device.cmd_push_constants(
+                command,
+                self.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                108,
+                floor_height_bytes,
+            );
+            self.device.cmd_bind_pipeline(
+                command,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.floor_albedo_pipeline,
+            );
+            self.draw_panel(command, projection);
+            self.device.cmd_bind_pipeline(
+                command,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.floor_light_pipeline,
             );
             for (texture, geometry) in &panels {
                 let pose = geometry.pose;
@@ -1257,6 +1296,8 @@ impl Drop for SceneRenderer {
         unsafe {
             self.device
                 .destroy_pipeline(self.floor_light_pipeline, None);
+            self.device
+                .destroy_pipeline(self.floor_albedo_pipeline, None);
             self.device.destroy_pipeline(self.sky_pipeline, None);
             self.device.destroy_pipeline(self.cursor_pipeline, None);
             self.device.destroy_pipeline(self.window_pipeline, None);
@@ -1283,6 +1324,7 @@ mod tests {
             ("window", naga::ShaderStage::Fragment),
             ("cursor", naga::ShaderStage::Fragment),
             ("floor_vertex", naga::ShaderStage::Vertex),
+            ("floor_albedo", naga::ShaderStage::Fragment),
             ("floor_light", naga::ShaderStage::Fragment),
         ] {
             assert_eq!(shader(entry, stage).unwrap()[0], 0x0723_0203);
