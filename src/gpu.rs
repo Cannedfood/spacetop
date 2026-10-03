@@ -540,7 +540,7 @@ impl GpuRenderer {
             .renderer
             .render(&mut framebuffer, physical_size, Transform::Normal)?;
         frame.clear(
-            smithay::backend::renderer::Color32F::new(0.08, 0.11, 0.16, 1.0),
+            smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 0.0),
             &damage,
         )?;
         draw_render_elements::<GlesRenderer, _, _>(&mut frame, scale, &elements, &damage)?;
