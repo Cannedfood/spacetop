@@ -190,6 +190,23 @@ impl GpuCursor {
         }
     }
 
+    pub unsafe fn draw_quad(&self, command: vk::CommandBuffer, destination: vk::Image) {
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1);
+        unsafe {
+            self.device.cmd_clear_color_image(
+                command,
+                destination,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &vk::ClearColorValue { float32: [0.0; 4] },
+                &[range],
+            );
+            self.draw(command, destination, (21, 21).into(), (10, 10));
+        }
+    }
+
     pub unsafe fn draw(
         &self,
         command: vk::CommandBuffer,

@@ -157,6 +157,16 @@ pub(super) fn exercise(app: &mut WaylandApp) {
             &cursor_pixels[(30 * 100 + 30) * 4..(30 * 100 + 30) * 4 + 4],
             &[0, 0, 255, 255]
         );
+        let quad_pixels = vulkan.readback_cursor().unwrap();
+        assert_eq!(quad_pixels.len(), 21 * 21 * 4);
+        for (index, pixel) in quad_pixels.as_chunks::<4>().0.iter().enumerate() {
+            let expected = if index % 21 == 10 || index / 21 == 10 {
+                [255, 245, 0, 255]
+            } else {
+                [0, 0, 0, 0]
+            };
+            assert_eq!(*pixel, expected, "incorrect cursor quad pixel {index}");
+        }
 
         let params = client
             .dmabuf

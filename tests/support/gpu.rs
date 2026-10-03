@@ -95,6 +95,19 @@ impl Vulkan {
 
     pub fn readback(&self, shared: &SharedImage, cursor: Option<(i32, i32)>) -> Result<Vec<u8>> {
         let size = shared.dmabuf.size();
+        self.readback_image(Some(shared), size, cursor)
+    }
+
+    pub fn readback_cursor(&self) -> Result<Vec<u8>> {
+        self.readback_image(None, (21, 21).into(), Some((10, 10)))
+    }
+
+    fn readback_image(
+        &self,
+        shared: Option<&SharedImage>,
+        size: Size<i32, smithay::utils::Buffer>,
+        cursor: Option<(i32, i32)>,
+    ) -> Result<Vec<u8>> {
         let byte_len = size.w as u64 * size.h as u64 * 4;
         unsafe {
             let buffer = self.device.create_buffer(
@@ -190,9 +203,15 @@ impl Vulkan {
                 &[],
                 &[barrier],
             );
-            shared.copy_to(&self.device, command, destination, self.queue_family);
+            if let Some(shared) = shared {
+                shared.copy_to(&self.device, command, destination, self.queue_family);
+            }
             if let (Some(buffer), Some(center)) = (cursor_buffer.as_ref(), cursor) {
-                buffer.draw(command, destination, size, center);
+                if shared.is_some() {
+                    buffer.draw(command, destination, size, center);
+                } else {
+                    buffer.draw_quad(command, destination);
+                }
             }
             let barrier = vk::ImageMemoryBarrier::default()
                 .image(destination)

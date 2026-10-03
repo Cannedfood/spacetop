@@ -66,6 +66,40 @@ type PanelImages = std::collections::BTreeMap<u64, XrPanel>;
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 
+fn cursor_pose(
+    ray: Ray3,
+    player: glam::Vec3,
+    panels: impl Iterator<Item = PanelGeometry>,
+) -> Option<PanelPose> {
+    let direction = ray.direction.try_normalize()?;
+    let ray = Ray3 { direction, ..ray };
+    let nearest = panels
+        .filter_map(|geometry| geometry.intersect(ray).map(|hit| (geometry.pose, hit)))
+        .min_by(|(_, first), (_, second)| first.distance_m.total_cmp(&second.distance_m));
+    if let Some((pose, hit)) = nearest {
+        return Some(PanelPose {
+            center: ray.origin + direction * hit.distance_m,
+            width_m: 0.021,
+            ..pose
+        });
+    }
+    let radius = PanelPose::for_slot(0).center.length();
+    let offset = ray.origin - player;
+    let projection = offset.dot(direction);
+    let discriminant = projection * projection - offset.length_squared() + radius * radius;
+    if discriminant < 0.0 {
+        return None;
+    }
+    let distance = -projection + discriminant.sqrt();
+    if distance < 0.0 {
+        return None;
+    }
+    Some(PanelPose {
+        width_m: 0.021,
+        ..PanelPose::facing_player(ray.origin + direction * distance, player)
+    })
+}
+
 fn panel_swapchain_format(formats: &[u32]) -> Result<vk::Format> {
     let format = vk::Format::R8G8B8A8_SRGB;
     ensure!(
@@ -254,11 +288,11 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
             .min(device_limit)
             .min(cap)
             .min(i32::MAX as u32),
-        max_layers: graphics.max_layer_count,
+        max_layers: graphics.max_layer_count.saturating_sub(1),
     };
     ensure!(
         limits.max_width > 0 && limits.max_height > 0 && limits.max_layers > 0,
-        "invalid OpenXR panel limits or zero SPACETOP_MAX_PANEL_SIZE"
+        "invalid OpenXR panel limits, no layer available beside the cursor, or zero SPACETOP_MAX_PANEL_SIZE"
     );
     eprintln!(
         "OpenXR panel limits: {}x{}, {} window layers",
@@ -275,6 +309,27 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
         })
         .context("request GPU compositing")?;
     let gpu_cursor = gpu::GpuCursor::new(&vk_instance, &device, physical_device)?;
+    ensure!(
+        graphics.max_swapchain_image_width >= 21
+            && graphics.max_swapchain_image_height >= 21
+            && device_limit >= 21,
+        "OpenXR cannot accommodate the cursor image"
+    );
+    let mut cursor_swapchain = session
+        .create_swapchain(&xr::SwapchainCreateInfo {
+            create_flags: xr::SwapchainCreateFlags::EMPTY,
+            usage_flags: xr::SwapchainUsageFlags::TRANSFER_DST
+                | xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
+            format: format.as_raw() as _,
+            sample_count: 1,
+            width: 21,
+            height: 21,
+            face_count: 1,
+            array_size: 1,
+            mip_count: 1,
+        })
+        .context("create cursor swapchain")?;
+    let cursor_images = cursor_swapchain.enumerate_images()?;
     let space =
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
     let action_set = instance.create_action_set("spacetop", "Spacetop input", 0)?;
@@ -688,11 +743,12 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
             continue;
         }
 
-        let cursor_hit = cursor_ray.and_then(|ray| {
-            panel_frames
-                .iter()
-                .filter_map(|(id, panel)| panel.geometry.intersect(ray).map(|hit| (*id, hit)))
-                .min_by(|(_, first), (_, second)| first.distance_m.total_cmp(&second.distance_m))
+        let cursor_quad_pose = cursor_ray.and_then(|ray| {
+            cursor_pose(
+                ray,
+                grab_player_position,
+                panel_frames.values().map(|panel| panel.geometry),
+            )
         });
         unsafe {
             timings.measure("gpu/previous-copy-wait", period, || {
@@ -711,7 +767,7 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                 .level_count(1)
                 .base_array_layer(0)
                 .layer_count(1);
-            for (panel_id, panel) in &mut panel_frames {
+            for panel in panel_frames.values_mut() {
                 let image_index = timings.measure("openxr/acquire-image", period, || {
                     panel.swapchain.acquire_image()
                 })?;
@@ -744,20 +800,58 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                 panel
                     .shared
                     .copy_to(&device, command_buffer, image, queue_family);
-                if let Some((hit_id, hit)) = cursor_hit
-                    && hit_id == *panel_id
-                {
-                    let size = panel.shared.dmabuf.size();
-                    gpu_cursor.draw(
-                        command_buffer,
-                        image,
-                        size,
-                        (
-                            (hit.uv[0] * size.w as f32).round() as i32,
-                            (hit.uv[1] * size.h as f32).round() as i32,
-                        ),
-                    );
-                }
+                let end_barrier = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(
+                        vk::AccessFlags::COLOR_ATTACHMENT_READ
+                            | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    )
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(range);
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[end_barrier],
+                );
+            }
+            if cursor_quad_pose.is_some() {
+                let image_index = timings.measure("openxr/acquire-image", period, || {
+                    cursor_swapchain.acquire_image()
+                })?;
+                timings.measure("openxr/wait-image", period * 2, || {
+                    cursor_swapchain.wait_image(xr::Duration::INFINITE)
+                })?;
+                let image = vk::Image::from_raw(
+                    *cursor_images
+                        .get(image_index as usize)
+                        .context("bad cursor swapchain index")? as _,
+                );
+                let begin_barrier = vk::ImageMemoryBarrier::default()
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(range);
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[begin_barrier],
+                );
+                gpu_cursor.draw_quad(command_buffer, image);
                 let end_barrier = vk::ImageMemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .dst_access_mask(
@@ -795,6 +889,11 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
         for panel in panel_frames.values_mut() {
             timings.measure("openxr/release-image", Duration::ZERO, || {
                 panel.swapchain.release_image()
+            })?;
+        }
+        if cursor_quad_pose.is_some() {
+            timings.measure("openxr/release-image", Duration::ZERO, || {
+                cursor_swapchain.release_image()
             })?;
         }
 
@@ -840,8 +939,44 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                     })
             })
             .collect::<Vec<_>>();
+        let cursor_quad = cursor_quad_pose.map(|pose| {
+            let orientation = pose.orientation();
+            xr::CompositionLayerQuad::new()
+                .space(&space)
+                .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+                .sub_image(
+                    xr::SwapchainSubImage::new()
+                        .swapchain(&cursor_swapchain)
+                        .image_array_index(0)
+                        .image_rect(xr::Rect2Di {
+                            offset: xr::Offset2Di { x: 0, y: 0 },
+                            extent: xr::Extent2Di {
+                                width: 21,
+                                height: 21,
+                            },
+                        }),
+                )
+                .pose(xr::Posef {
+                    orientation: xr::Quaternionf {
+                        x: orientation.x,
+                        y: orientation.y,
+                        z: orientation.z,
+                        w: orientation.w,
+                    },
+                    position: xr::Vector3f {
+                        x: pose.center.x,
+                        y: pose.center.y,
+                        z: pose.center.z,
+                    },
+                })
+                .size(xr::Extent2Df {
+                    width: pose.width_m,
+                    height: pose.width_m,
+                })
+        });
         let layers = quads
             .iter()
+            .chain(cursor_quad.iter())
             .map(|quad| quad as &xr::CompositionLayerBase<xr::Vulkan>)
             .collect::<Vec<_>>();
         let active_elapsed = active_started.elapsed();
@@ -864,6 +999,7 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
     unsafe {
         device.device_wait_idle()?;
         panel_frames.clear();
+        drop(cursor_swapchain);
         drop((aim_space, space, frame_waiter, frame_stream, session));
         drop(gpu_cursor);
         device.destroy_fence(fence, None);
