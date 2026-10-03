@@ -7,6 +7,7 @@ use std::{
     fs::{self, File},
     io::Read,
     path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::{
@@ -19,13 +20,27 @@ use crate::{
 pub(crate) const FALLBACK_FLOOR_Y: f32 = spacetop_config::FALLBACK_FLOOR_HEIGHT;
 
 const SHADER: &str = include_str!("scene.wgsl");
+static NEXT_PANEL_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
-fn shader(entry: &str, stage: naga::ShaderStage) -> Result<Vec<u32>> {
-    let module = naga::front::wgsl::parse_str(SHADER)
-        .map_err(|error| anyhow::anyhow!(error.emit_to_string(SHADER)))?;
+fn shader(
+    entry: &str,
+    stage: naga::ShaderStage,
+    trace_through_transparent_windows: bool,
+) -> Result<Vec<u32>> {
+    let shader_source = SHADER.replace(
+        "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = false;",
+        &format!(
+            "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = {};",
+            trace_through_transparent_windows
+        ),
+    );
+    let module = naga::front::wgsl::parse_str(&shader_source)
+        .map_err(|error| anyhow::anyhow!(error.emit_to_string(&shader_source)))?;
     let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::IMMEDIATES,
+        naga::valid::Capabilities::IMMEDIATES
+            | naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
+            | naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING,
     )
     .validate(&module)?;
     let options = naga::back::spv::Options {
@@ -177,8 +192,6 @@ pub(crate) struct SkyboxTexture {
     image: vk::Image,
     memory: vk::DeviceMemory,
     view: vk::ImageView,
-    pool: vk::DescriptorPool,
-    descriptor: vk::DescriptorSet,
     staging: Option<(vk::Buffer, vk::DeviceMemory)>,
 }
 
@@ -215,8 +228,6 @@ impl SkyboxTexture {
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: vk::ImageView::null(),
-            pool: vk::DescriptorPool::null(),
-            descriptor: vk::DescriptorSet::null(),
             staging: None,
         };
         unsafe {
@@ -308,47 +319,6 @@ impl SkyboxTexture {
             );
             device.unmap_memory(buffer_memory);
             skybox.staging = Some((buffer, buffer_memory));
-
-            let sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::SAMPLED_IMAGE,
-                    descriptor_count: 1,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::SAMPLER,
-                    descriptor_count: 1,
-                },
-            ];
-            skybox.pool = device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(1)
-                    .pool_sizes(&sizes),
-                None,
-            )?;
-            skybox.descriptor = device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(skybox.pool)
-                    .set_layouts(&[renderer.descriptor_layout]),
-            )?[0];
-            let images = [vk::DescriptorImageInfo::default()
-                .image_view(skybox.view)
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-            let samplers = [vk::DescriptorImageInfo::default().sampler(renderer.sky_sampler)];
-            device.update_descriptor_sets(
-                &[
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(skybox.descriptor)
-                        .dst_binding(0)
-                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                        .image_info(&images),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(skybox.descriptor)
-                        .dst_binding(1)
-                        .descriptor_type(vk::DescriptorType::SAMPLER)
-                        .image_info(&samplers),
-                ],
-                &[],
-            );
         }
         eprintln!("Skybox: {}", path.display());
         Ok(skybox)
@@ -436,9 +406,6 @@ impl Drop for SkyboxTexture {
                 self.device.destroy_buffer(buffer, None);
                 self.device.free_memory(memory, None);
             }
-            if self.pool != vk::DescriptorPool::null() {
-                self.device.destroy_descriptor_pool(self.pool, None);
-            }
             if self.view != vk::ImageView::null() {
                 self.device.destroy_image_view(self.view, None);
             }
@@ -472,6 +439,7 @@ fn image_view(
 
 pub(crate) struct PanelTexture {
     device: ash::Device,
+    id: u64,
     pub shared: SharedImage,
     view: vk::ImageView,
     pool: vk::DescriptorPool,
@@ -481,8 +449,21 @@ pub(crate) struct PanelTexture {
 impl PanelTexture {
     pub fn new(renderer: &SceneRenderer, shared: SharedImage) -> Result<Self> {
         let device = &renderer.device;
+        let id = loop {
+            let current = NEXT_PANEL_TEXTURE_ID.load(Ordering::Relaxed);
+            let next = current
+                .checked_add(1)
+                .context("exhausted panel texture identifiers")?;
+            if NEXT_PANEL_TEXTURE_ID
+                .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                break current;
+            }
+        };
         let mut texture = Self {
             device: device.clone(),
+            id,
             shared,
             view: vk::ImageView::null(),
             pool: vk::DescriptorPool::null(),
@@ -687,21 +668,34 @@ impl Drop for RenderTarget {
 
 pub(crate) struct SceneRenderer {
     device: ash::Device,
+    instance: ash::Instance,
+    physical_device: vk::PhysicalDevice,
     format: vk::Format,
     render_pass: vk::RenderPass,
     descriptor_layout: vk::DescriptorSetLayout,
     floor_descriptor_layout: vk::DescriptorSetLayout,
+    environment_descriptor_layout: vk::DescriptorSetLayout,
     floor_pool: vk::DescriptorPool,
     floor_descriptor: vk::DescriptorSet,
     floor_buffer: vk::Buffer,
     floor_memory: vk::DeviceMemory,
+    environment_pool: vk::DescriptorPool,
+    environment_descriptor: vk::DescriptorSet,
+    environment_buffer: vk::Buffer,
+    environment_memory: vk::DeviceMemory,
+    environment_buffer_size: u64,
+    environment_descriptor_capacity: u32,
+    environment_panel_ids: Vec<u64>,
+    environment_skybox_view: vk::ImageView,
+    max_environment_windows: u32,
     sampler: vk::Sampler,
     sky_sampler: vk::Sampler,
     layout: vk::PipelineLayout,
     window_pipeline: vk::Pipeline,
-    sky_pipeline: vk::Pipeline,
     cursor_pipeline: vk::Pipeline,
-    floor_light_pipeline: vk::Pipeline,
+    environment_first_hit_pipeline: vk::Pipeline,
+    environment_transparent_pipeline: vk::Pipeline,
+    trace_through_transparent_windows: bool,
 }
 
 pub(crate) struct SceneFrame<'a> {
@@ -724,6 +718,21 @@ struct FloorUniform {
     cursor_close_border_color: [f32; 4],
     grabbed_style: [f32; 4],
     grabbed_border_color: [f32; 4],
+}
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Default)]
+struct WindowGpuData {
+    center_width: [f32; 4],
+    right_height: [f32; 4],
+    up: [f32; 4],
+}
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+struct WindowBufferHeader {
+    count: u32,
+    padding: [u32; 3],
 }
 
 impl From<&AppConfig> for FloorUniform {
@@ -771,21 +780,34 @@ impl SceneRenderer {
     ) -> Result<Self> {
         let mut renderer = Self {
             device: device.clone(),
+            instance: instance.clone(),
+            physical_device,
             format,
             render_pass: vk::RenderPass::null(),
             descriptor_layout: vk::DescriptorSetLayout::null(),
             floor_descriptor_layout: vk::DescriptorSetLayout::null(),
+            environment_descriptor_layout: vk::DescriptorSetLayout::null(),
             floor_pool: vk::DescriptorPool::null(),
             floor_descriptor: vk::DescriptorSet::null(),
             floor_buffer: vk::Buffer::null(),
             floor_memory: vk::DeviceMemory::null(),
+            environment_pool: vk::DescriptorPool::null(),
+            environment_descriptor: vk::DescriptorSet::null(),
+            environment_buffer: vk::Buffer::null(),
+            environment_memory: vk::DeviceMemory::null(),
+            environment_buffer_size: 0,
+            environment_descriptor_capacity: 0,
+            environment_panel_ids: Vec::new(),
+            environment_skybox_view: vk::ImageView::null(),
+            max_environment_windows: 0,
             sampler: vk::Sampler::null(),
             sky_sampler: vk::Sampler::null(),
             layout: vk::PipelineLayout::null(),
             window_pipeline: vk::Pipeline::null(),
-            sky_pipeline: vk::Pipeline::null(),
             cursor_pipeline: vk::Pipeline::null(),
-            floor_light_pipeline: vk::Pipeline::null(),
+            environment_first_hit_pipeline: vk::Pipeline::null(),
+            environment_transparent_pipeline: vk::Pipeline::null(),
+            trace_through_transparent_windows: config.floor.trace_through_transparent_windows,
         };
         let attachments = [
             vk::AttachmentDescription::default()
@@ -861,6 +883,65 @@ impl SceneRenderer {
                         .descriptor_count(1)
                         .stage_flags(vk::ShaderStageFlags::FRAGMENT),
                 ]),
+                None,
+            )?;
+            let limits = instance
+                .get_physical_device_properties(physical_device)
+                .limits;
+            renderer.max_environment_windows = limits
+                .max_per_stage_descriptor_sampled_images
+                .min(limits.max_descriptor_set_sampled_images)
+                .saturating_sub(2)
+                .min(
+                    limits
+                        .max_storage_buffer_range
+                        .saturating_sub(std::mem::size_of::<WindowBufferHeader>() as u32)
+                        / std::mem::size_of::<WindowGpuData>() as u32,
+                );
+            ensure!(
+                renderer.max_environment_windows > 0,
+                "Vulkan device has no capacity for reflected window descriptors"
+            );
+            let environment_bindings = [
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(1)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(2)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(3)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(4)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(renderer.max_environment_windows)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            ];
+            let binding_flags = [
+                vk::DescriptorBindingFlags::empty(),
+                vk::DescriptorBindingFlags::empty(),
+                vk::DescriptorBindingFlags::empty(),
+                vk::DescriptorBindingFlags::empty(),
+                vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT,
+            ];
+            let mut binding_flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
+                .binding_flags(&binding_flags);
+            renderer.environment_descriptor_layout = device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default()
+                    .bindings(&environment_bindings)
+                    .push_next(&mut binding_flags_info),
                 None,
             )?;
             let uniform = FloorUniform::from(config);
@@ -944,19 +1025,24 @@ impl SceneRenderer {
                 .size(128)];
             renderer.layout = device.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&[renderer.descriptor_layout, renderer.floor_descriptor_layout])
+                    .set_layouts(&[
+                        renderer.descriptor_layout,
+                        renderer.floor_descriptor_layout,
+                        renderer.environment_descriptor_layout,
+                    ])
                     .push_constant_ranges(&constants),
                 None,
             )?;
         }
-        renderer.window_pipeline = renderer.pipeline("window")?;
-        renderer.sky_pipeline = renderer.pipeline("sky")?;
-        renderer.cursor_pipeline = renderer.pipeline("cursor")?;
-        renderer.floor_light_pipeline = renderer.pipeline("floor_light")?;
+        renderer.window_pipeline = renderer.pipeline("window", false)?;
+        renderer.cursor_pipeline = renderer.pipeline("cursor", false)?;
+        renderer.environment_first_hit_pipeline = renderer.pipeline("environment", false)?;
+        renderer.environment_transparent_pipeline = renderer.pipeline("environment", true)?;
         Ok(renderer)
     }
 
-    pub fn update_config(&self, config: &AppConfig) -> Result<()> {
+    pub fn update_config(&mut self, config: &AppConfig) -> Result<()> {
+        self.trace_through_transparent_windows = config.floor.trace_through_transparent_windows;
         let uniform = FloorUniform::from(config);
         unsafe {
             let mapped = self.device.map_memory(
@@ -975,14 +1061,259 @@ impl SceneRenderer {
         Ok(())
     }
 
-    fn pipeline(&self, fragment: &str) -> Result<vk::Pipeline> {
-        let vertex_name = if fragment == "sky" || fragment == "floor_light" {
+    pub fn prepare_frame(&mut self, frame: &SceneFrame<'_>) -> Result<()> {
+        let skybox = frame.skybox.context("environment pass requires a skybox")?;
+        let window_count = u32::try_from(frame.panels.len())
+            .context("too many windows for Vulkan descriptor indexing")?;
+        ensure!(
+            window_count <= self.max_environment_windows,
+            "window count {window_count} exceeds this GPU's reflected-window capacity {}",
+            self.max_environment_windows
+        );
+        let descriptor_count = window_count.max(1);
+        let descriptor_changed = descriptor_count > self.environment_descriptor_capacity;
+        if descriptor_changed {
+            unsafe {
+                if self.environment_pool != vk::DescriptorPool::null() {
+                    self.device
+                        .destroy_descriptor_pool(self.environment_pool, None);
+                    self.environment_pool = vk::DescriptorPool::null();
+                    self.environment_descriptor = vk::DescriptorSet::null();
+                }
+                self.environment_pool = self.device.create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(1)
+                        .pool_sizes(&[
+                            vk::DescriptorPoolSize {
+                                ty: vk::DescriptorType::STORAGE_BUFFER,
+                                descriptor_count: 1,
+                            },
+                            vk::DescriptorPoolSize {
+                                ty: vk::DescriptorType::SAMPLER,
+                                descriptor_count: 2,
+                            },
+                            vk::DescriptorPoolSize {
+                                ty: vk::DescriptorType::SAMPLED_IMAGE,
+                                descriptor_count: descriptor_count + 1,
+                            },
+                        ]),
+                    None,
+                )?;
+                let counts = [descriptor_count];
+                let mut variable_count =
+                    vk::DescriptorSetVariableDescriptorCountAllocateInfo::default()
+                        .descriptor_counts(&counts);
+                self.environment_descriptor = self.device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(self.environment_pool)
+                        .set_layouts(&[self.environment_descriptor_layout])
+                        .push_next(&mut variable_count),
+                )?[0];
+                self.environment_descriptor_capacity = descriptor_count;
+                self.environment_panel_ids.clear();
+                self.environment_skybox_view = vk::ImageView::null();
+            }
+        }
+
+        let required_buffer_size = std::mem::size_of::<WindowBufferHeader>() as u64
+            + frame.panels.len() as u64 * std::mem::size_of::<WindowGpuData>() as u64;
+        let mut buffer_changed = false;
+        if required_buffer_size > self.environment_buffer_size {
+            let (buffer, memory, allocation_size) = unsafe {
+                let buffer = self.device.create_buffer(
+                    &vk::BufferCreateInfo::default()
+                        .size(required_buffer_size)
+                        .usage(vk::BufferUsageFlags::STORAGE_BUFFER),
+                    None,
+                )?;
+                let requirements = self.device.get_buffer_memory_requirements(buffer);
+                let memory_type_index = match memory_type(
+                    &self.instance,
+                    self.physical_device,
+                    requirements.memory_type_bits,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                ) {
+                    Ok(index) => index,
+                    Err(error) => {
+                        self.device.destroy_buffer(buffer, None);
+                        return Err(error);
+                    }
+                };
+                let memory = match self.device.allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(requirements.size)
+                        .memory_type_index(memory_type_index),
+                    None,
+                ) {
+                    Ok(memory) => memory,
+                    Err(error) => {
+                        self.device.destroy_buffer(buffer, None);
+                        return Err(error.into());
+                    }
+                };
+                if let Err(error) = self.device.bind_buffer_memory(buffer, memory, 0) {
+                    self.device.destroy_buffer(buffer, None);
+                    self.device.free_memory(memory, None);
+                    return Err(error.into());
+                }
+                (buffer, memory, required_buffer_size)
+            };
+            unsafe {
+                if self.environment_buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(self.environment_buffer, None);
+                    self.device.free_memory(self.environment_memory, None);
+                }
+            }
+            self.environment_buffer = buffer;
+            self.environment_memory = memory;
+            self.environment_buffer_size = allocation_size;
+            buffer_changed = true;
+        }
+
+        let windows = frame
+            .panels
+            .iter()
+            .map(|(_, geometry)| {
+                let pose = geometry.pose;
+                let right = pose.orientation() * Vec3::X;
+                let up = pose.orientation() * Vec3::Y;
+                let height =
+                    pose.width_m * geometry.logical_size.h as f32 / geometry.logical_size.w as f32;
+                WindowGpuData {
+                    center_width: [pose.center.x, pose.center.y, pose.center.z, pose.width_m],
+                    right_height: [right.x, right.y, right.z, height],
+                    up: [up.x, up.y, up.z, 0.0],
+                }
+            })
+            .collect::<Vec<_>>();
+        let header = WindowBufferHeader {
+            count: window_count,
+            padding: [0; 3],
+        };
+        unsafe {
+            let mapped = self.device.map_memory(
+                self.environment_memory,
+                0,
+                required_buffer_size,
+                vk::MemoryMapFlags::empty(),
+            )?;
+            std::ptr::copy_nonoverlapping(
+                (&header as *const WindowBufferHeader).cast::<u8>(),
+                mapped.cast::<u8>(),
+                std::mem::size_of::<WindowBufferHeader>(),
+            );
+            std::ptr::copy_nonoverlapping(
+                windows.as_ptr().cast::<u8>(),
+                mapped
+                    .cast::<u8>()
+                    .add(std::mem::size_of::<WindowBufferHeader>()),
+                windows.len() * std::mem::size_of::<WindowGpuData>(),
+            );
+            self.device.unmap_memory(self.environment_memory);
+
+            let panel_ids = frame
+                .panels
+                .iter()
+                .map(|(texture, _)| texture.id)
+                .collect::<Vec<_>>();
+            let skybox_changed = skybox.view != self.environment_skybox_view;
+            if descriptor_changed {
+                let filtering = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
+                let skybox_filtering =
+                    [vk::DescriptorImageInfo::default().sampler(self.sky_sampler)];
+                self.device.update_descriptor_sets(
+                    &[
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(self.environment_descriptor)
+                            .dst_binding(1)
+                            .descriptor_type(vk::DescriptorType::SAMPLER)
+                            .image_info(&filtering),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(self.environment_descriptor)
+                            .dst_binding(3)
+                            .descriptor_type(vk::DescriptorType::SAMPLER)
+                            .image_info(&skybox_filtering),
+                    ],
+                    &[],
+                );
+            }
+            if descriptor_changed || buffer_changed {
+                let window_buffer = [vk::DescriptorBufferInfo::default()
+                    .buffer(self.environment_buffer)
+                    .range(required_buffer_size)];
+                self.device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet::default()
+                        .dst_set(self.environment_descriptor)
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(&window_buffer)],
+                    &[],
+                );
+            }
+            if descriptor_changed || skybox_changed {
+                let skybox_image = [vk::DescriptorImageInfo::default()
+                    .image_view(skybox.view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                self.device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet::default()
+                        .dst_set(self.environment_descriptor)
+                        .dst_binding(2)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&skybox_image)],
+                    &[],
+                );
+                self.environment_skybox_view = skybox.view;
+            }
+            if descriptor_changed || skybox_changed || panel_ids != self.environment_panel_ids {
+                let window_images = frame
+                    .panels
+                    .iter()
+                    .map(|(texture, _)| {
+                        vk::DescriptorImageInfo::default()
+                            .image_view(texture.view)
+                            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    })
+                    .chain(std::iter::repeat_n(
+                        vk::DescriptorImageInfo::default()
+                            .image_view(skybox.view)
+                            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                        self.environment_descriptor_capacity as usize - panel_ids.len(),
+                    ))
+                    .collect::<Vec<_>>();
+                self.device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet::default()
+                        .dst_set(self.environment_descriptor)
+                        .dst_binding(4)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&window_images)],
+                    &[],
+                );
+                self.environment_panel_ids = panel_ids;
+            }
+        }
+        Ok(())
+    }
+
+    fn pipeline(
+        &self,
+        fragment: &str,
+        trace_through_transparent_windows: bool,
+    ) -> Result<vk::Pipeline> {
+        let vertex_name = if fragment == "environment" {
             c"sky_vertex"
         } else {
             c"vertex"
         };
-        let vertex_code = shader(vertex_name.to_str()?, naga::ShaderStage::Vertex)?;
-        let fragment_code = shader(fragment, naga::ShaderStage::Fragment)?;
+        let vertex_code = shader(
+            vertex_name.to_str()?,
+            naga::ShaderStage::Vertex,
+            trace_through_transparent_windows,
+        )?;
+        let fragment_code = shader(
+            fragment,
+            naga::ShaderStage::Fragment,
+            trace_through_transparent_windows,
+        )?;
         let vertex = unsafe {
             self.device.create_shader_module(
                 &vk::ShaderModuleCreateInfo::default().code(&vertex_code),
@@ -1020,34 +1351,23 @@ impl SceneRenderer {
             let samples = vk::PipelineMultisampleStateCreateInfo::default()
                 .rasterization_samples(vk::SampleCountFlags::TYPE_1);
             let depth = vk::PipelineDepthStencilStateCreateInfo::default()
-                .depth_test_enable(fragment != "sky")
+                .depth_test_enable(fragment != "environment")
                 .depth_write_enable(fragment == "window")
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
-            let additive = fragment == "floor_light";
             let alpha_blend = fragment == "floor_albedo";
             let attachments = [vk::PipelineColorBlendAttachmentState::default()
-                .blend_enable(true)
+                .blend_enable(fragment != "environment")
                 .src_color_blend_factor(if alpha_blend {
                     vk::BlendFactor::SRC_ALPHA
                 } else {
                     vk::BlendFactor::ONE
                 })
-                .dst_color_blend_factor(if additive {
-                    vk::BlendFactor::ONE
-                } else {
-                    vk::BlendFactor::ONE_MINUS_SRC_ALPHA
-                })
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
                 .color_blend_op(vk::BlendOp::ADD)
                 .src_alpha_blend_factor(vk::BlendFactor::ONE)
                 .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
                 .alpha_blend_op(vk::BlendOp::ADD)
-                .color_write_mask(if additive {
-                    vk::ColorComponentFlags::R
-                        | vk::ColorComponentFlags::G
-                        | vk::ColorComponentFlags::B
-                } else {
-                    vk::ColorComponentFlags::RGBA
-                })];
+                .color_write_mask(vk::ColorComponentFlags::RGBA)];
             let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
             let dynamic = vk::PipelineDynamicStateCreateInfo::default()
                 .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
@@ -1144,7 +1464,7 @@ impl SceneRenderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.layout,
                 1,
-                &[self.floor_descriptor],
+                &[self.floor_descriptor, self.environment_descriptor],
                 &[],
             );
             let floor_height = [frame.floor_y];
@@ -1171,65 +1491,16 @@ impl SceneRenderer {
                 112,
                 eye_bytes,
             );
-            if let Some(skybox) = frame.skybox {
-                self.device.cmd_bind_pipeline(
-                    command,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.sky_pipeline,
-                );
-                self.device.cmd_bind_descriptor_sets(
-                    command,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.layout,
-                    0,
-                    &[skybox.descriptor],
-                    &[],
-                );
-                self.draw_panel(command, sky_matrix(view));
-            }
-            for (texture, geometry) in &panels {
-                let pose = geometry.pose;
-                let right = pose.orientation() * Vec3::X;
-                let up = pose.orientation() * Vec3::Y;
-                let height =
-                    pose.width_m * geometry.logical_size.h as f32 / geometry.logical_size.w as f32;
-                let emitter = [
-                    pose.center.x,
-                    pose.center.y,
-                    pose.center.z,
-                    pose.width_m,
-                    right.x,
-                    right.y,
-                    right.z,
-                    height,
-                    up.x,
-                    up.y,
-                    up.z,
-                    frame.floor_y,
-                ];
-                let bytes = std::slice::from_raw_parts(emitter.as_ptr().cast::<u8>(), 48);
-                self.device.cmd_push_constants(
-                    command,
-                    self.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    64,
-                    bytes,
-                );
-                self.device.cmd_bind_descriptor_sets(
-                    command,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.layout,
-                    0,
-                    &[texture.descriptor],
-                    &[],
-                );
-                self.device.cmd_bind_pipeline(
-                    command,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.floor_light_pipeline,
-                );
-                self.draw_panel(command, sky_matrix(view));
-            }
+            self.device.cmd_bind_pipeline(
+                command,
+                vk::PipelineBindPoint::GRAPHICS,
+                if self.trace_through_transparent_windows {
+                    self.environment_transparent_pipeline
+                } else {
+                    self.environment_first_hit_pipeline
+                },
+            );
+            self.draw_panel(command, sky_matrix(view));
             self.device.cmd_bind_pipeline(
                 command,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -1316,8 +1587,9 @@ impl Drop for SceneRenderer {
     fn drop(&mut self) {
         unsafe {
             self.device
-                .destroy_pipeline(self.floor_light_pipeline, None);
-            self.device.destroy_pipeline(self.sky_pipeline, None);
+                .destroy_pipeline(self.environment_first_hit_pipeline, None);
+            self.device
+                .destroy_pipeline(self.environment_transparent_pipeline, None);
             self.device.destroy_pipeline(self.cursor_pipeline, None);
             self.device.destroy_pipeline(self.window_pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
@@ -1330,11 +1602,25 @@ impl Drop for SceneRenderer {
             if self.floor_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.floor_memory, None);
             }
+            if self.environment_pool != vk::DescriptorPool::null() {
+                self.device
+                    .destroy_descriptor_pool(self.environment_pool, None);
+            }
+            if self.environment_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.environment_buffer, None);
+            }
+            if self.environment_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.environment_memory, None);
+            }
             self.device.destroy_sampler(self.sampler, None);
             self.device.destroy_sampler(self.sky_sampler, None);
             if self.floor_descriptor_layout != vk::DescriptorSetLayout::null() {
                 self.device
                     .destroy_descriptor_set_layout(self.floor_descriptor_layout, None);
+            }
+            if self.environment_descriptor_layout != vk::DescriptorSetLayout::null() {
+                self.device
+                    .destroy_descriptor_set_layout(self.environment_descriptor_layout, None);
             }
             self.device
                 .destroy_descriptor_set_layout(self.descriptor_layout, None);
@@ -1351,14 +1637,17 @@ mod tests {
     fn shaders_compile() {
         for (entry, stage) in [
             ("sky_vertex", naga::ShaderStage::Vertex),
-            ("sky", naga::ShaderStage::Fragment),
             ("vertex", naga::ShaderStage::Vertex),
             ("window", naga::ShaderStage::Fragment),
             ("cursor", naga::ShaderStage::Fragment),
-            ("floor_light", naga::ShaderStage::Fragment),
+            ("environment", naga::ShaderStage::Fragment),
         ] {
-            assert_eq!(shader(entry, stage).unwrap()[0], 0x0723_0203);
+            assert_eq!(shader(entry, stage, false).unwrap()[0], 0x0723_0203);
         }
+        assert_eq!(
+            shader("environment", naga::ShaderStage::Fragment, true).unwrap()[0],
+            0x0723_0203
+        );
     }
 
     #[test]

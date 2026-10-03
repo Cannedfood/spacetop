@@ -9,8 +9,8 @@ use iced::{
     Background, Border, Color, Element, Length, Theme,
     alignment::Horizontal,
     widget::{
-        button, column, container, image as iced_image, pick_list, row, scrollable, slider, text,
-        text_input,
+        button, checkbox, column, container, image as iced_image, pick_list, row, scrollable,
+        slider, text, text_input,
     },
 };
 use iced_aw::helpers::color_picker;
@@ -52,6 +52,7 @@ enum Message {
     ReflectanceChanged(f32),
     ReflectionGrainSizeChanged(f32),
     RayCountChanged(u32),
+    TransparentReflectionsChanged(bool),
     WindowDistanceChanged(String),
     WindowPixelsPerDegreeChanged(String),
     WindowPaddingChanged(f32),
@@ -135,6 +136,7 @@ impl SettingsApp {
                 | Message::ReflectanceChanged(_)
                 | Message::ReflectionGrainSizeChanged(_)
                 | Message::RayCountChanged(_)
+                | Message::TransparentReflectionsChanged(_)
                 | Message::WindowDistanceChanged(_)
                 | Message::WindowPixelsPerDegreeChanged(_)
                 | Message::WindowPaddingChanged(_)
@@ -221,6 +223,9 @@ impl SettingsApp {
                 self.config.floor.reflection_grain_size_m = value_mm / 1000.0;
             }
             Message::RayCountChanged(value) => self.config.floor.ray_count = value,
+            Message::TransparentReflectionsChanged(value) => {
+                self.config.floor.trace_through_transparent_windows = value;
+            }
             Message::WindowDistanceChanged(value) => self.window_distance = value,
             Message::WindowPixelsPerDegreeChanged(value) => self.window_pixels_per_degree = value,
             Message::WindowPaddingChanged(value) => self.config.window.padding_px = value,
@@ -555,6 +560,9 @@ impl SettingsApp {
                 ]
                 .spacing(12)
                 .align_y(iced::Alignment::Center),
+                checkbox(self.config.floor.trace_through_transparent_windows)
+                    .label("Trace reflections through transparent window areas")
+                    .on_toggle(Message::TransparentReflectionsChanged),
                 slider_row(
                     "REFLECTION GRID (MM)",
                     self.config.floor.reflection_grain_size_m * 1000.0,

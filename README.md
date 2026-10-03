@@ -59,6 +59,7 @@ roughness = 0.1
 reflectance = 0.18
 ray_count = 4
 reflection_grain_size_m = 0.002
+trace_through_transparent_windows = false
 
 [window]
 default_distance_m = 1.6
@@ -74,7 +75,12 @@ source, `+1` doubles HDR radiance, and `-1` halves it. Values range from `-8` to
 distances must be between `0.1` and `100` meters. Albedo alpha controls floor
 opacity. `floor.reflection_grain_size_m` controls the floor-reflection noise
 grid spacing; it defaults to `0.002` meters and accepts `0.001` through `0.05`
-meters. `background.rotation_degrees` rotates the equirectangular skybox around
+meters. `floor.trace_through_transparent_windows` defaults to `false`, so each reflection
+ray samples only its nearest window hit (or the skybox on a miss). Set it to
+`true` to continue through transparent window texels and composite farther hits.
+The renderer uses separate precompiled shader variants, so the setting does not
+add a runtime shader branch to the default first-hit path.
+`background.rotation_degrees` rotates the equirectangular skybox around
 the vertical axis from `0` to `360` degrees; `360` is equivalent to `0`.
 
 Edit the configuration with the standalone settings app:

@@ -111,21 +111,29 @@ FOV. The scene uses depth testing, back-to-front premultiplied-alpha blending,
 and transparent-fragment rejection; the cursor has a minimum screen-space stroke.
 WGSL shaders are compiled to SPIR-V with Naga.
 
-The floor is reflection-only: there is no base/albedo color or ambient fill.
-It occupies a 60-meter square. When OpenXR STAGE space is supported, its floor
-origin (STAGE Y = 0) is located relative to LOCAL space at each frame's predicted
+The floor occupies a 60-meter square and uses the configured albedo and
+transparency, with sky and window reflections rendered in one full-screen
+environment pass. When OpenXR STAGE space is supported, its floor origin
+(STAGE Y = 0) is located relative to LOCAL space at each frame's predicted
 display time; that position's Y coordinate sets the rendered floor height.
 Panels, views, and input remain in LOCAL space, preserving window placement.
 The last valid calibrated height is retained during tracking loss. Before a
 valid STAGE position is available, or if STAGE cannot be created, the fallback is
-LOCAL-space Y = -1.3 meters. Each window adds a separate RGB-only additive pass
-with no depth writes. Rays follow an isotropic GGX visible-normal distribution:
-the shader samples view-visible microfacet normals and reflects the eye direction
-about each one. Analytic ray/quad intersections provide window texture coordinates;
-misses contribute zero, and the sum is divided by the total ray count.
-The sky pass also reflects the equirectangular skybox across the ground normal;
-the configured skybox exposure and rotation apply to this sample. Fresnel weights
-the reflected radiance, while floor roughness broadens it with a five-tap filter.
+LOCAL-space Y = -1.3 meters. The environment pass generates each floor reflection
+ray once and intersects it against the runtime window list, selecting the nearest
+front-facing quad. By default a hit samples only that nearest window texture;
+a miss samples the skybox. The optional
+`floor.trace_through_transparent_windows` setting
+continues through transparent texels and composites farther hits. Separate
+precompiled shader pipeline variants keep the default first-hit path free of a
+runtime mode branch. This avoids rendering a separate floor-reflection pass for
+every window and, in the default mode, limits each ray to one selected window
+texture. Rays follow an isotropic
+GGX visible-normal distribution: the shader
+samples view-visible microfacet normals and reflects the eye direction about
+each one. Analytic ray/quad intersections provide window texture coordinates.
+The configured skybox exposure and rotation apply to reflected sky samples;
+roughness broadens them with a five-tap filter.
 Schlick Fresnel and height-correlated Smith masking provide the BRDF/PDF weight
 `F * G2 / G1(view)`. There is no extra area or inverse-square multiplier: distance
 changes the window's angular coverage instead. Premultiplied texture colors
@@ -136,8 +144,9 @@ Material and sampling constants are at the top of the WGSL shader:
 `FLOOR_REFLECTANCE` defaults to 0.18 and denotes normal-incidence Fresnel
 reflectance, and `FLOOR_RAY_COUNT` defaults to four. Lower roughness concentrates
 rays near the mirror direction; higher roughness broadens the reflection.
-Other windows do not block these rays; there are no shadow queries or ray-tracing
-extensions. Each ray gets an independent pseudorandom jitter inside its equal-area
+Window quads occlude farther windows along each reflection ray; there are no
+shadow queries or ray-tracing extensions. Each ray gets an independent
+pseudorandom jitter inside its equal-area
 sample stratum, seeded by floor-world X/Z coordinates rounded to cells sized by
 `floor.reflection_grain_size_m` (default 2 mm, range 1-50 mm) and ray index with
 an integer PCG hash. Signed coordinates remain distinct, and height recalibration
@@ -151,7 +160,12 @@ device feedback. Shared-memory client buffers still require an upload to GLES.
 The GLES renderer and Vulkan session use the same DRM render node; the XR
 runtime itself does not need to support GLES.
 
-This initial implementation requires Vulkan 1.1 and the external-memory FD,
+The renderer requires Vulkan 1.2, including runtime descriptor arrays,
+non-uniform sampled-image-array indexing, and variable descriptor counts. It
+queries and enables those optional Vulkan 1.2 features at startup and fails with
+a clear error when the runtime-selected device lacks them. Reflected window
+count is limited by the selected GPU's sampled-image and storage-buffer limits.
+It also requires the external-memory FD,
 DMA-BUF, DRM-format-modifier, physical-device-DRM, image-format-list, and
 foreign-queue-family device extensions. It also needs a driver that supports
 linear RGBA8 GLES render targets and sampled sRGB Vulkan DMA-BUF imports, an sRGB

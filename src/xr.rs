@@ -256,11 +256,12 @@ pub fn run(
     let vk_entry = unsafe { VkEntry::load() }.context("load Vulkan loader")?;
     let loader_version =
         unsafe { vk_entry.try_enumerate_instance_version() }?.unwrap_or(vk::API_VERSION_1_0);
-    if loader_version >= vk::API_VERSION_1_1
-        && requirements.max_api_version_supported >= xr::Version::new(1, 1, 0)
-    {
-        vk_api_version = vk_api_version.max(vk::API_VERSION_1_1);
-    }
+    ensure!(
+        loader_version >= vk::API_VERSION_1_2
+            && requirements.max_api_version_supported >= xr::Version::new(1, 2, 0),
+        "the OpenXR runtime and Vulkan loader must support Vulkan 1.2 for descriptor indexing"
+    );
+    vk_api_version = vk_api_version.max(vk::API_VERSION_1_2);
     let vk_app_info = vk::ApplicationInfo::default().api_version(vk_api_version);
     let vk_instance_info = vk::InstanceCreateInfo::default().application_info(&vk_app_info);
 
@@ -285,6 +286,23 @@ pub fn run(
         unsafe { instance.vulkan_graphics_device(system, vk_instance.handle().as_raw() as _) }
             .context("query runtime Vulkan device")?;
     let physical_device = vk::PhysicalDevice::from_raw(raw_physical_device as _);
+    ensure!(
+        unsafe { vk_instance.get_physical_device_properties(physical_device) }.api_version
+            >= vk::API_VERSION_1_2,
+        "the OpenXR runtime-selected GPU does not support Vulkan 1.2"
+    );
+    let mut supported_indexing = vk::PhysicalDeviceVulkan12Features::default();
+    let mut supported_features =
+        vk::PhysicalDeviceFeatures2::default().push_next(&mut supported_indexing);
+    unsafe {
+        vk_instance.get_physical_device_features2(physical_device, &mut supported_features);
+    }
+    ensure!(
+        supported_indexing.runtime_descriptor_array != 0
+            && supported_indexing.shader_sampled_image_array_non_uniform_indexing != 0
+            && supported_indexing.descriptor_binding_variable_descriptor_count != 0,
+        "the Vulkan 1.2 GPU must support runtime descriptor arrays, non-uniform sampled-image indexing, and variable descriptor counts"
+    );
     let queue_family =
         unsafe { vk_instance.get_physical_device_queue_family_properties(physical_device) }
             .iter()
@@ -299,9 +317,14 @@ pub fn run(
         "GPU sharing requires Vulkan 1.1 and DMA-BUF external-memory, DRM-modifier, DRM-device, image-format-list, and foreign-queue-family support"
     );
     let sharing_extensions = gpu::SHARING_EXTENSIONS.map(|extension| extension.as_ptr());
+    let mut enabled_indexing = vk::PhysicalDeviceVulkan12Features::default()
+        .runtime_descriptor_array(true)
+        .shader_sampled_image_array_non_uniform_indexing(true)
+        .descriptor_binding_variable_descriptor_count(true);
     let device_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_info)
-        .enabled_extension_names(&sharing_extensions);
+        .enabled_extension_names(&sharing_extensions)
+        .push_next(&mut enabled_indexing);
     #[allow(clippy::missing_transmute_annotations)]
     let raw_device = unsafe {
         instance.create_vulkan_device(
@@ -393,7 +416,7 @@ pub fn run(
         .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT),
         "Vulkan GPU lacks D32 depth attachment support"
     );
-    let scene = SceneRenderer::new(&device, &vk_instance, physical_device, format, &config)?;
+    let mut scene = SceneRenderer::new(&device, &vk_instance, physical_device, format, &config)?;
     let mut skybox = SkyboxTexture::new(
         &scene,
         &vk_instance,
@@ -1145,6 +1168,7 @@ pub fn run(
             timings.measure("gpu/previous-render-wait", period, || {
                 device.wait_for_fences(&[fence], true, u64::MAX)
             })?;
+            scene.prepare_frame(&scene_frame)?;
             device.reset_fences(&[fence])?;
             device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())?;
             device.begin_command_buffer(

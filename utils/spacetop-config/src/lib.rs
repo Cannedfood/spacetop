@@ -35,6 +35,7 @@ pub struct FloorConfig {
     pub reflectance: f32,
     pub ray_count: u32,
     pub reflection_grain_size_m: f32,
+    pub trace_through_transparent_windows: bool,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +48,7 @@ struct FloorConfigFields {
     transparency: Option<f32>,
     ray_count: u32,
     reflection_grain_size_m: f32,
+    trace_through_transparent_windows: bool,
 }
 
 impl Default for FloorConfigFields {
@@ -60,6 +62,7 @@ impl Default for FloorConfigFields {
             transparency: None,
             ray_count: floor.ray_count,
             reflection_grain_size_m: floor.reflection_grain_size_m,
+            trace_through_transparent_windows: floor.trace_through_transparent_windows,
         }
     }
 }
@@ -101,6 +104,7 @@ impl Default for FloorConfig {
             reflectance: 0.18,
             ray_count: 4,
             reflection_grain_size_m: 0.002,
+            trace_through_transparent_windows: false,
         }
     }
 }
@@ -141,6 +145,7 @@ impl<'de> Deserialize<'de> for FloorConfig {
             reflectance: fields.reflectance,
             ray_count: fields.ray_count,
             reflection_grain_size_m: fields.reflection_grain_size_m,
+            trace_through_transparent_windows: fields.trace_through_transparent_windows,
         })
     }
 }
@@ -360,6 +365,20 @@ mod tests {
 
         assert_eq!(config.window.animation_half_time_s, 0.2);
         assert_eq!(config.window.collision_margin_m, 0.04);
+    }
+
+    #[test]
+    fn transparent_window_tracing_defaults_off_and_can_be_enabled() {
+        let default = AppConfig::default();
+        assert!(!default.floor.trace_through_transparent_windows);
+
+        let enabled: AppConfig =
+            toml::from_str("[floor]\ntrace_through_transparent_windows = true\n").unwrap();
+        assert!(enabled.floor.trace_through_transparent_windows);
+
+        let serialized = toml::to_string(&enabled).unwrap();
+        let round_trip: AppConfig = toml::from_str(&serialized).unwrap();
+        assert!(round_trip.floor.trace_through_transparent_windows);
     }
 
     #[test]

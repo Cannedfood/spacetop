@@ -7,7 +7,7 @@ use crate::{
 };
 
 struct SceneReadback<'a> {
-    renderer: &'a SceneRenderer,
+    renderer: &'a mut SceneRenderer,
     view: &'a openxr::View,
     skybox: Option<&'a mut SkyboxTexture>,
     panels: &'a [(&'a PanelTexture, PanelGeometry)],
@@ -48,7 +48,7 @@ pub struct Vulkan {
 impl Vulkan {
     pub fn new() -> Result<Self> {
         let entry = unsafe { ash::Entry::load() }?;
-        let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_1);
+        let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_2);
         let instance = unsafe {
             entry.create_instance(
                 &vk::InstanceCreateInfo::default().application_info(&app),
@@ -57,7 +57,23 @@ impl Vulkan {
         }?;
         let selection = (|| -> Result<_> {
             for physical_device in unsafe { instance.enumerate_physical_devices() }? {
-                if !sharing_supported(&instance, physical_device, vk::API_VERSION_1_1)? {
+                if unsafe { instance.get_physical_device_properties(physical_device) }.api_version
+                    < vk::API_VERSION_1_2
+                    || !sharing_supported(&instance, physical_device, vk::API_VERSION_1_2)?
+                {
+                    continue;
+                }
+                let mut supported_indexing = vk::PhysicalDeviceVulkan12Features::default();
+                let mut supported_features =
+                    vk::PhysicalDeviceFeatures2::default().push_next(&mut supported_indexing);
+                unsafe {
+                    instance
+                        .get_physical_device_features2(physical_device, &mut supported_features);
+                }
+                if supported_indexing.runtime_descriptor_array == 0
+                    || supported_indexing.shader_sampled_image_array_non_uniform_indexing == 0
+                    || supported_indexing.descriptor_binding_variable_descriptor_count == 0
+                {
                     continue;
                 }
                 let Some(render_node) = render_node(&instance, physical_device) else {
@@ -79,9 +95,14 @@ impl Vulkan {
                     .queue_family_index(queue_family)
                     .queue_priorities(&priorities)];
                 let extensions = SHARING_EXTENSIONS.map(|name| name.as_ptr());
+                let mut enabled_indexing = vk::PhysicalDeviceVulkan12Features::default()
+                    .runtime_descriptor_array(true)
+                    .shader_sampled_image_array_non_uniform_indexing(true)
+                    .descriptor_binding_variable_descriptor_count(true);
                 let info = vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queues)
-                    .enabled_extension_names(&extensions);
+                    .enabled_extension_names(&extensions)
+                    .push_next(&mut enabled_indexing);
                 let device = unsafe { instance.create_device(physical_device, &info, None) }?;
                 return Ok((physical_device, render_node, queue_family, device));
             }
@@ -252,19 +273,16 @@ impl Vulkan {
                 for (texture, _) in scene.panels {
                     texture.ownership(command, self.queue_family, true);
                 }
-                scene.renderer.draw(
-                    command,
-                    &target,
-                    scene.view,
-                    &SceneFrame {
-                        skybox: scene.skybox.as_deref(),
-                        panels: scene.panels,
-                        cursor: scene.cursor,
-                        cursor_close_panel: None,
-                        grabbed_panel: None,
-                        floor_y: scene.floor_y,
-                    },
-                );
+                let frame = SceneFrame {
+                    skybox: scene.skybox.as_deref(),
+                    panels: scene.panels,
+                    cursor: scene.cursor,
+                    cursor_close_panel: None,
+                    grabbed_panel: None,
+                    floor_y: scene.floor_y,
+                };
+                scene.renderer.prepare_frame(&frame)?;
+                scene.renderer.draw(command, &target, scene.view, &frame);
                 for (texture, _) in scene.panels {
                     texture.ownership(command, self.queue_family, false);
                 }
@@ -372,12 +390,24 @@ impl Drop for Vulkan {
 #[ignore = "requires a Vulkan/GLES GPU with DMA-BUF sharing"]
 fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     let vulkan = Vulkan::new()?;
-    let scene = SceneRenderer::new(
+    let mut window_test_config = crate::config::AppConfig::default();
+    window_test_config.floor.albedo = [0.0, 0.0, 0.0, 1.0];
+    let mut scene = SceneRenderer::new(
         &vulkan.device,
         &vulkan.instance,
         vulkan.physical_device,
         vk::Format::R8G8B8A8_SRGB,
-        &crate::config::AppConfig::default(),
+        &window_test_config,
+    )?;
+    let skybox_directory = tempfile::tempdir()?;
+    let skybox_path = skybox_directory.path().join("black.exr");
+    image::Rgb32FImage::from_pixel(8, 4, image::Rgb([0.0, 0.0, 0.0])).save(&skybox_path)?;
+    let skybox_path = skybox_path.to_string_lossy().into_owned();
+    let mut skybox = SkyboxTexture::new(
+        &scene,
+        &vulkan.instance,
+        vulkan.physical_device,
+        &skybox_path,
     )?;
     let mut producer = GpuRenderer::new(&vulkan.render_node)?;
     let mut make_texture = |quadrants: bool| -> Result<PanelTexture> {
@@ -464,9 +494,9 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         (512, 512).into(),
         None,
         Some(SceneReadback {
-            renderer: &scene,
+            renderer: &mut scene,
             view: &view,
-            skybox: None,
+            skybox: Some(&mut skybox),
             panels: &panels,
             cursor: Some(cursor),
             floor_y: FALLBACK_FLOOR_Y,
@@ -491,9 +521,9 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         (512, 512).into(),
         None,
         Some(SceneReadback {
-            renderer: &scene,
+            renderer: &mut scene,
             view: &view,
-            skybox: None,
+            skybox: Some(&mut skybox),
             panels: &panels,
             cursor: None,
             floor_y: FALLBACK_FLOOR_Y,
@@ -509,35 +539,37 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         },
         ..near
     };
-    let floor_pixels = |panels: &[(&PanelTexture, PanelGeometry)]| {
+    let floor_pixels = |scene: &mut SceneRenderer,
+                        skybox: &mut SkyboxTexture,
+                        panels: &[(&PanelTexture, PanelGeometry)]| {
         vulkan.readback_image(
             None,
             (512, 512).into(),
             None,
             Some(SceneReadback {
-                renderer: &scene,
+                renderer: scene,
                 view: &view,
-                skybox: None,
+                skybox: Some(skybox),
                 panels,
                 cursor: None,
                 floor_y: FALLBACK_FLOOR_Y,
             }),
         )
     };
-    let empty = floor_pixels(&[])?;
+    let empty = floor_pixels(&mut scene, &mut skybox, &[])?;
     let empty_floor_pixel = pixel(&empty, 256, 450);
     assert_eq!(empty_floor_pixel, [0, 0, 0, 255]);
-    let lit = floor_pixels(&[(&background, emitter)])?;
-    let mut brighter_sky_config = crate::config::AppConfig::default();
+    let lit = floor_pixels(&mut scene, &mut skybox, &[(&background, emitter)])?;
+    let mut brighter_sky_config = window_test_config.clone();
     brighter_sky_config.background.brightness_stops = 2.0;
     scene.update_config(&brighter_sky_config)?;
-    let unchanged_reflection = floor_pixels(&[(&background, emitter)])?;
+    let unchanged_reflection = floor_pixels(&mut scene, &mut skybox, &[(&background, emitter)])?;
     assert_eq!(
         lit, unchanged_reflection,
         "skybox brightness must not alter window reflections"
     );
-    scene.update_config(&crate::config::AppConfig::default())?;
-    let repeated = floor_pixels(&[(&background, emitter)])?;
+    scene.update_config(&window_test_config)?;
+    let repeated = floor_pixels(&mut scene, &mut skybox, &[(&background, emitter)])?;
     assert_eq!(lit, repeated);
     let mut shifted_view = view;
     shifted_view.fov.angle_left = (-1.0_f32 - 16.0 / 256.0).atan();
@@ -547,9 +579,9 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         (512, 512).into(),
         None,
         Some(SceneReadback {
-            renderer: &scene,
+            renderer: &mut scene,
             view: &shifted_view,
-            skybox: None,
+            skybox: Some(&mut skybox),
             panels: &[(&background, emitter)],
             cursor: None,
             floor_y: FALLBACK_FLOOR_Y,
@@ -582,26 +614,26 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         isolated_variations > 100,
         "GGX samples must vary per pixel, not form coherent repeated reflections"
     );
-    let doubled = floor_pixels(&[(&background, emitter), (&second_background, emitter)])?;
-    let colored = floor_pixels(&[(&foreground, emitter)])?;
-    let backwards = floor_pixels(&[(
-        &background,
-        PanelGeometry {
-            pose: PanelPose {
-                yaw: std::f32::consts::PI,
-                ..emitter.pose
+    let doubled = floor_pixels(
+        &mut scene,
+        &mut skybox,
+        &[(&background, emitter), (&second_background, emitter)],
+    )?;
+    let colored = floor_pixels(&mut scene, &mut skybox, &[(&foreground, emitter)])?;
+    let backwards = floor_pixels(
+        &mut scene,
+        &mut skybox,
+        &[(
+            &background,
+            PanelGeometry {
+                pose: PanelPose {
+                    yaw: std::f32::consts::PI,
+                    ..emitter.pose
+                },
+                ..emitter
             },
-            ..emitter
-        },
-    )])?;
-    let decode = |channel: u8| {
-        let encoded = f32::from(channel) / 255.0;
-        if encoded <= 0.04045 {
-            encoded / 12.92
-        } else {
-            ((encoded + 0.055) / 1.055).powf(2.4)
-        }
-    };
+        )],
+    )?;
     let floor_pixel = pixel(&lit, 256, 450);
     assert!(floor_pixel[0] > 0);
     assert!(floor_pixel[0] > empty_floor_pixel[0]);
@@ -610,11 +642,9 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     assert_eq!(floor_pixel[3], 255);
     assert_eq!(pixel(&backwards, 256, 450), empty_floor_pixel);
     let twice = pixel(&doubled, 256, 450);
-    let quantization =
-        |channel: u8| decode(channel.saturating_add(1)) - decode(channel.saturating_sub(1));
-    assert!(
-        (decode(twice[0]) - (2.0 * decode(floor_pixel[0]) - decode(empty_floor_pixel[0]))).abs()
-            <= quantization(twice[0]) + 2.0 * quantization(floor_pixel[0])
+    assert_eq!(
+        twice, floor_pixel,
+        "an opaque nearest window should hide an identical farther hit"
     );
     assert_eq!(twice[3], 255);
     let colored_pixel = pixel(&colored, 256, 450);
@@ -631,9 +661,9 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         (512, 512).into(),
         None,
         Some(SceneReadback {
-            renderer: &scene,
+            renderer: &mut scene,
             view: &view,
-            skybox: None,
+            skybox: Some(&mut skybox),
             panels: &[(&background, emitter)],
             cursor: None,
             floor_y: -2.6,
@@ -654,9 +684,9 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         (512, 512).into(),
         None,
         Some(SceneReadback {
-            renderer: &scene,
+            renderer: &mut scene,
             view: &stage_view,
-            skybox: None,
+            skybox: Some(&mut skybox),
             panels: &[(&background, stage_emitter)],
             cursor: None,
             floor_y: 0.0,
@@ -671,7 +701,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
 #[ignore = "requires Vulkan DMA-BUF support and a configured EXR skybox"]
 fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
     let vulkan = Vulkan::new()?;
-    let renderer = SceneRenderer::new(
+    let mut renderer = SceneRenderer::new(
         &vulkan.device,
         &vulkan.instance,
         vulkan.physical_device,
@@ -698,7 +728,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
         (128, 64).into(),
         None,
         Some(SceneReadback {
-            renderer: &renderer,
+            renderer: &mut renderer,
             view: &view,
             skybox: Some(&mut skybox),
             panels: &[],
@@ -750,7 +780,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
         (128, 64).into(),
         None,
         Some(SceneReadback {
-            renderer: &renderer,
+            renderer: &mut renderer,
             view: &view,
             skybox: Some(&mut skybox),
             panels: &[],
@@ -770,7 +800,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
         (128, 64).into(),
         None,
         Some(SceneReadback {
-            renderer: &renderer,
+            renderer: &mut renderer,
             view: &view,
             skybox: Some(&mut skybox),
             panels: &[],
@@ -792,7 +822,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
         (128, 64).into(),
         None,
         Some(SceneReadback {
-            renderer: &renderer,
+            renderer: &mut renderer,
             view: &view,
             skybox: Some(&mut skybox),
             panels: &[],
@@ -805,7 +835,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
         (128, 64).into(),
         None,
         Some(SceneReadback {
-            renderer: &renderer,
+            renderer: &mut renderer,
             view: &view,
             skybox: Some(&mut skybox),
             panels: &[],
@@ -830,7 +860,7 @@ fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
     config.floor.albedo = [0.2, 0.3, 0.4, 0.6];
     config.floor.reflectance = 0.12;
     let floor_config = &config.floor;
-    let renderer = SceneRenderer::new(
+    let mut renderer = SceneRenderer::new(
         &vulkan.device,
         &vulkan.instance,
         vulkan.physical_device,
@@ -875,7 +905,7 @@ fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
             (128, 128).into(),
             None,
             Some(SceneReadback {
-                renderer: &renderer,
+                renderer: &mut renderer,
                 view,
                 skybox: Some(&mut skybox),
                 panels: &[],

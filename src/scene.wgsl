@@ -1,4 +1,5 @@
 const PI: f32 = 3.14159265;
+const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = false;
 
 struct Transform {
     matrix: mat4x4<f32>,
@@ -21,10 +22,32 @@ struct FloorMaterial {
     grabbed_border_color: vec4<f32>,
 }
 @group(1) @binding(0) var<uniform> floor_material: FloorMaterial;
+struct Window {
+    center_width: vec4<f32>,
+    right_height: vec4<f32>,
+    up: vec4<f32>,
+}
+struct WindowBuffer {
+    count: u32,
+    padding0: u32,
+    padding1: u32,
+    padding2: u32,
+    windows: array<Window>,
+}
+struct WindowHit {
+    distance: f32,
+    index: u32,
+    uv: vec2<f32>,
+    found: bool,
+}
+@group(2) @binding(0) var<storage, read> window_buffer: WindowBuffer;
+@group(2) @binding(1) var environment_filter: sampler;
+@group(2) @binding(2) var environment_skybox: texture_2d<f32>;
+@group(2) @binding(3) var environment_sky_filter: sampler;
+@group(2) @binding(4) var panel_textures: binding_array<texture_2d<f32>>;
 struct SkyVertex {
     @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) direction: vec3<f32>,
+    @location(0) direction: vec3<f32>,
 }
 @vertex fn sky_vertex(@builtin(vertex_index) index: u32) -> SkyVertex {
     let corners = array<vec2<f32>, 6>(
@@ -33,7 +56,6 @@ struct SkyVertex {
     let uv = corners[index];
     var result: SkyVertex;
     result.position = vec4(uv * 2.0 - 1.0, 1.0, 1.0);
-    result.uv = uv;
     result.direction = (transform.matrix * vec4(uv, 0.0, 1.0)).xyz;
     return result;
 }
@@ -51,39 +73,19 @@ fn skybox_uv(direction: vec3<f32>) -> vec2<f32> {
         fract(longitude / (2.0 * PI) + 0.5),
         0.5 - asin(clamp(direction.y, -1.0, 1.0)) / PI);
 }
-fn sample_skybox(direction: vec3<f32>, roughness: f32) -> vec3<f32> {
+fn sample_environment_skybox(direction: vec3<f32>, roughness: f32) -> vec3<f32> {
     let uv = skybox_uv(direction);
-    var hdr = textureSampleLevel(panel, filtering, uv, 0.0).rgb;
+    var hdr = textureSampleLevel(environment_skybox, environment_sky_filter, uv, 0.0).rgb;
     let blur = roughness * roughness * 0.04;
     if blur > 0.0 {
-        hdr += textureSampleLevel(panel, filtering, uv + vec2(blur, 0.0), 0.0).rgb;
-        hdr += textureSampleLevel(panel, filtering, uv - vec2(blur, 0.0), 0.0).rgb;
-        hdr += textureSampleLevel(panel, filtering, uv + vec2(0.0, blur), 0.0).rgb;
-        hdr += textureSampleLevel(panel, filtering, uv - vec2(0.0, blur), 0.0).rgb;
+        hdr += textureSampleLevel(environment_skybox, environment_sky_filter, uv + vec2(blur, 0.0), 0.0).rgb;
+        hdr += textureSampleLevel(environment_skybox, environment_sky_filter, uv - vec2(blur, 0.0), 0.0).rgb;
+        hdr += textureSampleLevel(environment_skybox, environment_sky_filter, uv + vec2(0.0, blur), 0.0).rgb;
+        hdr += textureSampleLevel(environment_skybox, environment_sky_filter, uv - vec2(0.0, blur), 0.0).rgb;
         hdr *= 0.2;
     }
     hdr = max(hdr * skybox_exposure(), vec3(0.0));
     return hdr / (vec3(1.0) + hdr);
-}
-@fragment fn sky(input: SkyVertex) -> @location(0) vec4<f32> {
-    let direction = normalize(input.direction);
-    let floor_distance = (transform.emitter_up.w - transform.eye_position.y) / direction.y;
-    if direction.y < 0.0 && floor_distance > 0.0 {
-        let fresnel = fresnel_schlick(-direction.y);
-        let albedo = floor_material.albedo.rgb * (1.0 - fresnel);
-        let opacity = floor_material.albedo.a;
-        var transmitted_background = vec3(0.0);
-        if opacity < 1.0 {
-            transmitted_background = sample_skybox(direction, 0.0);
-        }
-        let reflection_direction = reflect(direction, vec3(0.0, 1.0, 0.0));
-        let reflected_sky = sample_skybox(reflection_direction, floor_material.controls.z);
-        let ground = albedo * opacity
-            + transmitted_background * (1.0 - opacity)
-            + reflected_sky * fresnel * opacity;
-        return vec4(ground, 1.0);
-    }
-    return vec4(sample_skybox(direction, 0.0), 1.0);
 }
 struct Vertex {
     @builtin(position) position: vec4<f32>,
@@ -185,18 +187,64 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
     let random = vec2(sample_hash(seed), sample_hash(seed ^ 0x85ebca6bu));
     return vec2<f32>(random >> vec2(8u)) / 16777216.0;
 }
-@fragment fn floor_light(input: SkyVertex) -> @location(0) vec4<f32> {
-    let center = transform.emitter_center_width.xyz;
-    let width = transform.emitter_center_width.w;
-    let right = transform.emitter_right_height.xyz;
-    let height = transform.emitter_right_height.w;
-    let up = transform.emitter_up.xyz;
-    let normal = cross(right, up);
+fn nearest_window_hit(origin: vec3<f32>, ray: vec3<f32>, minimum_distance: f32) -> WindowHit {
+    var nearest = WindowHit(1.0e30, 0u, vec2(0.0), false);
+    let count = window_buffer.count;
+    for (var index = 0u; index < count; index += 1u) {
+        let window = window_buffer.windows[index];
+        let center = window.center_width.xyz;
+        let width = window.center_width.w;
+        let right = window.right_height.xyz;
+        let height = window.right_height.w;
+        let up = window.up.xyz;
+        let normal = cross(right, up);
+        let denominator = dot(ray, normal);
+        if denominator >= -0.00001 { continue; }
+        let distance = dot(center - origin, normal) / denominator;
+        if distance <= minimum_distance || distance >= nearest.distance { continue; }
+        let hit = origin + ray * distance - center;
+        let uv = vec2(dot(hit, right) / width + 0.5, 0.5 - dot(hit, up) / height);
+        if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) { continue; }
+        nearest = WindowHit(distance, index, uv, true);
+    }
+    return nearest;
+}
+fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, roughness: f32) -> vec3<f32> {
+    if TRACE_THROUGH_TRANSPARENT_WINDOWS {
+        var radiance = vec3(0.0);
+        var remaining = 1.0;
+        var minimum_distance = 0.00001;
+        for (var layer = 0u; layer < window_buffer.count; layer += 1u) {
+            let hit = nearest_window_hit(origin, ray, minimum_distance);
+            if !hit.found { break; }
+            let color =
+                textureSampleLevel(panel_textures[hit.index], environment_filter, hit.uv, 0.0);
+            radiance += color.rgb * remaining;
+            remaining *= 1.0 - color.a;
+            if remaining < 0.001 { return radiance; }
+            minimum_distance = hit.distance + 0.00001;
+        }
+        if remaining > 0.001 {
+            radiance += sample_environment_skybox(ray, roughness) * remaining;
+        }
+        return radiance;
+    }
+    let hit = nearest_window_hit(origin, ray, 0.00001);
+    if hit.found {
+        return textureSampleLevel(panel_textures[hit.index], environment_filter, hit.uv, 0.0).rgb;
+    }
+    return sample_environment_skybox(ray, roughness);
+}
+@fragment fn environment(input: SkyVertex) -> @location(0) vec4<f32> {
     let eye = transform.eye_position.xyz;
     let incident = normalize(input.direction);
-    if incident.y >= 0.0 { return vec4(0.0); }
+    if incident.y >= 0.0 {
+        return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+    }
     let floor_distance = (transform.emitter_up.w - eye.y) / incident.y;
-    if floor_distance <= 0.0 { return vec4(0.0); }
+    if floor_distance <= 0.0 {
+        return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+    }
     let world = eye + incident * floor_distance;
     let view = -incident;
     let roughness = floor_material.controls.z;
@@ -204,6 +252,12 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
     let alpha = max(0.001, roughness * roughness);
     let alpha_squared = alpha * alpha;
     let view_masking = ggx_masking(view.y, alpha_squared);
+    let fresnel = fresnel_schlick(-incident.y);
+    let opacity = floor_material.albedo.a;
+    var ground = floor_material.albedo.rgb * (1.0 - fresnel) * opacity;
+    if opacity < 1.0 {
+        ground += sample_environment_skybox(incident, 0.0) * (1.0 - opacity);
+    }
     let rows = max(1u, u32(sqrt(f32(ray_count))));
     let short_row_count = ray_count / rows;
     let long_rows = ray_count % rows;
@@ -218,20 +272,14 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
             (f32(row_offset) + jitter.y * f32(columns)) / f32(ray_count));
         let half_vector = sample_ggx_visible_normal(view, sample_uv, alpha);
         let ray = reflect(-view, half_vector);
-        let denominator = dot(ray, normal);
-        if denominator >= -0.00001 || ray.y <= 0.0 { continue; }
-        let distance = dot(center - world, normal) / denominator;
-        if distance <= 0.0 { continue; }
-        let hit = world + ray * distance - center;
-        let uv = vec2(dot(hit, right) / width + 0.5, 0.5 - dot(hit, up) / height);
-        if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) { continue; }
-        let color = textureSampleLevel(panel, filtering, uv, 0.0).rgb;
+        if ray.y <= 0.0 { continue; }
+        let radiance = sample_reflected_environment(world, ray, roughness);
         let view_half = clamp(dot(view, half_vector), 0.0, 1.0);
-        let fresnel = fresnel_schlick(view_half);
+        let sample_fresnel = fresnel_schlick(view_half);
         let light_masking = ggx_masking(ray.y, alpha_squared);
-        let weight = fresnel * light_masking
+        let weight = sample_fresnel * light_masking
             / (view_masking + light_masking - view_masking * light_masking);
-        sum += color * weight;
+        sum += radiance * weight;
     }
-    return vec4(sum / f32(ray_count), 0.0);
+    return vec4(ground + sum * opacity / f32(ray_count), 1.0);
 }
