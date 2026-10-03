@@ -9,6 +9,7 @@ mod gpu;
 mod input;
 mod panel;
 mod runtime;
+mod scene;
 mod timing;
 mod x11;
 mod xr;

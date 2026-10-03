@@ -15,7 +15,8 @@ Desktop shells and specialist apps require additional, explicitly scoped support
   protocol plumbing through Smithay, including surface buffer scale and a fixed
   1280x720, 60 Hz virtual output.
 - GLES surface-tree rendering, client DMA-BUF import and device feedback once
-  the GPU is ready, and GPU sharing into per-window OpenXR swapchains.
+  the GPU is ready, and direct DMA-BUF sampling by the application's stereo
+  Vulkan renderer, submitted as one OpenXR projection layer.
 - Multiple native toplevels and XWayland windows, map/unmap/destroy handling,
   application-driven buffer-size changes, activation, and keyboard focus routing.
 - Controller ray targeting, left/secondary click, vertical scrolling, and grip-driven
@@ -23,7 +24,7 @@ Desktop shells and specialist apps require additional, explicitly scoped support
   window movement or logical window resizing.
 - Native nested popup composition/grabs/repositioning/dismissal, parent-relative
   X11 menus, subsurface/input-region targeting, and expanded capture bounds.
-  Menus share their parent's XR layer without changing its physical pixel scale.
+  Menus share their parent's panel texture without changing its physical pixel scale.
   X11 parent selection uses transient-for hints and active-window/overlap fallbacks.
 - Opt-in evdev keyboards and mouse buttons/wheels, XKB key/modifier delivery,
   device-disconnect cleanup, and reliable XR button transitions/tracking cleanup.

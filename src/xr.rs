@@ -10,6 +10,7 @@ use std::{
 use crate::bridge::{PanelReceiver, PanelUpdate, XrInput};
 use crate::gpu::{self, SharedImage};
 use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3};
+use crate::scene::{PanelTexture, RenderTarget, SceneRenderer};
 use anyhow::{Context, Result, ensure};
 use ash::{
     Entry as VkEntry,
@@ -19,50 +20,65 @@ use openxr as xr;
 use smithay::backend::allocator::Buffer;
 
 struct XrPanel {
-    shared: SharedImage,
+    texture: PanelTexture,
     geometry: PanelGeometry,
-    swapchain: xr::Swapchain<xr::Vulkan>,
-    images: Vec<u64>,
 }
 
-impl XrPanel {
+struct XrEye {
+    swapchain: xr::Swapchain<xr::Vulkan>,
+    targets: Vec<RenderTarget>,
+    extent: vk::Extent2D,
+}
+
+impl XrEye {
     fn new(
         session: &xr::Session<xr::Vulkan>,
+        renderer: &SceneRenderer,
         format: vk::Format,
-        shared: SharedImage,
-        geometry: PanelGeometry,
-        timings: &mut crate::timing::Timings,
+        view: xr::ViewConfigurationView,
     ) -> Result<Self> {
-        let size = shared.dmabuf.size();
-        let swapchain = timings
-            .measure("openxr/create-swapchain", Duration::ZERO, || {
-                session.create_swapchain(&xr::SwapchainCreateInfo {
-                    create_flags: xr::SwapchainCreateFlags::EMPTY,
-                    usage_flags: xr::SwapchainUsageFlags::TRANSFER_DST
-                        | xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
-                    format: format.as_raw() as _,
-                    sample_count: 1,
-                    width: size.w as u32,
-                    height: size.h as u32,
-                    face_count: 1,
-                    array_size: 1,
-                    mip_count: 1,
-                })
+        let extent = vk::Extent2D {
+            width: view.recommended_image_rect_width,
+            height: view.recommended_image_rect_height,
+        };
+        ensure!(
+            extent.width > 0 && extent.height > 0,
+            "invalid OpenXR eye dimensions"
+        );
+        let swapchain = session
+            .create_swapchain(&xr::SwapchainCreateInfo {
+                create_flags: xr::SwapchainCreateFlags::EMPTY,
+                usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
+                format: format.as_raw() as _,
+                sample_count: 1,
+                width: extent.width,
+                height: extent.height,
+                face_count: 1,
+                array_size: 1,
+                mip_count: 1,
             })
-            .context("create window swapchain")?;
-        let images = timings.measure("openxr/enumerate-images", Duration::ZERO, || {
-            swapchain.enumerate_images()
-        })?;
+            .context("create eye swapchain")?;
+        let targets = swapchain
+            .enumerate_images()?
+            .into_iter()
+            .map(|image| RenderTarget::new(renderer, vk::Image::from_raw(image), extent))
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(!targets.is_empty(), "OpenXR eye swapchain has no images");
         Ok(Self {
-            shared,
-            geometry,
             swapchain,
-            images,
+            targets,
+            extent,
         })
     }
 }
 
 type PanelImages = std::collections::BTreeMap<u64, XrPanel>;
+
+impl Drop for XrEye {
+    fn drop(&mut self) {
+        self.targets.clear();
+    }
+}
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 
@@ -114,7 +130,7 @@ fn panel_swapchain_format(formats: &[u32]) -> Result<vk::Format> {
 
 /// Run the OpenXR client loop until the runtime requests session/application exit.
 ///
-/// It submits captured Wayland panel pixels as independent quad layers and
+/// It renders captured Wayland panels into a Vulkan stereo projection layer and
 /// forwards the right-hand aim/select controller actions to the compositor.
 pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<()> {
     let xr_entry = unsafe { xr::Entry::load(&()) }.context("load OpenXR loader")?;
@@ -281,28 +297,46 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
         })
         .unwrap_or(Ok(4096))?;
     let limits = PanelLimits {
-        max_width: graphics
-            .max_swapchain_image_width
-            .min(device_limit)
-            .min(cap)
-            .min(i32::MAX as u32),
-        max_height: graphics
-            .max_swapchain_image_height
-            .min(device_limit)
-            .min(cap)
-            .min(i32::MAX as u32),
-        max_layers: graphics.max_layer_count.saturating_sub(1),
+        max_width: device_limit.min(cap).min(i32::MAX as u32),
+        max_height: device_limit.min(cap).min(i32::MAX as u32),
+        max_layers: u32::MAX,
     };
     ensure!(
-        limits.max_width > 0 && limits.max_height > 0 && limits.max_layers > 0,
-        "invalid OpenXR panel limits, no layer available beside the cursor, or zero SPACETOP_MAX_PANEL_SIZE"
+        limits.max_width > 0 && limits.max_height > 0 && graphics.max_layer_count > 0,
+        "invalid Vulkan panel limits, no OpenXR projection layer, or zero SPACETOP_MAX_PANEL_SIZE"
     );
     eprintln!(
-        "OpenXR panel limits: {}x{}, {} window layers",
-        limits.max_width, limits.max_height, limits.max_layers
+        "Vulkan panel limits: {}x{}, one stereo projection layer",
+        limits.max_width, limits.max_height
     );
     let formats = session.enumerate_swapchain_formats()?;
     let format = panel_swapchain_format(&formats)?;
+    ensure!(
+        unsafe {
+            vk_instance
+                .get_physical_device_format_properties(physical_device, vk::Format::D32_SFLOAT)
+        }
+        .optimal_tiling_features
+        .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT),
+        "Vulkan GPU lacks D32 depth attachment support"
+    );
+    let scene = SceneRenderer::new(&device, format)?;
+    let view_configuration = instance.enumerate_view_configuration_views(system, VIEW_TYPE)?;
+    ensure!(
+        view_configuration.len() == 2,
+        "runtime must provide two stereo views"
+    );
+    let mut eyes = view_configuration
+        .into_iter()
+        .map(|view| {
+            ensure!(
+                view.recommended_image_rect_width <= device_limit
+                    && view.recommended_image_rect_height <= device_limit,
+                "OpenXR eye dimensions exceed Vulkan device limits"
+            );
+            XrEye::new(&session, &scene, format, view)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let render_node = gpu::render_node(&vk_instance, physical_device)
         .context("GPU sharing requires a DRM render node for the runtime-selected Vulkan GPU")?;
     input
@@ -311,28 +345,6 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
             limits,
         })
         .context("request GPU compositing")?;
-    let gpu_cursor = gpu::GpuCursor::new(&vk_instance, &device, physical_device)?;
-    ensure!(
-        graphics.max_swapchain_image_width >= 21
-            && graphics.max_swapchain_image_height >= 21
-            && device_limit >= 21,
-        "OpenXR cannot accommodate the cursor image"
-    );
-    let mut cursor_swapchain = session
-        .create_swapchain(&xr::SwapchainCreateInfo {
-            create_flags: xr::SwapchainCreateFlags::EMPTY,
-            usage_flags: xr::SwapchainUsageFlags::TRANSFER_DST
-                | xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
-            format: format.as_raw() as _,
-            sample_count: 1,
-            width: 21,
-            height: 21,
-            face_count: 1,
-            array_size: 1,
-            mip_count: 1,
-        })
-        .context("create cursor swapchain")?;
-    let cursor_images = cursor_swapchain.enumerate_images()?;
     let space =
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
     let action_set = instance.create_action_set("spacetop", "Spacetop input", 0)?;
@@ -488,38 +500,25 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                     dmabuf,
                     geometry,
                 } => {
-                    let size = dmabuf.size();
-                    ensure!(
-                        size.w > 0
-                            && size.h > 0
-                            && size.w as u32 <= limits.max_width
-                            && size.h as u32 <= limits.max_height,
-                        "window image exceeds negotiated OpenXR limits"
-                    );
                     let shared = timings
                         .measure("gpu/dmabuf-import", Duration::ZERO, || {
                             SharedImage::import(&vk_instance, &device, physical_device, dmabuf)
                         })
                         .context("mandatory GPU DMA-BUF import failed")?;
-                    if let Some(panel) = panel_frames.get_mut(&panel_id)
-                        && panel.shared.dmabuf.size() == size
-                    {
-                        timings.measure("gpu/panel-replace", Duration::ZERO, || {
-                            panel.shared = shared;
-                            panel.geometry = geometry;
-                        });
-                    } else {
-                        ensure!(
-                            panel_frames.contains_key(&panel_id)
-                                || panel_frames.len() < limits.max_layers as usize,
-                            "OpenXR supports at most {} mapped window layers",
-                            limits.max_layers
-                        );
-                        let panel = XrPanel::new(&session, format, shared, geometry, &mut timings)?;
-                        timings.measure("mixed/panel-replace", Duration::ZERO, || {
-                            panel_frames.insert(panel_id, panel);
-                        });
-                    }
+                    let size = shared.dmabuf.size();
+                    ensure!(
+                        size.w > 0
+                            && size.h > 0
+                            && size.w as u32 <= limits.max_width
+                            && size.h as u32 <= limits.max_height,
+                        "window image exceeds negotiated Vulkan limits"
+                    );
+                    let texture = timings.measure("gpu/panel-texture", Duration::ZERO, || {
+                        PanelTexture::new(&scene, shared)
+                    })?;
+                    timings.measure("gpu/panel-replace", Duration::ZERO, || {
+                        panel_frames.insert(panel_id, XrPanel { texture, geometry });
+                    });
                 }
                 PanelUpdate::Removed { .. } => {}
             }
@@ -736,7 +735,12 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
         }
         pointer_tracked = tracked_this_frame;
         timings.measure("openxr/begin-frame", period, || frame_stream.begin())?;
-        if !frame_state.should_render {
+        if !frame_state.should_render
+            || !view_state.contains(
+                xr::ViewStateFlags::POSITION_VALID | xr::ViewStateFlags::ORIENTATION_VALID,
+            )
+            || views.len() != eyes.len()
+        {
             timings.measure("openxr/end-frame", period * 2, || {
                 frame_stream.end(
                     frame_state.predicted_display_time,
@@ -747,7 +751,7 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
             continue;
         }
 
-        let cursor_quad_pose = cursor_ray.and_then(|ray| {
+        let cursor_scene_pose = cursor_ray.and_then(|ray| {
             cursor_pose(
                 ray,
                 grab_player_position,
@@ -756,7 +760,7 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
             )
         });
         unsafe {
-            timings.measure("gpu/previous-copy-wait", period, || {
+            timings.measure("gpu/previous-render-wait", period, || {
                 device.wait_for_fences(&[fence], true, u64::MAX)
             })?;
             device.reset_fences(&[fence])?;
@@ -766,118 +770,32 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
-            let range = vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1);
-            for panel in panel_frames.values_mut() {
+            for panel in panel_frames.values() {
+                panel.texture.ownership(command_buffer, queue_family, true);
+            }
+            for (eye, view) in eyes.iter_mut().zip(&views) {
                 let image_index = timings.measure("openxr/acquire-image", period, || {
-                    panel.swapchain.acquire_image()
+                    eye.swapchain.acquire_image()
                 })?;
                 timings.measure("openxr/wait-image", period * 2, || {
-                    panel.swapchain.wait_image(xr::Duration::INFINITE)
+                    eye.swapchain.wait_image(xr::Duration::INFINITE)
                 })?;
-                let image = vk::Image::from_raw(
-                    *panel
-                        .images
-                        .get(image_index as usize)
-                        .context("bad window swapchain index")? as _,
-                );
-                let begin_barrier = vk::ImageMemoryBarrier::default()
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(image)
-                    .subresource_range(range);
-                device.cmd_pipeline_barrier(
+                let target = eye
+                    .targets
+                    .get(image_index as usize)
+                    .context("bad eye swapchain index")?;
+                scene.draw(
                     command_buffer,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[begin_barrier],
-                );
-                panel
-                    .shared
-                    .copy_to(&device, command_buffer, image, queue_family);
-                let end_barrier = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(
-                        vk::AccessFlags::COLOR_ATTACHMENT_READ
-                            | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                    )
-                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(image)
-                    .subresource_range(range);
-                device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[end_barrier],
+                    target,
+                    view,
+                    panel_frames
+                        .values()
+                        .map(|panel| (&panel.texture, panel.geometry)),
+                    cursor_scene_pose,
                 );
             }
-            if cursor_quad_pose.is_some() {
-                let image_index = timings.measure("openxr/acquire-image", period, || {
-                    cursor_swapchain.acquire_image()
-                })?;
-                timings.measure("openxr/wait-image", period * 2, || {
-                    cursor_swapchain.wait_image(xr::Duration::INFINITE)
-                })?;
-                let image = vk::Image::from_raw(
-                    *cursor_images
-                        .get(image_index as usize)
-                        .context("bad cursor swapchain index")? as _,
-                );
-                let begin_barrier = vk::ImageMemoryBarrier::default()
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(image)
-                    .subresource_range(range);
-                device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[begin_barrier],
-                );
-                gpu_cursor.draw_quad(command_buffer, image);
-                let end_barrier = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(
-                        vk::AccessFlags::COLOR_ATTACHMENT_READ
-                            | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                    )
-                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(image)
-                    .subresource_range(range);
-                device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[end_barrier],
-                );
+            for panel in panel_frames.values() {
+                panel.texture.ownership(command_buffer, queue_family, false);
             }
             device.end_command_buffer(command_buffer)?;
             timings.measure("gpu/queue-submit", Duration::ZERO, || {
@@ -887,103 +805,40 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
                     fence,
                 )
             })?;
-            timings.measure("gpu/copy-completion", period, || {
+            timings.measure("gpu/render-completion", period, || {
                 device.wait_for_fences(&[fence], true, u64::MAX)
             })?;
         }
-        for panel in panel_frames.values_mut() {
+        for eye in &mut eyes {
             timings.measure("openxr/release-image", Duration::ZERO, || {
-                panel.swapchain.release_image()
-            })?;
-        }
-        if cursor_quad_pose.is_some() {
-            timings.measure("openxr/release-image", Duration::ZERO, || {
-                cursor_swapchain.release_image()
+                eye.swapchain.release_image()
             })?;
         }
 
-        let quads = panel_frames
-            .values()
-            .map(|panel| {
-                let pose = panel.geometry.pose;
-                let frame = &panel.shared;
-                let orientation = pose.orientation();
-                let size = xr::Rect2Di {
-                    offset: xr::Offset2Di { x: 0, y: 0 },
-                    extent: xr::Extent2Di {
-                        width: frame.dmabuf.size().w,
-                        height: frame.dmabuf.size().h,
-                    },
-                };
-                xr::CompositionLayerQuad::new()
-                    .space(&space)
-                    .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+        let projection_views = eyes
+            .iter()
+            .zip(&views)
+            .map(|(eye, view)| {
+                xr::CompositionLayerProjectionView::new()
+                    .pose(view.pose)
+                    .fov(view.fov)
                     .sub_image(
                         xr::SwapchainSubImage::new()
-                            .swapchain(&panel.swapchain)
+                            .swapchain(&eye.swapchain)
                             .image_array_index(0)
-                            .image_rect(size),
+                            .image_rect(xr::Rect2Di {
+                                offset: xr::Offset2Di { x: 0, y: 0 },
+                                extent: xr::Extent2Di {
+                                    width: eye.extent.width as i32,
+                                    height: eye.extent.height as i32,
+                                },
+                            }),
                     )
-                    .pose(xr::Posef {
-                        orientation: xr::Quaternionf {
-                            x: orientation.x,
-                            y: orientation.y,
-                            z: orientation.z,
-                            w: orientation.w,
-                        },
-                        position: xr::Vector3f {
-                            x: pose.center.x,
-                            y: pose.center.y,
-                            z: pose.center.z,
-                        },
-                    })
-                    .size(xr::Extent2Df {
-                        width: pose.width_m,
-                        height: pose.width_m * panel.geometry.logical_size.h as f32
-                            / panel.geometry.logical_size.w.max(1) as f32,
-                    })
             })
             .collect::<Vec<_>>();
-        let cursor_quad = cursor_quad_pose.map(|pose| {
-            let orientation = pose.orientation();
-            xr::CompositionLayerQuad::new()
-                .space(&space)
-                .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
-                .sub_image(
-                    xr::SwapchainSubImage::new()
-                        .swapchain(&cursor_swapchain)
-                        .image_array_index(0)
-                        .image_rect(xr::Rect2Di {
-                            offset: xr::Offset2Di { x: 0, y: 0 },
-                            extent: xr::Extent2Di {
-                                width: 21,
-                                height: 21,
-                            },
-                        }),
-                )
-                .pose(xr::Posef {
-                    orientation: xr::Quaternionf {
-                        x: orientation.x,
-                        y: orientation.y,
-                        z: orientation.z,
-                        w: orientation.w,
-                    },
-                    position: xr::Vector3f {
-                        x: pose.center.x,
-                        y: pose.center.y,
-                        z: pose.center.z,
-                    },
-                })
-                .size(xr::Extent2Df {
-                    width: pose.width_m,
-                    height: pose.width_m,
-                })
-        });
-        let layers = quads
-            .iter()
-            .chain(cursor_quad.iter())
-            .map(|quad| quad as &xr::CompositionLayerBase<xr::Vulkan>)
-            .collect::<Vec<_>>();
+        let projection = xr::CompositionLayerProjection::new()
+            .space(&space)
+            .views(&projection_views);
         let active_elapsed = active_started.elapsed();
         timings.record_frame(active_elapsed, period);
         timings.record(
@@ -996,7 +851,7 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
             frame_stream.end(
                 frame_state.predicted_display_time,
                 xr::EnvironmentBlendMode::OPAQUE,
-                &layers,
+                &[&projection],
             )
         })?;
     }
@@ -1004,9 +859,12 @@ pub fn run(frames: PanelReceiver, input: crate::bridge::InputSender) -> Result<(
     unsafe {
         device.device_wait_idle()?;
         panel_frames.clear();
-        drop(cursor_swapchain);
+        for eye in &mut eyes {
+            eye.targets.clear();
+        }
+        drop(eyes);
+        drop(scene);
         drop((aim_space, space, frame_waiter, frame_stream, session));
-        drop(gpu_cursor);
         device.destroy_fence(fence, None);
         device.destroy_command_pool(command_pool, None);
         device.destroy_device(None);

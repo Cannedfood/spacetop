@@ -102,9 +102,14 @@ implemented.
 
 GPU sharing is mandatory and uses the OpenXR runtime's Vulkan GPU.
 Smithay composites app buffers using GLES into linear RGBA DMA-BUF images.
-Vulkan imports those images and copies them into per-window OpenXR swapchains without
-reading panel pixels back to the CPU. The targeting cross uses a tiny persistent
-GPU buffer instead of modifying panel pixels.
+The application's Vulkan renderer imports and samples those images directly,
+without panel copies or CPU readback. It draws textured spatial panels and the
+targeting cross into two eye-resolution OpenXR swapchains and submits one stereo
+projection layer. OpenXR handles final headset composition, not window quads.
+Each eye uses the runtime's recommended dimensions, predicted pose and asymmetric
+FOV. The scene uses depth testing, back-to-front premultiplied-alpha blending,
+and transparent-fragment rejection; the cursor has a minimum screen-space stroke.
+WGSL shaders are compiled to SPIR-V with Naga.
 
 GPU-backed Wayland client buffers are supported through `linux-dmabuf` with
 device feedback. Shared-memory client buffers still require an upload to GLES.
@@ -114,8 +119,9 @@ runtime itself does not need to support GLES.
 This initial implementation requires Vulkan 1.1 and the external-memory FD,
 DMA-BUF, DRM-format-modifier, physical-device-DRM, image-format-list, and
 foreign-queue-family device extensions. It also needs a driver that supports
-linear RGBA8 GLES render targets and sRGB Vulkan DMA-BUF imports, an sRGB OpenXR
-swapchain, and access to the runtime GPU's `/dev/dri/renderD*` node.
+linear RGBA8 GLES render targets and sampled sRGB Vulkan DMA-BUF imports, an sRGB
+OpenXR swapchain, D32 depth attachments, and access to the runtime GPU's
+`/dev/dri/renderD*` node.
 Build dependencies include EGL, GLES, DRM, GBM (with modifier-aware allocation
 and per-plane FD export), and xkbcommon development libraries.
 
@@ -135,26 +141,28 @@ published immediately. No captures or frame callbacks are scheduled while XR
 is not requesting renderable frames; this is cadence control, not proof of
 presentation or per-panel visibility tracking.
 
-Each mapped toplevel gets an independent quad and swapchain. Windows occupy
+Each mapped toplevel gets an independent sampled texture and spatial panel. Windows occupy
 stable, nonoverlapping positions, starting in the center and alternating right
 and left. Commits and resizing do not move other windows; closed-window positions
-can be reused. Unmapping or closing removes the quad, and remapping restores it.
+can be reused. Unmapping or closing removes the panel, and remapping restores it.
 The targeting cross and pointer select the nearest intersected window, and
 clicking transfers keyboard focus. Closing or unmapping the active window hands
 focus to another mapped window.
 
 Images use the window's logical size and buffer scale, rather than a fixed
-512-pixel texture. Large windows are scaled proportionally to fit the runtime's
-swapchain limits, the Vulkan device limit, and a default 4096-pixel per-dimension
+512-pixel texture. Large windows are scaled proportionally to fit the Vulkan
+device limit and a default 4096-pixel per-dimension
 cap. Set `SPACETOP_MAX_PANEL_SIZE` to a positive integer to change that cap.
-Startup logs report the negotiated image size and composition-layer capacity.
-Exceeding the runtime's mapped-window layer limit stops the compositor with a
-clear error; windows are not silently hidden.
+Startup logs report the negotiated panel image size. Window count is no longer
+constrained by the runtime's composition-layer limit; all panels and the cursor
+share one projection layer.
 
 This is not yet a fully pipelined renderer: each scheduled capture allocates a fresh
 shared image, producer completion is waited on by the CPU, and Vulkan waits for
-copies before releasing swapchain images. XR still copies every mapped panel
-on each rendered frame, even if its contents have not changed. Commits coalesce
+scene rendering before releasing eye swapchain images. Clean panels retain their
+sampled textures, but the stereo scene is redrawn each renderable frame. Foreign
+queue-family ownership is acquired before sampling and released afterward.
+Invalid view tracking submits no layers. Commits coalesce
 before capture, and pending images coalesce per window without dropping
 unmap/close notifications. Buffer pooling and
 explicit GPU semaphore handoff remain follow-ups. Grip-driven spatial movement

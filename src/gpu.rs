@@ -79,12 +79,14 @@ pub fn render_node(
         .then(|| PathBuf::from(format!("/dev/dri/renderD{}", drm.render_minor)))
 }
 
+#[cfg(test)]
 pub struct GpuCursor {
     device: ash::Device,
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
 }
 
+#[cfg(test)]
 fn cursor_rectangles(
     size: Size<i32, smithay::utils::Buffer>,
     center: (i32, i32),
@@ -117,6 +119,7 @@ fn cursor_rectangles(
     rectangles
 }
 
+#[cfg(test)]
 impl GpuCursor {
     pub fn new(
         instance: &ash::Instance,
@@ -262,6 +265,7 @@ impl GpuCursor {
     }
 }
 
+#[cfg(test)]
 impl Drop for GpuCursor {
     fn drop(&mut self) {
         unsafe {
@@ -279,6 +283,7 @@ pub struct SharedImage {
 }
 
 impl SharedImage {
+    #[cfg(test)]
     pub unsafe fn copy_to(
         &self,
         device: &ash::Device,
@@ -373,7 +378,7 @@ impl SharedImage {
             .format(vk::Format::R8G8B8A8_SRGB)
             .ty(vk::ImageType::TYPE_2D)
             .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-            .usage(vk::ImageUsageFlags::TRANSFER_SRC)
+            .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
             .push_next(&mut modifier)
             .push_next(&mut external);
         let mut external_properties = vk::ExternalImageFormatProperties::default();
@@ -415,7 +420,7 @@ impl SharedImage {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-            .usage(vk::ImageUsageFlags::TRANSFER_SRC)
+            .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .push_next(&mut modifier)
             .push_next(&mut external);

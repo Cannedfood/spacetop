@@ -1,4 +1,15 @@
 use super::*;
+use crate::{
+    panel::{PanelGeometry, PanelPose},
+    scene::{PanelTexture, RenderTarget, SceneRenderer},
+};
+
+struct SceneReadback<'a> {
+    renderer: &'a SceneRenderer,
+    view: &'a openxr::View,
+    panels: &'a [(&'a PanelTexture, PanelGeometry)],
+    cursor: Option<PanelPose>,
+}
 
 #[test]
 fn cursor_rectangles_are_clipped_and_do_not_overlap() {
@@ -95,11 +106,11 @@ impl Vulkan {
 
     pub fn readback(&self, shared: &SharedImage, cursor: Option<(i32, i32)>) -> Result<Vec<u8>> {
         let size = shared.dmabuf.size();
-        self.readback_image(Some(shared), size, cursor)
+        self.readback_image(Some(shared), size, cursor, None)
     }
 
     pub fn readback_cursor(&self) -> Result<Vec<u8>> {
-        self.readback_image(None, (21, 21).into(), Some((10, 10)))
+        self.readback_image(None, (21, 21).into(), Some((10, 10)), None)
     }
 
     fn readback_image(
@@ -107,6 +118,7 @@ impl Vulkan {
         shared: Option<&SharedImage>,
         size: Size<i32, smithay::utils::Buffer>,
         cursor: Option<(i32, i32)>,
+        scene: Option<SceneReadback<'_>>,
     ) -> Result<Vec<u8>> {
         let byte_len = size.w as u64 * size.h as u64 * 4;
         unsafe {
@@ -150,7 +162,11 @@ impl Vulkan {
                     depth: 1,
                 })
                 .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST);
+                .usage(
+                    vk::ImageUsageFlags::TRANSFER_SRC
+                        | vk::ImageUsageFlags::TRANSFER_DST
+                        | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                );
             let destination = self.device.create_image(&image_info, None)?;
             let image_requirements = self.device.get_image_memory_requirements(destination);
             let image_memory = self.device.allocate_memory(
@@ -213,18 +229,50 @@ impl Vulkan {
                     buffer.draw_quad(command, destination);
                 }
             }
+            let target = if let Some(scene) = scene {
+                let target = RenderTarget::new(
+                    scene.renderer,
+                    destination,
+                    vk::Extent2D {
+                        width: size.w as u32,
+                        height: size.h as u32,
+                    },
+                )?;
+                for (texture, _) in scene.panels {
+                    texture.ownership(command, self.queue_family, true);
+                }
+                scene.renderer.draw(
+                    command,
+                    &target,
+                    scene.view,
+                    scene.panels.iter().copied(),
+                    scene.cursor,
+                );
+                for (texture, _) in scene.panels {
+                    texture.ownership(command, self.queue_family, false);
+                }
+                Some(target)
+            } else {
+                None
+            };
             let barrier = vk::ImageMemoryBarrier::default()
                 .image(destination)
                 .subresource_range(range)
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .old_layout(if target.is_some() {
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+                } else {
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL
+                })
                 .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .src_access_mask(
+                    vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                )
                 .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
             self.device.cmd_pipeline_barrier(
                 command,
-                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(),
                 &[],
@@ -276,6 +324,7 @@ impl Vulkan {
                 std::slice::from_raw_parts(mapped.cast::<u8>(), byte_len as usize).to_vec();
             self.device.unmap_memory(memory);
             drop(cursor_buffer);
+            drop(target);
             self.device.destroy_image(destination, None);
             self.device.free_memory(image_memory, None);
             self.device.destroy_command_pool(pool, None);
@@ -294,4 +343,129 @@ impl Drop for Vulkan {
             self.instance.destroy_instance(None);
         }
     }
+}
+
+#[test]
+#[ignore = "requires a Vulkan/GLES GPU with DMA-BUF sharing"]
+fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
+    let vulkan = Vulkan::new()?;
+    let scene = SceneRenderer::new(&vulkan.device, vk::Format::R8G8B8A8_SRGB)?;
+    let mut producer = GpuRenderer::new(&vulkan.render_node)?;
+    let mut make_texture = |quadrants: bool| -> Result<PanelTexture> {
+        let buffer =
+            producer
+                .allocator
+                .create_buffer(32, 32, Fourcc::Abgr8888, &[Modifier::Linear])?;
+        let mut dmabuf = buffer.export()?;
+        {
+            let mut framebuffer = producer.renderer.bind(&mut dmabuf)?;
+            let mut frame =
+                producer
+                    .renderer
+                    .render(&mut framebuffer, (32, 32).into(), Transform::Normal)?;
+            let full = [smithay::utils::Rectangle::from_size((32, 32).into())];
+            frame.clear(
+                smithay::backend::renderer::Color32F::new(1.0, 1.0, 1.0, 1.0),
+                &full,
+            )?;
+            if quadrants {
+                for (location, color) in [
+                    ((0, 0), [1.0, 0.0, 0.0, 1.0]),
+                    ((16, 0), [0.0, 1.0, 0.0, 1.0]),
+                    ((0, 16), [0.0, 0.0, 1.0, 1.0]),
+                    ((16, 16), [0.0, 0.0, 0.0, 0.0]),
+                ] {
+                    frame.clear(
+                        color.into(),
+                        &[smithay::utils::Rectangle::new(
+                            location.into(),
+                            (16, 16).into(),
+                        )],
+                    )?;
+                }
+            }
+            frame.finish()?.wait()?;
+        }
+        PanelTexture::new(
+            &scene,
+            SharedImage::import(
+                &vulkan.instance,
+                &vulkan.device,
+                vulkan.physical_device,
+                dmabuf,
+            )?,
+        )
+    };
+    let foreground = make_texture(true)?;
+    let background = make_texture(false)?;
+    let near = PanelGeometry {
+        pose: PanelPose {
+            center: glam::Vec3::new(0.0, 0.0, -1.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            width_m: 1.0,
+        },
+        logical_size: (32, 32).into(),
+    };
+    let far = PanelGeometry {
+        pose: PanelPose {
+            center: glam::Vec3::new(0.0, 0.0, -2.0),
+            width_m: 2.0,
+            ..near.pose
+        },
+        ..near
+    };
+    let panels = [(&foreground, near), (&background, far)];
+    let mut view = openxr::View {
+        pose: openxr::Posef::IDENTITY,
+        fov: openxr::Fovf {
+            angle_left: -std::f32::consts::FRAC_PI_4,
+            angle_right: std::f32::consts::FRAC_PI_4,
+            angle_up: std::f32::consts::FRAC_PI_4,
+            angle_down: -std::f32::consts::FRAC_PI_4,
+        },
+    };
+    let cursor = PanelPose {
+        width_m: 0.021,
+        ..near.pose
+    };
+    let pixels = vulkan.readback_image(
+        None,
+        (512, 512).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &scene,
+            view: &view,
+            panels: &panels,
+            cursor: Some(cursor),
+        }),
+    )?;
+    let pixel = |pixels: &[u8], horizontal: usize, vertical: usize| {
+        pixels[(vertical * 512 + horizontal) * 4..][..4].to_vec()
+    };
+    assert_eq!(pixel(&pixels, 200, 200), [255, 0, 0, 255]);
+    assert_eq!(pixel(&pixels, 300, 200), [0, 255, 0, 255]);
+    assert_eq!(pixel(&pixels, 200, 300), [0, 0, 255, 255]);
+    assert_eq!(pixel(&pixels, 300, 300), [255, 255, 255, 255]);
+    assert_eq!(pixel(&pixels, 30, 30), [0, 0, 0, 255]);
+    let cross = pixel(&pixels, 255, 255);
+    assert_eq!(cross[0], 255);
+    assert!(cross[1].abs_diff(245) <= 1);
+    assert_eq!(&cross[2..], [0, 255]);
+    assert_eq!(pixel(&pixels, 380, 200), [0, 255, 0, 255]);
+    view.pose.position.x = 0.1;
+    let moved = vulkan.readback_image(
+        None,
+        (512, 512).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &scene,
+            view: &view,
+            panels: &panels,
+            cursor: None,
+        }),
+    )?;
+    assert_eq!(pixel(&moved, 380, 200), [0, 0, 0, 255]);
+    assert_eq!(pixel(&moved, 200, 200), [255, 0, 0, 255]);
+    Ok(())
 }
