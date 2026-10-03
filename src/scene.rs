@@ -56,13 +56,26 @@ struct SkyVertex {
     result.direction = (transform.matrix * vec4(uv, 0.0, 1.0)).xyz;
     return result;
 }
+fn fresnel_schlick(cosine: f32) -> f32 {
+    let grazing = pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
+    return FLOOR_REFLECTANCE + (1.0 - FLOOR_REFLECTANCE) * grazing;
+}
 @fragment fn sky(input: SkyVertex) -> @location(0) vec4<f32> {
     let direction = normalize(input.direction);
     let uv = vec2(
         atan2(direction.z, direction.x) / (2.0 * PI) + 0.5,
         0.5 - asin(clamp(direction.y, -1.0, 1.0)) / PI);
     let hdr = max(textureSample(panel, filtering, uv).rgb, vec3(0.0));
-    return vec4(hdr / (vec3(1.0) + hdr), 1.0);
+    let background = hdr / (vec3(1.0) + hdr);
+    let floor_distance = (transform.emitter_up.w - transform.eye_position.y) / direction.y;
+    if direction.y < 0.0 && floor_distance > 0.0 {
+        let fresnel = fresnel_schlick(-direction.y);
+        let albedo = FLOOR_ALBEDO * (1.0 - fresnel);
+        return vec4(
+            albedo * (1.0 - FLOOR_TRANSPARENCY) + background * FLOOR_TRANSPARENCY,
+            1.0);
+    }
+    return vec4(background, 1.0);
 }
 struct Vertex {
     @builtin(position) position: vec4<f32>,
@@ -87,31 +100,6 @@ struct Vertex {
     let stroke = max(vec2(0.5 / 21.0), fwidth(input.uv) * 0.75);
     if all(abs(input.uv - vec2(0.5)) > stroke) { discard; }
     return vec4(1.0, 0.9131, 0.0, 1.0);
-}
-struct FloorVertex {
-    @builtin(position) position: vec4<f32>,
-    @location(0) world: vec3<f32>,
-}
-@vertex fn floor_vertex(@builtin(vertex_index) index: u32) -> FloorVertex {
-    let corners = array<vec2<f32>, 6>(
-        vec2(0.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 0.0),
-        vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
-    let world = vec3((corners[index].x - 0.5) * 60.0, transform.emitter_up.w,
-        (corners[index].y - 0.5) * 60.0);
-    var result: FloorVertex;
-    result.position = transform.matrix * vec4(world, 1.0);
-    result.world = world;
-    return result;
-}
-@fragment fn floor_albedo(input: FloorVertex) -> @location(0) vec4<f32> {
-    let to_eye = transform.eye_position.xyz - input.world;
-    if to_eye.y <= 0.0 { return vec4(0.0); }
-    let fresnel = fresnel_schlick(normalize(to_eye).y);
-    return vec4(FLOOR_ALBEDO * (1.0 - fresnel), 1.0 - FLOOR_TRANSPARENCY);
-}
-fn fresnel_schlick(cosine: f32) -> f32 {
-    let grazing = pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
-    return FLOOR_REFLECTANCE + (1.0 - FLOOR_REFLECTANCE) * grazing;
 }
 fn sample_ggx_visible_normal(view: vec3<f32>, sample_uv: vec2<f32>, alpha: f32) -> vec3<f32> {
     let stretched = normalize(vec3(alpha * view.x, alpha * view.z, view.y));
@@ -146,16 +134,20 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
     let random = vec2(sample_hash(seed), sample_hash(seed ^ 0x85ebca6bu));
     return vec2<f32>(random >> vec2(8u)) / 16777216.0;
 }
-@fragment fn floor_light(input: FloorVertex) -> @location(0) vec4<f32> {
+@fragment fn floor_light(input: SkyVertex) -> @location(0) vec4<f32> {
     let center = transform.emitter_center_width.xyz;
     let width = transform.emitter_center_width.w;
     let right = transform.emitter_right_height.xyz;
     let height = transform.emitter_right_height.w;
     let up = transform.emitter_up.xyz;
     let normal = cross(right, up);
-    let to_eye = transform.eye_position.xyz - input.world;
-    if to_eye.y <= 0.0 { return vec4(0.0); }
-    let view = normalize(to_eye);
+    let eye = transform.eye_position.xyz;
+    let incident = normalize(input.direction);
+    if incident.y >= 0.0 { return vec4(0.0); }
+    let floor_distance = (transform.emitter_up.w - eye.y) / incident.y;
+    if floor_distance <= 0.0 { return vec4(0.0); }
+    let world = eye + incident * floor_distance;
+    let view = -incident;
     let alpha = max(0.001, FLOOR_ROUGHNESS * FLOOR_ROUGHNESS);
     let alpha_squared = alpha * alpha;
     let view_masking = ggx_masking(view.y, alpha_squared);
@@ -167,7 +159,7 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
         let row = index % rows;
         let columns = short_row_count + select(0u, 1u, row < long_rows);
         let row_offset = row * short_row_count + min(row, long_rows);
-        let jitter = sample_jitter(input.world, index);
+        let jitter = sample_jitter(world, index);
         let sample_uv = vec2(
             (f32(index / rows) + jitter.x) / f32(columns),
             (f32(row_offset) + jitter.y * f32(columns)) / f32(FLOOR_RAY_COUNT));
@@ -175,9 +167,9 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
         let ray = reflect(-view, half_vector);
         let denominator = dot(ray, normal);
         if denominator >= -0.00001 || ray.y <= 0.0 { continue; }
-        let distance = dot(center - input.world, normal) / denominator;
+        let distance = dot(center - world, normal) / denominator;
         if distance <= 0.0 { continue; }
-        let hit = input.world + ray * distance - center;
+        let hit = world + ray * distance - center;
         let uv = vec2(dot(hit, right) / width + 0.5, 0.5 - dot(hit, up) / height);
         if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) { continue; }
         let color = textureSampleLevel(panel, filtering, uv, 0.0);
@@ -855,7 +847,6 @@ pub(crate) struct SceneRenderer {
     sky_pipeline: vk::Pipeline,
     cursor_pipeline: vk::Pipeline,
     floor_light_pipeline: vk::Pipeline,
-    floor_albedo_pipeline: vk::Pipeline,
 }
 
 pub(crate) struct SceneFrame<'a> {
@@ -879,7 +870,6 @@ impl SceneRenderer {
             sky_pipeline: vk::Pipeline::null(),
             cursor_pipeline: vk::Pipeline::null(),
             floor_light_pipeline: vk::Pipeline::null(),
-            floor_albedo_pipeline: vk::Pipeline::null(),
         };
         let attachments = [
             vk::AttachmentDescription::default()
@@ -979,15 +969,11 @@ impl SceneRenderer {
         renderer.sky_pipeline = renderer.pipeline("sky")?;
         renderer.cursor_pipeline = renderer.pipeline("cursor")?;
         renderer.floor_light_pipeline = renderer.pipeline("floor_light")?;
-        renderer.floor_albedo_pipeline = renderer.pipeline("floor_albedo")?;
         Ok(renderer)
     }
 
     fn pipeline(&self, fragment: &str) -> Result<vk::Pipeline> {
-        let floor = fragment == "floor_light" || fragment == "floor_albedo";
-        let vertex_name = if floor {
-            c"floor_vertex"
-        } else if fragment == "sky" {
+        let vertex_name = if fragment == "sky" || fragment == "floor_light" {
             c"sky_vertex"
         } else {
             c"vertex"
@@ -1150,6 +1136,30 @@ impl SceneRenderer {
                 }],
             );
             self.device.cmd_set_scissor(command, 0, &[area]);
+            let floor_height = [frame.floor_y];
+            let floor_height_bytes =
+                std::slice::from_raw_parts(floor_height.as_ptr().cast::<u8>(), 4);
+            self.device.cmd_push_constants(
+                command,
+                self.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                108,
+                floor_height_bytes,
+            );
+            let eye = [
+                view.pose.position.x,
+                view.pose.position.y,
+                view.pose.position.z,
+                0.0,
+            ];
+            let eye_bytes = std::slice::from_raw_parts(eye.as_ptr().cast::<u8>(), 16);
+            self.device.cmd_push_constants(
+                command,
+                self.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                112,
+                eye_bytes,
+            );
             if let Some(skybox) = frame.skybox {
                 self.device.cmd_bind_pipeline(
                     command,
@@ -1166,41 +1176,6 @@ impl SceneRenderer {
                 );
                 self.draw_panel(command, sky_matrix(view));
             }
-            let eye = [
-                view.pose.position.x,
-                view.pose.position.y,
-                view.pose.position.z,
-                0.0,
-            ];
-            let eye_bytes = std::slice::from_raw_parts(eye.as_ptr().cast::<u8>(), 16);
-            self.device.cmd_push_constants(
-                command,
-                self.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                112,
-                eye_bytes,
-            );
-            let floor_height = [frame.floor_y];
-            let floor_height_bytes =
-                std::slice::from_raw_parts(floor_height.as_ptr().cast::<u8>(), 4);
-            self.device.cmd_push_constants(
-                command,
-                self.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                108,
-                floor_height_bytes,
-            );
-            self.device.cmd_bind_pipeline(
-                command,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.floor_albedo_pipeline,
-            );
-            self.draw_panel(command, projection);
-            self.device.cmd_bind_pipeline(
-                command,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.floor_light_pipeline,
-            );
             for (texture, geometry) in &panels {
                 let pose = geometry.pose;
                 let right = pose.orientation() * Vec3::X;
@@ -1237,7 +1212,12 @@ impl SceneRenderer {
                     &[texture.descriptor],
                     &[],
                 );
-                self.draw_panel(command, projection);
+                self.device.cmd_bind_pipeline(
+                    command,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.floor_light_pipeline,
+                );
+                self.draw_panel(command, sky_matrix(view));
             }
             self.device.cmd_bind_pipeline(
                 command,
@@ -1296,8 +1276,6 @@ impl Drop for SceneRenderer {
         unsafe {
             self.device
                 .destroy_pipeline(self.floor_light_pipeline, None);
-            self.device
-                .destroy_pipeline(self.floor_albedo_pipeline, None);
             self.device.destroy_pipeline(self.sky_pipeline, None);
             self.device.destroy_pipeline(self.cursor_pipeline, None);
             self.device.destroy_pipeline(self.window_pipeline, None);
@@ -1323,8 +1301,6 @@ mod tests {
             ("vertex", naga::ShaderStage::Vertex),
             ("window", naga::ShaderStage::Fragment),
             ("cursor", naga::ShaderStage::Fragment),
-            ("floor_vertex", naga::ShaderStage::Vertex),
-            ("floor_albedo", naga::ShaderStage::Fragment),
             ("floor_light", naga::ShaderStage::Fragment),
         ] {
             assert_eq!(shader(entry, stage).unwrap()[0], 0x0723_0203);

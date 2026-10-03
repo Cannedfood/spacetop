@@ -9,7 +9,7 @@ use crate::{
 struct SceneReadback<'a> {
     renderer: &'a SceneRenderer,
     view: &'a openxr::View,
-    skybox: Option<&'a SkyboxTexture>,
+    skybox: Option<&'a mut SkyboxTexture>,
     panels: &'a [(&'a PanelTexture, PanelGeometry)],
     cursor: Option<PanelPose>,
     floor_y: f32,
@@ -122,7 +122,7 @@ impl Vulkan {
         shared: Option<&SharedImage>,
         size: Size<i32, smithay::utils::Buffer>,
         cursor: Option<(i32, i32)>,
-        scene: Option<SceneReadback<'_>>,
+        mut scene: Option<SceneReadback<'_>>,
     ) -> Result<Vec<u8>> {
         let byte_len = size.w as u64 * size.h as u64 * 4;
         unsafe {
@@ -233,7 +233,7 @@ impl Vulkan {
                     buffer.draw_quad(command, destination);
                 }
             }
-            let target = if let Some(scene) = scene {
+            let target = if let Some(scene) = scene.as_mut() {
                 let target = RenderTarget::new(
                     scene.renderer,
                     destination,
@@ -242,7 +242,11 @@ impl Vulkan {
                         height: size.h as u32,
                     },
                 )?;
-                if let Some(skybox) = scene.skybox.filter(|skybox| skybox.needs_upload()) {
+                if let Some(skybox) = scene
+                    .skybox
+                    .as_deref()
+                    .filter(|skybox| skybox.needs_upload())
+                {
                     skybox.upload(command);
                 }
                 for (texture, _) in scene.panels {
@@ -253,7 +257,7 @@ impl Vulkan {
                     &target,
                     scene.view,
                     &SceneFrame {
-                        skybox: scene.skybox,
+                        skybox: scene.skybox.as_deref(),
                         panels: scene.panels,
                         cursor: scene.cursor,
                         floor_y: scene.floor_y,
@@ -328,6 +332,12 @@ impl Vulkan {
                 vk::Fence::null(),
             )?;
             self.device.queue_wait_idle(queue)?;
+            if let Some(scene) = scene.as_mut()
+                && let Some(skybox) = scene.skybox.as_deref_mut()
+                && skybox.needs_upload()
+            {
+                skybox.upload_complete();
+            }
             let mapped =
                 self.device
                     .map_memory(memory, 0, byte_len, vk::MemoryMapFlags::empty())?;
@@ -508,10 +518,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     };
     let empty = floor_pixels(&[])?;
     let empty_floor_pixel = pixel(&empty, 256, 450);
-    assert!(empty_floor_pixel[0] > 0);
-    assert_eq!(empty_floor_pixel[0], empty_floor_pixel[1]);
-    assert_eq!(empty_floor_pixel[1], empty_floor_pixel[2]);
-    assert_eq!(empty_floor_pixel[3], 255);
+    assert_eq!(empty_floor_pixel, [0, 0, 0, 255]);
     let lit = floor_pixels(&[(&background, emitter)])?;
     let repeated = floor_pixels(&[(&background, emitter)])?;
     assert_eq!(lit, repeated);
@@ -585,10 +592,6 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     assert_eq!(floor_pixel[1], floor_pixel[2]);
     assert_eq!(floor_pixel[3], 255);
     assert_eq!(pixel(&backwards, 256, 450), empty_floor_pixel);
-    assert!(
-        pixel(&lit, 256, 300)[0] < empty_floor_pixel[0],
-        "floor albedo should dim toward grazing angles"
-    );
     let twice = pixel(&doubled, 256, 450);
     let quantization =
         |channel: u8| decode(channel.saturating_add(1)) - decode(channel.saturating_sub(1));
@@ -652,7 +655,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
 fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
     let vulkan = Vulkan::new()?;
     let renderer = SceneRenderer::new(&vulkan.device, vk::Format::R8G8B8A8_SRGB)?;
-    let skybox = SkyboxTexture::new(&renderer, &vulkan.instance, vulkan.physical_device)?;
+    let mut skybox = SkyboxTexture::new(&renderer, &vulkan.instance, vulkan.physical_device)?;
     let view = openxr::View {
         pose: openxr::Posef::IDENTITY,
         fov: openxr::Fovf {
@@ -669,7 +672,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
         Some(SceneReadback {
             renderer: &renderer,
             view: &view,
-            skybox: Some(&skybox),
+            skybox: Some(&mut skybox),
             panels: &[],
             cursor: None,
             floor_y: FALLBACK_FLOOR_Y,
@@ -705,12 +708,12 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires Vulkan DMA-BUF support"]
+#[ignore = "requires Vulkan DMA-BUF support and a configured EXR skybox"]
 fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
     let vulkan = Vulkan::new()?;
     let renderer = SceneRenderer::new(&vulkan.device, vk::Format::R8G8B8A8_SRGB)?;
-    let target = glam::Vec3::new(0.0, FALLBACK_FLOOR_Y, -2.0);
-    let view_at = |eye: glam::Vec3| {
+    let mut skybox = SkyboxTexture::new(&renderer, &vulkan.instance, vulkan.physical_device)?;
+    let view_at = |target: glam::Vec3, eye: glam::Vec3| {
         let orientation =
             glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, (target - eye).normalize());
         let mut view = openxr::View {
@@ -731,7 +734,7 @@ fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
         view.pose.orientation.w = orientation.w;
         view
     };
-    let render = |view: &openxr::View| {
+    let mut render = |view: &openxr::View, floor_y: f32| {
         vulkan.readback_image(
             None,
             (128, 128).into(),
@@ -739,21 +742,45 @@ fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
             Some(SceneReadback {
                 renderer: &renderer,
                 view,
-                skybox: None,
+                skybox: Some(&mut skybox),
                 panels: &[],
                 cursor: None,
-                floor_y: FALLBACK_FLOOR_Y,
+                floor_y,
             }),
         )
     };
-    let head_on = render(&view_at(glam::Vec3::new(0.0, 0.0, -2.0)))?;
-    let grazing = render(&view_at(glam::Vec3::new(5.0, 0.0, -2.0)))?;
+    let head_target = glam::Vec3::new(0.0, FALLBACK_FLOOR_Y, -2.0);
+    let head_view = view_at(head_target, glam::Vec3::new(0.0, 0.0, -2.0));
+    let grazing_view = view_at(head_target, glam::Vec3::new(5.0, 0.0, -2.0));
+    let head_on = render(&head_view, FALLBACK_FLOOR_Y)?;
+    let head_sky = render(&head_view, f32::NAN)?;
+    let grazing = render(&grazing_view, FALLBACK_FLOOR_Y)?;
+    let grazing_sky = render(&grazing_view, f32::NAN)?;
     let center = (64 * 128 + 64) * 4;
+    let decode = |channel: u8| {
+        let encoded = f32::from(channel) / 255.0;
+        if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let recovered_albedo =
+        |floor: &[u8], sky: &[u8]| (decode(floor[center]) - 0.25 * decode(sky[center])) / 0.75;
     assert!(
-        head_on[center] > grazing[center],
+        recovered_albedo(&head_on, &head_sky) > recovered_albedo(&grazing, &grazing_sky),
         "floor albedo should dim at grazing angles: head-on={}, grazing={}",
-        head_on[center],
-        grazing[center]
+        recovered_albedo(&head_on, &head_sky),
+        recovered_albedo(&grazing, &grazing_sky)
+    );
+    let distant_target = glam::Vec3::new(0.0, FALLBACK_FLOOR_Y, -45.0);
+    let distant_view = view_at(distant_target, glam::Vec3::ZERO);
+    let distant_floor = render(&distant_view, FALLBACK_FLOOR_Y)?;
+    let distant_sky = render(&distant_view, f32::NAN)?;
+    assert_ne!(
+        &distant_floor[center..center + 3],
+        &distant_sky[center..center + 3],
+        "ground shading should extend beyond the old 60m floor quad"
     );
     Ok(())
 }
