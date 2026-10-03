@@ -11,6 +11,6 @@ Run from the workspace root:
 cargo run -p spacesettings
 ```
 
-The included desktop entry can be installed to
-`~/.local/share/applications/` after building and installing the `spacesettings`
-binary on `PATH`.
+The included desktop entry is available to SpaceLauncher when started with
+`start.sh`. It can also be installed to `~/.local/share/applications/` after
+building and installing the `spacesettings` binary on `PATH`.

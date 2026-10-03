@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Space Launcher
+Comment=Launch desktop applications in Spacetop
+Exec=spacelauncher
+TryExec=spacelauncher
+Icon=applications-all
+Terminal=false
+Categories=Utility;
