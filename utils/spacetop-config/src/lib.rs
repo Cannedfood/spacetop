@@ -73,6 +73,7 @@ pub struct WindowConfig {
     pub default_distance_m: f32,
     pub pixels_per_degree: f32,
     pub padding_px: f32,
+    pub margin_px: f32,
     pub animation_half_time_s: f32,
     pub collision_margin_m: f32,
     pub border_width_px: f32,
@@ -83,6 +84,22 @@ pub struct WindowConfig {
     pub border_radius_px: f32,
     pub grabbed_border_width_px: f32,
     pub grabbed_border_color: [f32; 4],
+}
+
+impl WindowConfig {
+    pub fn max_border_width_px(&self) -> f32 {
+        self.border_width_px
+            .max(self.cursor_close_border_width_px)
+            .max(self.grabbed_border_width_px)
+    }
+
+    pub fn effective_padding_px(&self) -> f32 {
+        self.padding_px.max(self.max_border_width_px() * 0.5)
+    }
+
+    pub fn effective_margin_px(&self) -> f32 {
+        self.margin_px.max(self.max_border_width_px() * 0.5)
+    }
 }
 
 impl Default for BackgroundConfig {
@@ -156,6 +173,7 @@ impl Default for WindowConfig {
             default_distance_m: DEFAULT_DISTANCE,
             pixels_per_degree: 32.0,
             padding_px: 12.0,
+            margin_px: 4.0,
             animation_half_time_s: 0.2,
             collision_margin_m: 0.04,
             border_width_px: 2.0,
@@ -274,6 +292,7 @@ impl AppConfig {
         );
         for (name, value, maximum) in [
             ("window.padding_px", self.window.padding_px, 500.0),
+            ("window.margin_px", self.window.margin_px, 500.0),
             ("window.border_width_px", self.window.border_width_px, 100.0),
             (
                 "window.cursor_proximity_radius_px",
@@ -486,5 +505,23 @@ mod tests {
         config.window.grabbed_border_width_px = 4.0;
         config.window.grabbed_border_color[0] = f32::NAN;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn clamps_padding_and_margin_to_half_the_widest_border() {
+        let mut config = AppConfig::default();
+        config.window.border_width_px = 6.0;
+        config.window.cursor_close_border_width_px = 10.0;
+        config.window.grabbed_border_width_px = 8.0;
+        config.window.padding_px = 1.0;
+        config.window.margin_px = 2.0;
+
+        assert_eq!(config.window.effective_padding_px(), 5.0);
+        assert_eq!(config.window.effective_margin_px(), 5.0);
+
+        config.window.padding_px = 7.0;
+        config.window.margin_px = 9.0;
+        assert_eq!(config.window.effective_padding_px(), 7.0);
+        assert_eq!(config.window.effective_margin_px(), 9.0);
     }
 }

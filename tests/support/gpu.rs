@@ -392,6 +392,11 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     let vulkan = Vulkan::new()?;
     let mut window_test_config = crate::config::AppConfig::default();
     window_test_config.floor.albedo = [0.0, 0.0, 0.0, 1.0];
+    window_test_config.window.padding_px = 0.0;
+    window_test_config.window.border_radius_px = 0.0;
+    window_test_config.window.border_width_px = 0.0;
+    window_test_config.window.cursor_close_border_width_px = 0.0;
+    window_test_config.window.grabbed_border_width_px = 0.0;
     let mut scene = SceneRenderer::new(
         &vulkan.device,
         &vulkan.instance,
@@ -510,6 +515,48 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     assert_eq!(pixel(&pixels, 200, 300), [0, 0, 255, 255]);
     assert_eq!(pixel(&pixels, 300, 300), [255, 255, 255, 255]);
     assert_eq!(pixel(&pixels, 30, 30), [0, 0, 0, 255]);
+    let single_panel_reference = vulkan.readback_image(
+        None,
+        (512, 512).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &mut scene,
+            view: &view,
+            skybox: Some(&mut skybox),
+            panels: &[(&background, near)],
+            cursor: None,
+            floor_y: FALLBACK_FLOOR_Y,
+        }),
+    )?;
+    let mut translucent_border_config = window_test_config.clone();
+    translucent_border_config.window.border_width_px = 2.0;
+    translucent_border_config.window.border_color = [1.0, 0.0, 0.0, 0.5];
+    scene.update_config(&translucent_border_config)?;
+    let translucent_pixels = vulkan.readback_image(
+        None,
+        (512, 512).into(),
+        None,
+        Some(SceneReadback {
+            renderer: &mut scene,
+            view: &view,
+            skybox: Some(&mut skybox),
+            panels: &[(&background, near)],
+            cursor: None,
+            floor_y: FALLBACK_FLOOR_Y,
+        }),
+    )?;
+    let outer_translucent_border = (0..512)
+        .flat_map(|vertical| (0..512).map(move |horizontal| (horizontal, vertical)))
+        .find(|(horizontal, vertical)| {
+            pixel(&single_panel_reference, *horizontal, *vertical) == [0, 0, 0, 255]
+                && (180..=195).contains(&pixel(&translucent_pixels, *horizontal, *vertical)[0])
+                && pixel(&translucent_pixels, *horizontal, *vertical)[1..3] == [0, 0]
+        });
+    assert!(
+        outer_translucent_border.is_some(),
+        "half-alpha red border should extend and blend outside the original window bounds"
+    );
+    scene.update_config(&window_test_config)?;
     let cross = pixel(&pixels, 255, 255);
     assert_eq!(cross[0], 255);
     assert!(cross[1].abs_diff(245) <= 1);
@@ -560,6 +607,24 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     let empty_floor_pixel = pixel(&empty, 256, 450);
     assert_eq!(empty_floor_pixel, [0, 0, 0, 255]);
     let lit = floor_pixels(&mut scene, &mut skybox, &[(&background, emitter)])?;
+    let reflection_pixel_count = |pixels: &[u8]| {
+        (430..512)
+            .flat_map(|vertical| (0..512).map(move |horizontal| (horizontal, vertical)))
+            .filter(|(horizontal, vertical)| {
+                pixel(pixels, *horizontal, *vertical) != pixel(&empty, *horizontal, *vertical)
+            })
+            .count()
+    };
+    let full_content_reflections = reflection_pixel_count(&lit);
+    let mut padded_config = window_test_config.clone();
+    padded_config.window.padding_px = 12.0;
+    scene.update_config(&padded_config)?;
+    let padded_lit = floor_pixels(&mut scene, &mut skybox, &[(&background, emitter)])?;
+    assert!(
+        reflection_pixel_count(&padded_lit) < full_content_reflections,
+        "reflection rays should ignore panel padding"
+    );
+    scene.update_config(&window_test_config)?;
     let mut brighter_sky_config = window_test_config.clone();
     brighter_sky_config.background.brightness_stops = 2.0;
     scene.update_config(&brighter_sky_config)?;

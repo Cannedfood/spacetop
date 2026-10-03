@@ -34,6 +34,20 @@ fn edge_resize_preserves_the_existing_scale_for_small_size_changes() {
 }
 
 #[test]
+fn pixel_grab_margin_accepts_hits_just_outside_panel_bounds() {
+    let geometry = panel();
+    let ray = Ray3 {
+        origin: Vec3::new(-0.505, 0.0, -2.0),
+        direction: Vec3::NEG_Z,
+    };
+
+    assert!(geometry.intersect(ray).is_none());
+    let hit = geometry.intersect_with_margin_px(ray, 6.0).unwrap();
+    assert!((hit.surface_px.x + 5.0).abs() < 0.001);
+    assert!(geometry.intersect_with_margin_px(ray, 4.0).is_none());
+}
+
+#[test]
 fn padded_content_coordinates_match_displayed_corners_and_center() {
     let geometry = panel();
     for (point, expected) in [

@@ -26,6 +26,7 @@ struct Window {
     center_width: vec4<f32>,
     right_height: vec4<f32>,
     up: vec4<f32>,
+    content_rect: vec4<f32>,
 }
 struct WindowBuffer {
     count: u32,
@@ -106,12 +107,19 @@ fn rounded_box_distance(point: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
     let q = abs(point - half_size) - (half_size - vec2(radius));
     return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
 }
+fn largest_border_width() -> f32 {
+    return max(
+        max(floor_material.window_style.y, floor_material.window_style.w),
+        floor_material.grabbed_style.x,
+    );
+}
 @fragment fn window(input: Vertex) -> @location(0) vec4<f32> {
-    let size = max(transform.eye_position.xy, vec2(1.0));
-    let point = input.uv * size;
+    let expanded_size = max(transform.eye_position.xy, vec2(1.0));
+    let largest_border = largest_border_width();
+    let size = max(expanded_size - vec2(largest_border), vec2(1.0));
+    let point = input.uv * expanded_size - vec2(largest_border * 0.5);
     let radius = min(floor_material.window_style.z, min(size.x, size.y) * 0.5);
     let outer_distance = rounded_box_distance(point, size, radius);
-    if outer_distance > 0.0 { discard; }
 
     let close_distance = length(point - transform.emitter_center_width.xy);
     let proximity_radius = max(floor_material.grabbed_style.y, 0.001);
@@ -135,11 +143,15 @@ fn rounded_box_distance(point: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
         border_width = floor_material.grabbed_style.x;
         border_color = floor_material.grabbed_border_color;
     }
-    if border_width > 0.0 && outer_distance >= -border_width {
-        return border_color;
+    if border_width > 0.0 && abs(outer_distance) <= border_width * 0.5 {
+        return vec4(border_color.rgb * border_color.a, border_color.a);
     }
+    if outer_distance > border_width * 0.5 { discard; }
 
-    let padding = min(floor_material.window_style.x, (min(size.x, size.y) - 1.0) * 0.5);
+    let padding = min(
+        max(floor_material.window_style.x, largest_border * 0.5),
+        (min(size.x, size.y) - 1.0) * 0.5,
+    );
     let content_size = max(size - vec2(2.0 * padding), vec2(1.0));
     let content_point = point - vec2(padding);
     let content_radius = max(radius - padding, 0.0);
@@ -205,7 +217,11 @@ fn nearest_window_hit(origin: vec3<f32>, ray: vec3<f32>, minimum_distance: f32) 
         let hit = origin + ray * distance - center;
         let uv = vec2(dot(hit, right) / width + 0.5, 0.5 - dot(hit, up) / height);
         if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) { continue; }
-        nearest = WindowHit(distance, index, uv, true);
+        let content_min = window.content_rect.xy;
+        let content_max = window.content_rect.zw;
+        if any(uv < content_min) || any(uv > content_max) { continue; }
+        let content_uv = (uv - content_min) / (content_max - content_min);
+        nearest = WindowHit(distance, index, content_uv, true);
     }
     return nearest;
 }

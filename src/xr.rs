@@ -669,7 +669,8 @@ pub fn run(
                                     != config.window.default_distance_m
                                     || next_config.window.pixels_per_degree
                                         != config.window.pixels_per_degree
-                                    || next_config.window.padding_px != config.window.padding_px;
+                                    || next_config.window.effective_padding_px()
+                                        != config.window.effective_padding_px();
                                 if window_config_changed
                                     && let Err(error) = input.send(XrInput::ConfigReloaded {
                                         default_window_distance: next_config
@@ -678,7 +679,9 @@ pub fn run(
                                         window_pixels_per_degree: next_config
                                             .window
                                             .pixels_per_degree,
-                                        window_padding_px: next_config.window.padding_px,
+                                        window_padding_px: next_config
+                                            .window
+                                            .effective_padding_px(),
                                     })
                                 {
                                     eprintln!(
@@ -960,7 +963,13 @@ pub fn run(
                             panel_frames
                                 .iter()
                                 .filter_map(|(id, panel)| {
-                                    panel.geometry.intersect(ray).map(|hit| (*id, hit))
+                                    panel
+                                        .geometry
+                                        .intersect_with_margin_px(
+                                            ray,
+                                            config.window.effective_margin_px(),
+                                        )
+                                        .map(|hit| (*id, hit))
                                 })
                                 .min_by(|(_, first), (_, second)| {
                                     first.distance_m.total_cmp(&second.distance_m)

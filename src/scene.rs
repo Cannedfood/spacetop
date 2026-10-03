@@ -123,6 +123,17 @@ fn model(geometry: PanelGeometry) -> Mat4 {
     )
 }
 
+fn expanded_window_model(geometry: PanelGeometry, border_width_px: f32) -> Mat4 {
+    let pixels_per_meter = geometry.logical_size.w as f32 / geometry.pose.width_m;
+    let width_m = (geometry.logical_size.w as f32 + border_width_px) / pixels_per_meter;
+    let height_m = (geometry.logical_size.h as f32 + border_width_px) / pixels_per_meter;
+    Mat4::from_scale_rotation_translation(
+        Vec3::new(width_m, height_m, 1.0),
+        geometry.pose.orientation(),
+        geometry.pose.center,
+    )
+}
+
 fn image_range(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
         .aspect_mask(aspect)
@@ -696,6 +707,8 @@ pub(crate) struct SceneRenderer {
     environment_first_hit_pipeline: vk::Pipeline,
     environment_transparent_pipeline: vk::Pipeline,
     trace_through_transparent_windows: bool,
+    window_padding_px: f32,
+    max_border_width_px: f32,
 }
 
 pub(crate) struct SceneFrame<'a> {
@@ -726,6 +739,7 @@ struct WindowGpuData {
     center_width: [f32; 4],
     right_height: [f32; 4],
     up: [f32; 4],
+    content_rect: [f32; 4],
 }
 
 #[repr(C, align(16))]
@@ -808,6 +822,8 @@ impl SceneRenderer {
             environment_first_hit_pipeline: vk::Pipeline::null(),
             environment_transparent_pipeline: vk::Pipeline::null(),
             trace_through_transparent_windows: config.floor.trace_through_transparent_windows,
+            window_padding_px: config.window.effective_padding_px(),
+            max_border_width_px: config.window.max_border_width_px(),
         };
         let attachments = [
             vk::AttachmentDescription::default()
@@ -1043,6 +1059,8 @@ impl SceneRenderer {
 
     pub fn update_config(&mut self, config: &AppConfig) -> Result<()> {
         self.trace_through_transparent_windows = config.floor.trace_through_transparent_windows;
+        self.window_padding_px = config.window.effective_padding_px();
+        self.max_border_width_px = config.window.max_border_width_px();
         let uniform = FloorUniform::from(config);
         unsafe {
             let mapped = self.device.map_memory(
@@ -1179,10 +1197,23 @@ impl SceneRenderer {
                 let up = pose.orientation() * Vec3::Y;
                 let height =
                     pose.width_m * geometry.logical_size.h as f32 / geometry.logical_size.w as f32;
+                let size = [
+                    geometry.logical_size.w.max(1) as f32,
+                    geometry.logical_size.h.max(1) as f32,
+                ];
+                let padding = self
+                    .window_padding_px
+                    .min((size[0].min(size[1]) - 1.0).max(0.0) * 0.5);
                 WindowGpuData {
                     center_width: [pose.center.x, pose.center.y, pose.center.z, pose.width_m],
                     right_height: [right.x, right.y, right.z, height],
                     up: [up.x, up.y, up.z, 0.0],
+                    content_rect: [
+                        padding / size[0],
+                        padding / size[1],
+                        1.0 - padding / size[0],
+                        1.0 - padding / size[1],
+                    ],
                 }
             })
             .collect::<Vec<_>>();
@@ -1521,8 +1552,8 @@ impl SceneRenderer {
                     64,
                     cursor_position_bytes,
                 );
-                eye[0] = geometry.logical_size.w as f32;
-                eye[1] = geometry.logical_size.h as f32;
+                eye[0] = geometry.logical_size.w as f32 + self.max_border_width_px;
+                eye[1] = geometry.logical_size.h as f32 + self.max_border_width_px;
                 eye[2] = if frame.grabbed_panel == Some(geometry) {
                     1.0
                 } else {
@@ -1545,7 +1576,10 @@ impl SceneRenderer {
                     &[texture.descriptor],
                     &[],
                 );
-                self.draw_panel(command, projection * model(geometry));
+                self.draw_panel(
+                    command,
+                    projection * expanded_window_model(geometry, self.max_border_width_px),
+                );
             }
             if let Some(mut pose) = frame.cursor {
                 pose.center += pose.orientation() * Vec3::Z * 0.001;
@@ -1737,5 +1771,26 @@ mod tests {
         let top_left = transform.project_point3(Vec3::new(-0.5, 0.5, 0.0));
         assert!((top_left.x + 0.5).abs() < 1.0e-5);
         assert!((top_left.y + 0.25).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn expanded_border_grows_equally_around_panel_center() {
+        let geometry = PanelGeometry {
+            pose: PanelPose {
+                center: Vec3::new(0.2, 0.3, -2.0),
+                width_m: 2.0,
+                ..PanelPose::for_slot(0)
+            },
+            logical_size: (200, 100).into(),
+        };
+        let expanded = expanded_window_model(geometry, 4.0);
+        let center = expanded.transform_point3(Vec3::ZERO);
+        let left = expanded.transform_point3(Vec3::new(-0.5, 0.0, 0.0));
+        let right = expanded.transform_point3(Vec3::new(0.5, 0.0, 0.0));
+        assert!((center - geometry.pose.center).length() < 1.0e-5);
+        assert!(
+            (geometry.pose.center.x - left.x - (right.x - geometry.pose.center.x)).abs() < 1.0e-5
+        );
+        assert!((right.x - left.x - 2.04).abs() < 1.0e-5);
     }
 }

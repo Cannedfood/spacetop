@@ -56,6 +56,7 @@ enum Message {
     WindowDistanceChanged(String),
     WindowPixelsPerDegreeChanged(String),
     WindowPaddingChanged(f32),
+    WindowMarginChanged(f32),
     WindowAnimationHalfTimeChanged(f32),
     WindowCollisionMarginChanged(f32),
     WindowBorderWidthChanged(f32),
@@ -140,6 +141,7 @@ impl SettingsApp {
                 | Message::WindowDistanceChanged(_)
                 | Message::WindowPixelsPerDegreeChanged(_)
                 | Message::WindowPaddingChanged(_)
+                | Message::WindowMarginChanged(_)
                 | Message::WindowAnimationHalfTimeChanged(_)
                 | Message::WindowCollisionMarginChanged(_)
                 | Message::WindowBorderWidthChanged(_)
@@ -229,6 +231,7 @@ impl SettingsApp {
             Message::WindowDistanceChanged(value) => self.window_distance = value,
             Message::WindowPixelsPerDegreeChanged(value) => self.window_pixels_per_degree = value,
             Message::WindowPaddingChanged(value) => self.config.window.padding_px = value,
+            Message::WindowMarginChanged(value) => self.config.window.margin_px = value,
             Message::WindowAnimationHalfTimeChanged(value) => {
                 self.config.window.animation_half_time_s = value
             }
@@ -679,6 +682,14 @@ impl SettingsApp {
                     500.0,
                     1.0,
                     Message::WindowPaddingChanged,
+                ),
+                slider_row(
+                    "GRAB MARGIN (PX)",
+                    self.config.window.margin_px,
+                    0.0,
+                    500.0,
+                    1.0,
+                    Message::WindowMarginChanged,
                 ),
                 slider_row(
                     "BORDER RADIUS (PX)",
