@@ -69,6 +69,15 @@ Floor albedo, roughness, reflectance, and transparency must be between `0` and
 `1`; `ray_count` must be between `1` and `64`; window and cursor distances must
 be between `0.1` and `100` meters.
 
+Edit the configuration with the standalone settings app:
+
+```sh
+cargo run -p spacesettings
+```
+
+Saving replaces the file atomically; a running Spacetop instance picks up the
+new settings automatically.
+
 ## Keyboard And Pointer Input
 
 Point with the right controller and pull the trigger to click. Secondary click

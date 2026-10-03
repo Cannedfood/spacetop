@@ -15,7 +15,8 @@ use crate::{
     panel::{PanelGeometry, PanelPose},
 };
 
-pub(crate) const FALLBACK_FLOOR_Y: f32 = -1.3;
+#[cfg(test)]
+pub(crate) const FALLBACK_FLOOR_Y: f32 = spacetop_config::FALLBACK_FLOOR_HEIGHT;
 
 const SHADER: &str = include_str!("scene.wgsl");
 

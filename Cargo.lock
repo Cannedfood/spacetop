@@ -3984,6 +3984,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "spacesettings"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "spacetop-config",
+]
+
+[[package]]
 name = "spacetop"
 version = "0.1.0"
 dependencies = [
@@ -3996,12 +4004,22 @@ dependencies = [
  "image",
  "naga 29.0.4",
  "openxr",
- "serde",
  "smithay",
+ "spacetop-config",
  "tempfile",
  "toml",
  "wayland-client",
  "wayland-protocols",
+]
+
+[[package]]
+name = "spacetop-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

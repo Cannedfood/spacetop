@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Space Settings
+Comment=Configure Spacetop
+Exec=spacesettings
+TryExec=spacesettings
+Icon=preferences-system
+Terminal=false
+Categories=Settings;
