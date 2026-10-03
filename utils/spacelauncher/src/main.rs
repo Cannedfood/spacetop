@@ -20,8 +20,8 @@ const TILE_HOVER: Color = Color::from_rgba(0.19, 0.26, 0.36, 0.94);
 
 #[derive(Debug, Clone)]
 struct AppEntry {
-    id: String,
     name: String,
+    search_text: String,
     icon: Option<PathBuf>,
     command: Vec<String>,
     working_directory: Option<PathBuf>,
@@ -70,11 +70,7 @@ impl Launcher {
         let query = self.query.trim().to_lowercase();
         self.apps
             .iter()
-            .filter(|app| {
-                query.is_empty()
-                    || app.name.to_lowercase().contains(&query)
-                    || app.id.to_lowercase().contains(&query)
-            })
+            .filter(|app| query.is_empty() || app.search_text.contains(&query))
             .collect()
     }
 
@@ -225,9 +221,24 @@ fn app_from_desktop_entry(
         return None;
     }
 
+    let mut search_terms = vec![name.clone(), entry.id().to_owned()];
+    if let Some(generic_name) = entry.generic_name(locales) {
+        search_terms.push(generic_name.into_owned());
+    }
+    if let Some(keywords) = entry.keywords(locales) {
+        search_terms.extend(keywords.into_iter().map(|keyword| keyword.into_owned()));
+    }
+    // Include both parsed command tokens (the executable and arguments) and the
+    // original Exec value so users can find apps by executable or command name.
+    search_terms.extend(command.iter().cloned());
+    if let Some(exec) = entry.exec() {
+        search_terms.push(exec.to_owned());
+    }
+    let search_text = search_terms.join(" ").to_lowercase();
+
     Some(AppEntry {
-        id: entry.id().to_owned(),
         name,
+        search_text,
         icon: entry.icon().and_then(find_icon),
         command,
         working_directory: entry.path().map(PathBuf::from),
