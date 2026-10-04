@@ -20,7 +20,6 @@ fn result_id(index: usize) -> String {
 
 const ACCENT: Color = Color::from_rgb(0.40, 0.78, 0.98);
 const TEXT: Color = Color::from_rgb(0.94, 0.96, 1.0);
-const MUTED: Color = Color::from_rgb(0.66, 0.72, 0.81);
 const GLASS: Color = Color::from_rgba(0.035, 0.055, 0.09, 0.50);
 const TILE: Color = Color::from_rgba(0.12, 0.16, 0.23, 0.76);
 const TILE_HOVER: Color = Color::from_rgba(0.19, 0.26, 0.36, 0.94);
