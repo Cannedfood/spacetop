@@ -317,7 +317,19 @@ fn add_device(
                                     dispatch_code(compositor, code, down, time_ms);
                                 }
                             } else if event.event_type() == EventType::RELATIVE {
-                                if event.code() == RelativeAxisCode::REL_WHEEL.0 {
+                                if event.code() == RelativeAxisCode::REL_X.0 {
+                                    compositor.dispatch_mouse_motion(
+                                        event.value() as f32,
+                                        0.0,
+                                        time_ms,
+                                    );
+                                } else if event.code() == RelativeAxisCode::REL_Y.0 {
+                                    compositor.dispatch_mouse_motion(
+                                        0.0,
+                                        event.value() as f32,
+                                        time_ms,
+                                    );
+                                } else if event.code() == RelativeAxisCode::REL_WHEEL.0 {
                                     compositor.dispatch_wheel(false, event.value(), time_ms);
                                 } else if event.code() == RelativeAxisCode::REL_HWHEEL.0 {
                                     compositor.dispatch_wheel(true, event.value(), time_ms);

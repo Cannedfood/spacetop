@@ -2,7 +2,11 @@ use std::{ffi::OsString, sync::Arc, thread};
 
 use smithay::{
     reexports::{
-        calloop::{EventLoop, Interest, Mode as PollMode, PostAction, generic::Generic},
+        calloop::{
+            EventLoop, Interest, Mode as PollMode, PostAction,
+            generic::Generic,
+            timer::{TimeoutAction, Timer},
+        },
         wayland_server::Display,
     },
     wayland::socket::ListeningSocketSource,
@@ -106,6 +110,16 @@ pub fn run(
             Ok(PostAction::Continue)
         },
     )?;
+    event_loop
+        .handle()
+        .insert_source(
+            Timer::from_duration(std::time::Duration::from_millis(100)),
+            |_, _, compositor| {
+                compositor.hide_idle_mouse_cursor();
+                TimeoutAction::ToDuration(std::time::Duration::from_millis(100))
+            },
+        )
+        .map_err(|error| anyhow::anyhow!("register mouse cursor idle timer: {error}"))?;
     let signal = event_loop.get_signal();
     event_loop.run(None, &mut compositor, |compositor| {
         compositor.finish_dispatch(&signal)

@@ -19,7 +19,11 @@ pub enum XrInput {
     FrameTick,
     Ray {
         ray: Ray3,
+        gaze_ray: Option<Ray3>,
         time_ms: u32,
+    },
+    GazeRay {
+        ray: Ray3,
     },
     Button {
         button: u32,
@@ -136,32 +140,53 @@ pub enum PanelUpdate {
     },
 }
 
-pub struct PanelSender(Arc<Mutex<BTreeMap<u64, PanelUpdate>>>);
+#[derive(Clone, Copy, Debug)]
+pub struct CursorState {
+    pub mouse_controlled: bool,
+    pub pose: Option<PanelPose>,
+}
 
-pub struct PanelReceiver(Arc<Mutex<BTreeMap<u64, PanelUpdate>>>);
+#[derive(Clone)]
+pub struct PanelSender {
+    updates: Arc<Mutex<BTreeMap<u64, PanelUpdate>>>,
+    cursor: Arc<Mutex<Option<CursorState>>>,
+}
+
+pub struct PanelReceiver {
+    updates: Arc<Mutex<BTreeMap<u64, PanelUpdate>>>,
+    cursor: Arc<Mutex<Option<CursorState>>>,
+}
 
 impl PanelSender {
     pub fn publish(&self, update: PanelUpdate) {
         let panel_id = match &update {
             PanelUpdate::GpuFrame { panel_id, .. } | PanelUpdate::Removed { panel_id } => *panel_id,
         };
-        self.0
+        self.updates
             .lock()
             .expect("panel updates lock")
             .insert(panel_id, update);
+    }
+
+    pub fn publish_cursor(&self, cursor: CursorState) {
+        *self.cursor.lock().expect("cursor state lock") = Some(cursor);
     }
 }
 
 impl PanelReceiver {
     pub fn drain(&self) -> Vec<PanelUpdate> {
-        std::mem::take(&mut *self.0.lock().expect("panel updates lock"))
+        std::mem::take(&mut *self.updates.lock().expect("panel updates lock"))
             .into_values()
             .collect()
     }
 
+    pub fn take_cursor(&self) -> Option<CursorState> {
+        self.cursor.lock().expect("cursor state lock").take()
+    }
+
     #[cfg(test)]
     pub fn try_recv(&self) -> Result<PanelUpdate, TryRecvError> {
-        self.0
+        self.updates
             .lock()
             .expect("panel updates lock")
             .pop_first()
@@ -171,8 +196,15 @@ impl PanelReceiver {
 }
 
 pub fn panel_channel() -> (PanelSender, PanelReceiver) {
-    let pending = Arc::new(Mutex::new(BTreeMap::new()));
-    (PanelSender(pending.clone()), PanelReceiver(pending))
+    let updates = Arc::new(Mutex::new(BTreeMap::new()));
+    let cursor = Arc::new(Mutex::new(None));
+    (
+        PanelSender {
+            updates: updates.clone(),
+            cursor: cursor.clone(),
+        },
+        PanelReceiver { updates, cursor },
+    )
 }
 
 pub fn input_channel() -> (InputSender, Channel<XrInput>) {

@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::bridge::{PanelReceiver, PanelUpdate, XrInput};
+use crate::bridge::{CursorState, PanelReceiver, PanelUpdate, XrInput};
 use crate::config::{AppConfig, ConfigWatcher};
 use crate::gpu::{self, SharedImage};
 use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3, dodge_windows};
@@ -631,6 +631,7 @@ pub fn run(
     let mut timings = crate::timing::Timings::new();
     let mut last_config_check = Instant::now();
     let mut rendered_frame_index = 0_u32;
+    let mut mouse_cursor_state: Option<CursorState> = None;
 
     while !exit {
         if last_config_check.elapsed() >= Duration::from_millis(250) {
@@ -735,6 +736,9 @@ pub fn run(
         // Drain compositor-to-XR panel snapshots without blocking the XR frame loop.
         timings.reset_external();
         let updates_started = Instant::now();
+        if let Some(cursor) = frames.take_cursor() {
+            mouse_cursor_state = Some(cursor);
+        }
         let updates = frames.drain();
         for update in &updates {
             if let PanelUpdate::Removed { panel_id } = update {
@@ -840,6 +844,7 @@ pub fn run(
             }
             floor_y = tracked_floor_height(floor_y, location);
         }
+        let mut gaze_ray = None;
         if view_state.contains(xr::ViewStateFlags::POSITION_VALID) && !views.is_empty() {
             grab_player_position = views
                 .iter()
@@ -856,6 +861,12 @@ pub fn run(
             let orientation =
                 glam::Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w);
             let look_direction = orientation * glam::Vec3::NEG_Z;
+            if view_state.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+                gaze_ray = Some(Ray3 {
+                    origin: grab_player_position,
+                    direction: look_direction,
+                });
+            }
             for panel_id in std::mem::take(&mut pending_spawn) {
                 if let Some(panel) = panel_frames.get_mut(&panel_id) {
                     let mut pose = PanelPose::facing_player(
@@ -881,6 +892,7 @@ pub fn run(
             session.sync_actions(&[xr::ActiveActionSet::new(&action_set)])
         })?;
         let mut tracked_this_frame = false;
+        let time_ms = (frame_state.predicted_display_time.as_nanos() / 1_000_000) as u32;
         if timings.measure("openxr/action-state", Duration::ZERO, || {
             aim_action.is_active(&session, right_hand)
         })? {
@@ -907,9 +919,9 @@ pub fn run(
                     origin: glam::Vec3::new(pose.position.x, pose.position.y, pose.position.z),
                     direction,
                 });
-                let time_ms = (frame_state.predicted_display_time.as_nanos() / 1_000_000) as u32;
                 let _ = input.try_send(XrInput::Ray {
                     ray: cursor_ray.expect("ray assigned above"),
+                    gaze_ray,
                     time_ms,
                 });
                 let resize_reach_px = config.window.grab_reach_px();
@@ -1139,6 +1151,7 @@ pub fn run(
                     if down != *previous {
                         input.send(XrInput::Ray {
                             ray: cursor_ray.expect("tracked ray assigned"),
+                            gaze_ray,
                             time_ms,
                         })?;
                         input.send(XrInput::Button {
@@ -1183,14 +1196,15 @@ pub fn run(
             resize_geometry = None;
             resize_requested_size = None;
             if pointer_tracked {
-                input.send(XrInput::PointerLost {
-                    time_ms: (frame_state.predicted_display_time.as_nanos() / 1_000_000) as u32,
-                })?;
+                input.send(XrInput::PointerLost { time_ms })?;
                 trigger_pressed = false;
                 secondary_pressed = false;
             }
         }
         pointer_tracked = tracked_this_frame;
+        if !tracked_this_frame && let Some(ray) = gaze_ray {
+            let _ = input.try_send(XrInput::GazeRay { ray });
+        }
         let active_panel = grabbed_panel.or(resizing_panel);
         if let Some(panel_id) = active_panel {
             update_dodge_targets(
@@ -1234,14 +1248,20 @@ pub fn run(
             continue;
         }
 
-        let cursor_scene_pose = cursor_ray.and_then(|ray| {
-            cursor_pose(
-                ray,
-                grab_player_position,
-                panel_frames.values().map(|panel| panel.geometry),
-                &mut cursor_sphere_radius,
-            )
-        });
+        let cursor_scene_pose = match mouse_cursor_state {
+            Some(CursorState {
+                mouse_controlled: true,
+                pose,
+            }) => pose,
+            _ => cursor_ray.and_then(|ray| {
+                cursor_pose(
+                    ray,
+                    grab_player_position,
+                    panel_frames.values().map(|panel| panel.geometry),
+                    &mut cursor_sphere_radius,
+                )
+            }),
+        };
         let panel_draws = panel_frames
             .values()
             .map(|panel| (&panel.texture, panel.geometry))

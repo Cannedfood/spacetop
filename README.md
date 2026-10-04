@@ -124,11 +124,15 @@ devices must be accessible at startup; after startup they are retried if
 disconnected. Prefer stable `/dev/input/by-id/` paths for reconnection. Set
 `SPACETOP_INPUT_DEVICES` to an empty string to disable physical input.
 Multiple device paths can be separated with `:`; mouse devices supply buttons and wheel input
-at the controller's current pointer location, not relative mouse movement.
+and relative movement. Moving the mouse takes over the XR pointer at the
+headset's view center; subsequent mouse movement steers it. Noticeable
+controller movement takes control back. The mouse-controlled cursor hides after
+two seconds without mouse movement. Buttons and wheel input use the active
+pointer location.
 Use `XKB_DEFAULT_LAYOUT`, `XKB_DEFAULT_VARIANT`, and `XKB_DEFAULT_OPTIONS` to
 configure typing. Devices are not grabbed exclusively: the host desktop can
 receive the same input, even while interacting with XR windows. Automatic
 discovery excludes devices not classified as keyboards or mice, such as
 gamepads and touchpads. Do not run the compositor as root or grant blanket
-access to every input device. An XR virtual keyboard and physical mouse-motion
-mapping are not implemented.
+access to every input device. An XR virtual keyboard and relative-pointer
+protocol support are not implemented.

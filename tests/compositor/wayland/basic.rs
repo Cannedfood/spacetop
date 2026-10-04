@@ -276,3 +276,61 @@ pub(super) fn exercise(app: &mut WaylandApp) {
     assert!(client.modifier_masks.iter().any(|mask| *mask != 0));
     assert_eq!(client.modifier_masks.last(), Some(&0));
 }
+
+#[test]
+fn mouse_and_controller_take_over_the_pointer_by_moving() {
+    let mut app = WaylandApp::new(None);
+    let geometry = app.compositor.panels[0].geometry.unwrap();
+    let gaze = Ray3 {
+        origin: Vec3::ZERO,
+        direction: geometry.pose.center.normalize(),
+    };
+    app.compositor.dispatch_controller_ray(gaze, Some(gaze), 1);
+    app.compositor.dispatch_mouse_motion(1.0, 0.0, 2);
+    let cursor = app.receiver.take_cursor().unwrap();
+    assert!(cursor.mouse_controlled);
+    assert!(cursor.pose.is_some());
+
+    let pointer = app.compositor.seat.get_pointer().unwrap();
+    let initial_location = pointer.current_location();
+    app.compositor.dispatch_mouse_motion(10.0, 0.0, 3);
+    let moved_location = pointer.current_location();
+    assert_ne!(moved_location, initial_location);
+    assert!(app.receiver.take_cursor().unwrap().mouse_controlled);
+    app.compositor.dispatch_button(true, 4);
+    app.compositor.dispatch_button(false, 5);
+    app.compositor.dispatch_scroll(-7.0, 6);
+    app.compositor.flush_clients();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert_eq!(app.client.buttons.len(), 2);
+    assert_eq!(app.client.axis_values, vec![-7.0]);
+
+    app.compositor.dispatch_controller_ray(gaze, None, 4);
+    assert_eq!(pointer.current_location(), moved_location);
+    assert!(app.receiver.take_cursor().is_none());
+
+    let controller_move = Ray3 {
+        direction: (gaze.direction + Vec3::X * 0.1).normalize(),
+        ..gaze
+    };
+    app.compositor
+        .dispatch_controller_ray(controller_move, None, 5);
+    let cursor = app.receiver.take_cursor().unwrap();
+    assert!(!cursor.mouse_controlled);
+    assert!(cursor.pose.is_none());
+
+    app.compositor.dispatch_mouse_motion(1.0, 0.0, 6);
+    app.compositor.mouse_last_moved = Some(
+        std::time::Instant::now() - crate::MOUSE_CURSOR_IDLE - std::time::Duration::from_millis(1),
+    );
+    app.compositor.hide_idle_mouse_cursor();
+    let cursor = app.receiver.take_cursor().unwrap();
+    assert!(cursor.mouse_controlled);
+    assert!(cursor.pose.is_none());
+}

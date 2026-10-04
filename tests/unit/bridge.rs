@@ -10,6 +10,7 @@ fn reliable_input_bypasses_motion_capacity_and_preserves_order() {
                     origin: glam::Vec3::ZERO,
                     direction: glam::Vec3::NEG_Z,
                 },
+                gaze_ray: None,
                 time_ms,
             })
             .unwrap();

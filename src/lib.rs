@@ -72,6 +72,14 @@ use smithay::{
 };
 use x11::PanelSurface;
 
+const MOUSE_CURSOR_IDLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CursorSource {
+    Controller,
+    Mouse,
+}
+
 #[derive(Default)]
 struct ClientState {
     compositor: CompositorClientState,
@@ -122,6 +130,13 @@ struct Compositor {
     xr_buttons: BTreeSet<u32>,
     key_counts: BTreeMap<u32, usize>,
     button_counts: BTreeMap<u32, usize>,
+    gaze_ray: Option<Ray3>,
+    controller_ray: Option<Ray3>,
+    mouse_base_ray: Option<Ray3>,
+    mouse_angles: glam::Vec2,
+    cursor_source: CursorSource,
+    mouse_last_moved: Option<Instant>,
+    mouse_cursor_visible: bool,
     ready_callback: Option<runtime::ReadyCallback>,
     dirty_panels: BTreeSet<u64>,
     frame_requested: bool,
@@ -156,8 +171,16 @@ impl Compositor {
                 self.frame_requested = true;
                 Ok(())
             }
-            XrInput::Ray { ray, time_ms } => {
-                self.dispatch_ray(ray, time_ms);
+            XrInput::Ray {
+                ray,
+                gaze_ray,
+                time_ms,
+            } => {
+                self.dispatch_controller_ray(ray, gaze_ray, time_ms);
+                Ok(())
+            }
+            XrInput::GazeRay { ray } => {
+                self.gaze_ray = Some(ray);
                 Ok(())
             }
             XrInput::Button {
@@ -179,7 +202,9 @@ impl Compositor {
                 for button in std::mem::take(&mut self.xr_buttons) {
                     self.dispatch_pointer_button(button, false, time_ms);
                 }
-                if let Some(pointer) = self.seat.get_pointer() {
+                if self.cursor_source == CursorSource::Controller
+                    && let Some(pointer) = self.seat.get_pointer()
+                {
                     pointer.motion(
                         self,
                         None,
@@ -377,6 +402,13 @@ impl Compositor {
             xr_buttons: BTreeSet::new(),
             key_counts: BTreeMap::new(),
             button_counts: BTreeMap::new(),
+            gaze_ray: None,
+            controller_ray: None,
+            mouse_base_ray: None,
+            mouse_angles: glam::Vec2::ZERO,
+            cursor_source: CursorSource::Controller,
+            mouse_last_moved: None,
+            mouse_cursor_visible: false,
             ready_callback: None,
             dirty_panels: BTreeSet::new(),
             frame_requested: false,
@@ -711,6 +743,118 @@ impl Compositor {
         );
         pointer.frame(self);
         hit.is_some()
+    }
+
+    fn dispatch_controller_ray(&mut self, ray: Ray3, gaze_ray: Option<Ray3>, time_ms: u32) {
+        if let Some(gaze_ray) = gaze_ray {
+            self.gaze_ray = Some(gaze_ray);
+        }
+        let moved = self
+            .controller_ray
+            .is_some_and(|previous| ray_moved(previous, ray));
+        self.controller_ray = Some(ray);
+        if self.cursor_source == CursorSource::Mouse && moved {
+            self.cursor_source = CursorSource::Controller;
+            self.mouse_cursor_visible = false;
+            self.frame_sender.publish_cursor(bridge::CursorState {
+                mouse_controlled: false,
+                pose: None,
+            });
+        }
+        if self.cursor_source == CursorSource::Controller {
+            self.dispatch_ray(ray, time_ms);
+        }
+    }
+
+    fn dispatch_mouse_motion(&mut self, dx: f32, dy: f32, time_ms: u32) {
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        if self.cursor_source != CursorSource::Mouse {
+            let Some(base_ray) = self.gaze_ray.or(self.controller_ray) else {
+                return;
+            };
+            self.cursor_source = CursorSource::Mouse;
+            self.mouse_base_ray = Some(base_ray);
+            self.mouse_angles = glam::Vec2::ZERO;
+        }
+        let Some(base_ray) = self.mouse_base_ray else {
+            return;
+        };
+        let radians_per_pixel =
+            std::f32::consts::PI / (180.0 * self.window_pixels_per_degree.max(1.0));
+        self.mouse_angles += glam::Vec2::new(dx, -dy) * radians_per_pixel;
+        self.mouse_angles.x = self.mouse_angles.x.rem_euclid(2.0 * std::f32::consts::PI);
+        self.mouse_angles.y = self.mouse_angles.y.clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.01,
+            std::f32::consts::FRAC_PI_2 - 0.01,
+        );
+        let direction = base_ray.direction.normalize_or_zero();
+        let mut right = direction.cross(glam::Vec3::Y);
+        if right.length_squared() < 1.0e-6 {
+            right = direction.cross(glam::Vec3::Z);
+        }
+        right = right.normalize_or_zero();
+        let up = right.cross(direction).normalize_or_zero();
+        let (sin_yaw, cos_yaw) = self.mouse_angles.x.sin_cos();
+        let (sin_pitch, cos_pitch) = self.mouse_angles.y.sin_cos();
+        let mouse_ray = Ray3 {
+            origin: base_ray.origin,
+            direction: direction * (cos_yaw * cos_pitch)
+                + right * (sin_yaw * cos_pitch)
+                + up * sin_pitch,
+        };
+        self.mouse_last_moved = Some(Instant::now());
+        self.mouse_cursor_visible = true;
+        self.dispatch_ray(mouse_ray, time_ms);
+        let pose = self.mouse_cursor_pose(mouse_ray);
+        self.frame_sender.publish_cursor(bridge::CursorState {
+            mouse_controlled: true,
+            pose,
+        });
+    }
+
+    fn mouse_cursor_pose(&self, ray: Ray3) -> Option<PanelPose> {
+        let nearest = self
+            .panels
+            .iter()
+            .filter(|panel| panel.surface.alive())
+            .filter_map(|panel| {
+                let geometry = panel.geometry?;
+                geometry
+                    .intersect(ray)
+                    .map(|hit| (geometry.pose, hit.distance_m))
+            })
+            .min_by(|(_, first), (_, second)| first.total_cmp(second));
+        if let Some((pose, distance)) = nearest {
+            return Some(PanelPose {
+                center: ray.origin + ray.direction * distance,
+                width_m: 0.021,
+                ..pose
+            });
+        }
+        Some(PanelPose {
+            width_m: 0.021,
+            ..PanelPose::facing_player(
+                ray.origin + ray.direction * self.default_window_distance,
+                ray.origin,
+            )
+        })
+    }
+
+    pub(crate) fn hide_idle_mouse_cursor(&mut self) {
+        if self.cursor_source == CursorSource::Mouse
+            && self.mouse_cursor_visible
+            && self
+                .mouse_last_moved
+                .is_some_and(|moved| moved.elapsed() >= MOUSE_CURSOR_IDLE)
+        {
+            self.mouse_cursor_visible = false;
+            self.frame_sender.publish_cursor(bridge::CursorState {
+                mouse_controlled: true,
+                pose: None,
+            });
+        }
     }
 
     #[cfg(test)]
@@ -1051,6 +1195,13 @@ impl DataDeviceHandler for Compositor {
     }
 }
 impl OutputHandler for Compositor {}
+
+fn ray_moved(previous: Ray3, current: Ray3) -> bool {
+    let previous_direction = previous.direction.normalize_or_zero();
+    let current_direction = current.direction.normalize_or_zero();
+    previous.origin.distance_squared(current.origin) > 0.01 * 0.01
+        || previous_direction.dot(current_direction) < 0.99995
+}
 
 delegate_compositor!(Compositor);
 delegate_dmabuf!(Compositor);

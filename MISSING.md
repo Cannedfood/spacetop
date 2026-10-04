@@ -130,10 +130,13 @@ desktop scaling model.
 
 ### Cursor Support, Advanced Pointer Input, And Input Stress Testing
 
-The cursor remains a fixed targeting cross.
+The targeting cross follows the controller by default. Physical mouse motion
+takes over at the headset's view-center ray, and the controller takes back
+control when it moves beyond a small threshold. The mouse-controlled cross
+hides after two seconds without mouse movement.
 
-- Add physical mouse-motion mapping, continuous-scroll stop information, and
-  more controller-profile coverage. Simple controllers have no secondary click.
+- Add continuous-scroll stop information and more controller-profile coverage.
+  Simple controllers have no secondary click.
 - Render client cursor surfaces with hotspots, animation, and hidden-cursor
   requests; optionally add `cursor-shape` support while retaining the XR reticle
   as a separate targeting aid.

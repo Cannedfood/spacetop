@@ -56,7 +56,11 @@ constraints and reactive reconfiguration are not implemented.
 
 Pointer targeting follows surface stacking and input regions with per-surface
 coordinate offsets. Client window geometry is included when positioning popups.
-Client-requested cursor images are not rendered yet; the targeting cross remains.
+The XR targeting cross follows the active controller ray by default. Physical
+mouse movement takes over at the headset's view-center ray and steers it using
+relative motion; controller motion above a small threshold takes control back.
+The mouse-controlled cross hides after two seconds without mouse movement.
+Client-requested cursor images are not rendered yet.
 Controller secondary click opens context menus on supported profiles. Button
 transitions use reliable channel sends, with the current ray sent first, and
 tracking/session loss releases held XR buttons and clears pointer focus. These
@@ -80,13 +84,15 @@ repeat events are ignored to avoid double repeat. Evdev recovers dropped kernel
 events; disconnect releases that device's held keys/buttons. Shared counts keep
 keys/buttons held until all contributing devices release them. Mouse devices
 provide left/right/middle/extra buttons and vertical/horizontal wheel events,
-including value120 information, at the XR pointer location.
+including value120 information, at the active XR pointer location. Relative X/Y
+motion takes over the pointer at the current view-center ray, and mouse clicks
+and scroll remain routed through that same pointer.
 
 Input-device permissions must be configured externally; no exclusive grabs or
 session access management are performed. The host desktop can receive the same input.
 XKB uses `XKB_DEFAULT_*` environment settings. Text-input/IME, a virtual keyboard,
-physical mouse-motion mapping, and relative-pointer/constraints remain
-unsupported. See [README.md](README.md) for a launch example.
+and relative-pointer/constraints remain unsupported. See [README.md](README.md)
+for a launch example.
 
 When no pointer grab is active, windows receive activation and keyboard focus
 before their first pointer press. Existing implicit pointer grabs and popup
