@@ -12,13 +12,15 @@ resolver = "3"
 [dependencies]
 anyhow = "1"
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
+bytemuck = "1"
 calloop = "0.14"
 evdev = "0.13"
-glam = "0.34"
+glam = { version = "0.34", features = ["bytemuck"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["exr"] }
 naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 openxr = { version = "0.22", default-features = false, features = ["loaded"] }
+rayon = "1"
 smithay = { version = "0.7.0", default-features = false, features = ["desktop", "wayland_frontend", "renderer_gl", "backend_gbm", "backend_gbm_has_create_with_modifiers2", "backend_gbm_has_fd_for_plane", "xwayland"] }
 spacetop-config = { path = "utils/spacetop-config" }
 udev = "0.9"

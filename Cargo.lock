@@ -1548,6 +1548,9 @@ name = "glam"
 version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eece6af6447501f08d55ff4f6aed8a2753e4224e51899bccf3d5ae3d2de564b1"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "glow"
@@ -4138,6 +4141,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ash",
+ "bytemuck",
  "calloop 0.14.5",
  "evdev",
  "glam 0.34.0",
@@ -4145,6 +4149,7 @@ dependencies = [
  "image",
  "naga 30.0.1",
  "openxr",
+ "rayon",
  "smithay",
  "spacetop-config",
  "tempfile",

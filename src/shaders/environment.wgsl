@@ -120,7 +120,8 @@ fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f3
     let view_masking = ggx_masking(view.y, alpha_squared);
     let fresnel = fresnel_schlick(-incident.y);
     let opacity = floor_material.albedo.a;
-    var ground = floor_material.albedo.rgb * (1.0 - fresnel) * opacity;
+    var ground = floor_material.albedo.rgb * floor_material.diffuse_irradiance.rgb
+        * (1.0 - fresnel) * opacity;
     if opacity < 1.0 {
         ground += sample_environment_skybox(incident, 0.0) * (1.0 - opacity);
     }

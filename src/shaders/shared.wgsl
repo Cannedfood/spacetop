@@ -1,3 +1,5 @@
+enable wgpu_binding_array;
+
 struct Transform {
     matrix: mat4x4<f32>,
     emitter_center_width: vec4<f32>,
@@ -14,6 +16,7 @@ struct FloorMaterial {
     cursor_close_border_color: vec4<f32>,
     grabbed_style: vec4<f32>,
     grabbed_border_color: vec4<f32>,
+    diffuse_irradiance: vec4<f32>,
 }
 struct Window {
     center_width: vec4<f32>,

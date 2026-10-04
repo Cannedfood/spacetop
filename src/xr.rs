@@ -3,7 +3,7 @@
 //! semantics.
 
 use std::{
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -32,6 +32,23 @@ struct XrEye {
     swapchain: xr::Swapchain<xr::Vulkan>,
     targets: Vec<RenderTarget>,
     extent: vk::Extent2D,
+}
+
+struct PendingSkybox {
+    image: String,
+    worker: JoinHandle<Result<SkyboxTexture>>,
+}
+
+impl PendingSkybox {
+    fn new(
+        scene: &SceneRenderer,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        image: String,
+    ) -> Result<Self> {
+        let worker = SkyboxTexture::load_async(scene, instance, physical_device, &image)?;
+        Ok(Self { image, worker })
+    }
 }
 
 impl XrEye {
@@ -472,12 +489,14 @@ pub fn run(
         "Vulkan GPU lacks D32 depth attachment support"
     );
     let mut scene = SceneRenderer::new(&device, &vk_instance, physical_device, format, &config)?;
-    let mut skybox = SkyboxTexture::new(
+    let mut skybox = None;
+    let mut pending_skybox = Some(PendingSkybox::new(
         &scene,
         &vk_instance,
         physical_device,
-        &config.background.image,
-    )?;
+        config.background.image.clone(),
+    )?);
+    let mut queued_skybox_image = None;
     let view_configuration = instance.enumerate_view_configuration_views(system, VIEW_TYPE)?;
     ensure!(
         view_configuration.len() == 2,
@@ -634,30 +653,59 @@ pub fn run(
     let mut mouse_cursor_state: Option<CursorState> = None;
 
     while !exit {
+        if pending_skybox
+            .as_ref()
+            .is_some_and(|pending| pending.worker.is_finished())
+        {
+            let pending = pending_skybox.take().expect("finished skybox load exists");
+            match pending.worker.join() {
+                Ok(Ok(loaded)) if pending.image == config.background.image => {
+                    scene.update_skybox_diffuse(loaded.diffuse_irradiance(), &config)?;
+                    skybox = Some(loaded);
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => eprintln!("skybox load failed: {error:#}"),
+                Err(_) => eprintln!("skybox loading thread panicked"),
+            }
+            if let Some(image) = queued_skybox_image.take() {
+                pending_skybox = Some(PendingSkybox::new(
+                    &scene,
+                    &vk_instance,
+                    physical_device,
+                    image,
+                )?);
+            }
+        }
         if last_config_check.elapsed() >= Duration::from_millis(250) {
             last_config_check = Instant::now();
             if let Some(reload) = config_watcher.reload_if_changed() {
                 match reload {
                     Ok(next_config) => {
-                        let result: Result<Option<SkyboxTexture>> = (|| {
-                            let next_skybox =
-                                if next_config.background.image != config.background.image {
-                                    Some(SkyboxTexture::new(
-                                        &scene,
-                                        &vk_instance,
-                                        physical_device,
-                                        &next_config.background.image,
-                                    )?)
-                                } else {
-                                    None
-                                };
+                        let result: Result<Option<String>> = (|| {
+                            let next_skybox_image = (next_config.background.image
+                                != config.background.image)
+                                .then(|| next_config.background.image.clone());
                             scene.update_config(&next_config)?;
-                            Ok(next_skybox)
+                            Ok(next_skybox_image)
                         })();
                         match result {
-                            Ok(next_skybox) => {
-                                if let Some(next_skybox) = next_skybox {
-                                    skybox = next_skybox;
+                            Ok(next_skybox_image) => {
+                                if let Some(image) = next_skybox_image {
+                                    if pending_skybox.is_some() {
+                                        queued_skybox_image = Some(image);
+                                    } else {
+                                        match PendingSkybox::new(
+                                            &scene,
+                                            &vk_instance,
+                                            physical_device,
+                                            image,
+                                        ) {
+                                            Ok(pending) => pending_skybox = Some(pending),
+                                            Err(error) => {
+                                                eprintln!("skybox load could not start: {error:#}");
+                                            }
+                                        }
+                                    }
                                 }
                                 if stage_space.is_none() || !stage_floor_calibrated {
                                     floor_y = next_config.floor.height_m;
@@ -1233,6 +1281,7 @@ pub fn run(
                 xr::ViewStateFlags::POSITION_VALID | xr::ViewStateFlags::ORIENTATION_VALID,
             )
             || views.len() != eyes.len()
+            || skybox.is_none()
         {
             timings.measure("openxr/end-frame", period * 2, || {
                 frame_stream.end(
@@ -1243,6 +1292,7 @@ pub fn run(
             })?;
             continue;
         }
+        let skybox = skybox.as_mut().expect("skybox is ready for rendering");
 
         let cursor_scene_pose = match mouse_cursor_state {
             Some(CursorState {
@@ -1263,7 +1313,7 @@ pub fn run(
             .map(|panel| (&panel.texture, panel.geometry))
             .collect::<Vec<_>>();
         let scene_frame = SceneFrame {
-            skybox: Some(&skybox),
+            skybox: Some(skybox),
             panels: &panel_draws,
             cursor: cursor_scene_pose,
             cursor_close_panel: cursor_close_panel.and_then(|(id, position)| {
@@ -1381,6 +1431,7 @@ pub fn run(
             eye.targets.clear();
         }
         drop(eyes);
+        drop(skybox);
         drop(scene);
         drop((
             aim_space,
@@ -1392,8 +1443,20 @@ pub fn run(
         ));
         device.destroy_fence(fence, None);
         device.destroy_command_pool(command_pool, None);
-        device.destroy_device(None);
-        vk_instance.destroy_instance(None);
+        if let Some(pending) = pending_skybox.take() {
+            let cleanup_device = device.clone();
+            let cleanup_instance = vk_instance.clone();
+            thread::spawn(move || {
+                if let Ok(Ok(loaded)) = pending.worker.join() {
+                    drop(loaded);
+                }
+                cleanup_device.destroy_device(None);
+                cleanup_instance.destroy_instance(None);
+            });
+        } else {
+            device.destroy_device(None);
+            vk_instance.destroy_instance(None);
+        }
     }
     Ok(())
 }

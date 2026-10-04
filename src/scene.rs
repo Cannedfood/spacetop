@@ -1,13 +1,15 @@
 use anyhow::{Context, Result, ensure};
 use ash::vk;
-use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
+use glam::{Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
 use half::f16;
 use openxr as xr;
+use rayon::prelude::*;
 use std::{
     fs::{self, File},
     io::Read,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
+    thread::{self, JoinHandle},
 };
 
 use crate::{
@@ -285,9 +287,33 @@ fn downsample_skybox_mip(
     output
 }
 
+fn integrate_skybox_diffuse(width: u32, height: u32, pixels: &[Vec4]) -> [f32; 3] {
+    let width = width as usize;
+    let longitude_step = 2.0 * std::f32::consts::PI / width as f32;
+    let upper_half_end = height as f32 * 0.5;
+    let irradiance = (0..height.div_ceil(2) as usize)
+        .into_par_iter()
+        .map(|y| {
+            let theta_start = std::f32::consts::PI * y as f32 / height as f32;
+            let theta_end =
+                std::f32::consts::PI * ((y + 1) as f32).min(upper_half_end) / height as f32;
+            let weight =
+                longitude_step * 0.5 * (theta_end.sin().powi(2) - theta_start.sin().powi(2));
+            let row_sum: Vec3 = pixels[y * width..(y + 1) * width]
+                .iter()
+                .copied()
+                .map(|p| p.xyz())
+                .sum();
+            row_sum * weight
+        })
+        .reduce(|| Vec3::ZERO, |total, row| total + row);
+    (irradiance / std::f32::consts::PI).to_array()
+}
+
 pub(crate) struct SkyboxTexture {
     device: ash::Device,
     mips: Vec<SkyboxMip>,
+    diffuse_irradiance: [f32; 3],
     image: vk::Image,
     memory: vk::DeviceMemory,
     view: vk::ImageView,
@@ -295,8 +321,32 @@ pub(crate) struct SkyboxTexture {
 }
 
 impl SkyboxTexture {
+    #[cfg(test)]
     pub fn new(
         renderer: &SceneRenderer,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        image: &str,
+    ) -> Result<Self> {
+        Self::load(renderer.device.clone(), instance, physical_device, image)
+    }
+
+    pub fn load_async(
+        renderer: &SceneRenderer,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        image: &str,
+    ) -> Result<JoinHandle<Result<Self>>> {
+        let device = renderer.device.clone();
+        let instance = instance.clone();
+        let image = image.to_owned();
+        Ok(thread::Builder::new()
+            .name("spacetop-skybox".into())
+            .spawn(move || Self::load(device, &instance, physical_device, &image))?)
+    }
+
+    fn load(
+        device: ash::Device,
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
         image: &str,
@@ -314,17 +364,19 @@ impl SkyboxTexture {
             height: pixels.height(),
         };
         ensure!(extent.width > 0 && extent.height > 0, "empty skybox image");
-        let pixels = pixels
-            .into_raw()
-            .into_iter()
-            .map(f16::from_f32)
-            .collect::<Vec<_>>();
+        let pixels = pixels.into_raw();
+        let diffuse_irradiance = integrate_skybox_diffuse(
+            extent.width,
+            extent.height,
+            bytemuck::cast_slice::<f32, Vec4>(&pixels),
+        );
+        let pixels = pixels.into_iter().map(f16::from_f32).collect::<Vec<_>>();
         let (pixels, mips) = build_skybox_mips(extent.width, extent.height, pixels);
         let upload_size = std::mem::size_of_val(pixels.as_slice()) as u64;
-        let device = &renderer.device;
         let mut skybox = Self {
             device: device.clone(),
             mips,
+            diffuse_irradiance,
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: vk::ImageView::null(),
@@ -433,6 +485,10 @@ impl SkyboxTexture {
 
     pub fn needs_upload(&self) -> bool {
         self.staging.is_some()
+    }
+
+    pub fn diffuse_irradiance(&self) -> [f32; 3] {
+        self.diffuse_irradiance
     }
 
     pub unsafe fn upload(&self, command: vk::CommandBuffer) {
@@ -807,6 +863,7 @@ pub(crate) struct SceneRenderer {
     environment_descriptor_capacity: u32,
     environment_panel_ids: Vec<u64>,
     environment_skybox_view: vk::ImageView,
+    skybox_diffuse_irradiance: [f32; 3],
     max_environment_windows: u32,
     sampler: vk::Sampler,
     sky_sampler: vk::Sampler,
@@ -841,6 +898,7 @@ struct FloorUniform {
     cursor_close_border_color: [f32; 4],
     grabbed_style: [f32; 4],
     grabbed_border_color: [f32; 4],
+    diffuse_irradiance: [f32; 4],
 }
 
 #[repr(C, align(16))]
@@ -858,8 +916,9 @@ struct WindowBufferHeader {
     padding: [u32; 3],
 }
 
-impl From<&AppConfig> for FloorUniform {
-    fn from(config: &AppConfig) -> Self {
+impl FloorUniform {
+    fn from_config(config: &AppConfig, skybox_diffuse_irradiance: [f32; 3]) -> Self {
+        let exposure = 2.0_f32.powf(config.background.brightness_stops);
         Self {
             albedo: config.floor.albedo,
             controls: [
@@ -889,6 +948,12 @@ impl From<&AppConfig> for FloorUniform {
                 0.0,
             ],
             grabbed_border_color: config.window.grabbed_border_color,
+            diffuse_irradiance: [
+                skybox_diffuse_irradiance[0] * exposure,
+                skybox_diffuse_irradiance[1] * exposure,
+                skybox_diffuse_irradiance[2] * exposure,
+                0.0,
+            ],
         }
     }
 }
@@ -922,6 +987,7 @@ impl SceneRenderer {
             environment_descriptor_capacity: 0,
             environment_panel_ids: Vec::new(),
             environment_skybox_view: vk::ImageView::null(),
+            skybox_diffuse_irradiance: [1.0; 3],
             max_environment_windows: 0,
             sampler: vk::Sampler::null(),
             sky_sampler: vk::Sampler::null(),
@@ -1069,7 +1135,7 @@ impl SceneRenderer {
                     .push_next(&mut binding_flags_info),
                 None,
             )?;
-            let uniform = FloorUniform::from(config);
+            let uniform = FloorUniform::from_config(config, renderer.skybox_diffuse_irradiance);
             renderer.floor_buffer = device.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(std::mem::size_of::<FloorUniform>() as u64)
@@ -1172,7 +1238,7 @@ impl SceneRenderer {
         self.trace_through_transparent_windows = config.floor.trace_through_transparent_windows;
         self.window_padding_px = config.window.effective_padding_px();
         self.max_border_width_px = config.window.max_border_width_px();
-        let uniform = FloorUniform::from(config);
+        let uniform = FloorUniform::from_config(config, self.skybox_diffuse_irradiance);
         unsafe {
             let mapped = self.device.map_memory(
                 self.floor_memory,
@@ -1188,6 +1254,15 @@ impl SceneRenderer {
             self.device.unmap_memory(self.floor_memory);
         }
         Ok(())
+    }
+
+    pub fn update_skybox_diffuse(
+        &mut self,
+        diffuse_irradiance: [f32; 3],
+        config: &AppConfig,
+    ) -> Result<()> {
+        self.skybox_diffuse_irradiance = diffuse_irradiance;
+        self.update_config(config)
     }
 
     pub fn prepare_frame(&mut self, frame: &SceneFrame<'_>) -> Result<()> {
@@ -1830,6 +1905,40 @@ mod tests {
                 assert_eq!(pixel[3].to_f32(), 1.0);
             }
         }
+    }
+
+    #[test]
+    fn skybox_diffuse_integrates_only_the_upper_hemisphere() {
+        let mut pixels = Vec::new();
+        for y in 0..4 {
+            let color = if y < 2 {
+                [2.0, 1.0, 0.5]
+            } else {
+                [100.0, 100.0, 100.0]
+            };
+            for _ in 0..4 {
+                pixels.extend([color[0], color[1], color[2], 1.0]);
+            }
+        }
+
+        let rgba = bytemuck::cast_slice::<f32, Vec4>(&pixels);
+        assert_eq!(rgba[0].to_array(), [2.0, 1.0, 0.5, 1.0]);
+        let diffuse = integrate_skybox_diffuse(4, 4, rgba);
+        assert!((diffuse[0] - 2.0).abs() < 1.0e-6, "{diffuse:?}");
+        assert!((diffuse[1] - 1.0).abs() < 1.0e-6, "{diffuse:?}");
+        assert!((diffuse[2] - 0.5).abs() < 1.0e-6, "{diffuse:?}");
+    }
+
+    #[test]
+    fn skybox_diffuse_uses_lambertian_cosine_weighting() {
+        let mut pixels = vec![0.0; 8 * 4 * 4];
+        pixels[0] = 1.0;
+
+        let diffuse = integrate_skybox_diffuse(4, 8, bytemuck::cast_slice::<f32, Vec4>(&pixels));
+        let expected = (std::f32::consts::PI / 8.0).sin().powi(2) / 4.0;
+        assert!((diffuse[0] - expected).abs() < 1.0e-6);
+        assert_eq!(diffuse[1], 0.0);
+        assert_eq!(diffuse[2], 0.0);
     }
 
     #[test]
