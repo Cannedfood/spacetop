@@ -214,6 +214,49 @@ struct SkyboxMip {
     buffer_offset: u64,
 }
 
+const SKYBOX_MAX_CHANNEL: f32 = 65_504.0;
+
+fn sanitize_hdr_pixels(pixels: &mut [f32], mut random_state: u64) -> Result<()> {
+    ensure!(
+        pixels.len().is_multiple_of(4),
+        "skybox pixel data must contain RGBA values"
+    );
+    let pixel_count = pixels.len() / 4;
+    if random_state == 0 {
+        random_state = 0x9e37_79b9_7f4a_7c15;
+    }
+
+    for index in 0..pixels.len() {
+        if pixels[index].is_nan() {
+            let pixel_index = index / 4;
+            let channel = index % 4;
+            let mut replacement = 0.0;
+            if pixel_count > 1 {
+                let start = next_random(&mut random_state) as usize % pixel_count;
+                for offset in 0..pixel_count {
+                    let candidate_pixel = (start + offset) % pixel_count;
+                    let candidate_index = candidate_pixel * 4 + channel;
+                    if candidate_pixel != pixel_index && !pixels[candidate_index].is_nan() {
+                        replacement = pixels[candidate_index].clamp(0.0, SKYBOX_MAX_CHANNEL);
+                        break;
+                    }
+                }
+            }
+            pixels[index] = replacement;
+        } else {
+            pixels[index] = pixels[index].clamp(0.0, SKYBOX_MAX_CHANNEL);
+        }
+    }
+    Ok(())
+}
+
+fn next_random(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
 fn build_skybox_mips(width: u32, height: u32, mut pixels: Vec<f16>) -> (Vec<f16>, Vec<SkyboxMip>) {
     let mut mips = vec![SkyboxMip {
         width,
@@ -368,7 +411,17 @@ impl SkyboxTexture {
             height: pixels.height(),
         };
         ensure!(extent.width > 0 && extent.height > 0, "empty skybox image");
-        let pixels = pixels.into_raw();
+        let mut pixels = pixels.into_raw();
+        if pixels.iter().any(|value| value.is_nan()) {
+            let mut random_state = [0; 8];
+            File::open("/dev/urandom")
+                .context("open system random source to repair skybox NaNs")?
+                .read_exact(&mut random_state)
+                .context("read system random source to repair skybox NaNs")?;
+            sanitize_hdr_pixels(&mut pixels, u64::from_ne_bytes(random_state))?;
+        } else {
+            sanitize_hdr_pixels(&mut pixels, 1)?;
+        }
         let diffuse_irradiance = integrate_skybox_diffuse(
             extent.width,
             extent.height,
@@ -387,10 +440,20 @@ impl SkyboxTexture {
             staging: None,
         };
         unsafe {
+            let skybox_format = vk::Format::R16G16B16A16_SFLOAT;
+            let format_features = instance
+                .get_physical_device_format_properties(physical_device, skybox_format)
+                .optimal_tiling_features;
+            ensure!(
+                format_features.contains(
+                    vk::FormatFeatureFlags::SAMPLED_IMAGE | vk::FormatFeatureFlags::TRANSFER_DST
+                ),
+                "GPU does not support sampled RGBA16F skybox textures"
+            );
             skybox.image = device.create_image(
                 &vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
-                    .format(vk::Format::R16G16B16A16_SFLOAT)
+                    .format(skybox_format)
                     .extent(vk::Extent3D {
                         width: extent.width,
                         height: extent.height,
@@ -420,7 +483,7 @@ impl SkyboxTexture {
                 &vk::ImageViewCreateInfo::default()
                     .image(skybox.image)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(vk::Format::R16G16B16A16_SFLOAT)
+                    .format(skybox_format)
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1031,6 +1094,7 @@ pub(crate) struct SceneRenderer {
     environment_descriptor_capacity: u32,
     environment_skybox_view: vk::ImageView,
     skybox_diffuse_irradiance: Vec3,
+    background_exposure: f32,
     environment_dim: f32,
     max_environment_windows: u32,
     atlas: Option<ReflectionAtlas>,
@@ -1093,8 +1157,12 @@ struct WindowBufferHeader {
 }
 
 impl FloorUniform {
-    fn from_config(config: &AppConfig, skybox_diffuse_irradiance: Vec3) -> Self {
-        let exposure = 2.0_f32.powf(config.background.brightness_stops);
+    fn from_config(
+        config: &AppConfig,
+        skybox_diffuse_irradiance: Vec3,
+        background_exposure: f32,
+    ) -> Self {
+        let exposure = 2.0_f32.powf(config.background.brightness_stops) * background_exposure;
         Self {
             albedo: config.floor.albedo,
             controls: [
@@ -1107,7 +1175,7 @@ impl FloorUniform {
                 config.floor.reflection_grain_size_m,
                 config.background.rotation_degrees.to_radians(),
                 config.window.texture_aa.shader_mode() as f32,
-                0.0,
+                background_exposure,
             ],
             window_style: [
                 config.window.padding_px,
@@ -1169,6 +1237,7 @@ impl SceneRenderer {
             environment_descriptor_capacity: 0,
             environment_skybox_view: vk::ImageView::null(),
             skybox_diffuse_irradiance: Vec3::ONE,
+            background_exposure: 1.0,
             environment_dim: 0.0,
             max_environment_windows: 0,
             atlas: None,
@@ -1307,7 +1376,11 @@ impl SceneRenderer {
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&environment_bindings),
                 None,
             )?;
-            let uniform = FloorUniform::from_config(config, renderer.skybox_diffuse_irradiance);
+            let uniform = FloorUniform::from_config(
+                config,
+                renderer.skybox_diffuse_irradiance,
+                renderer.background_exposure,
+            );
             renderer.floor_buffer = device.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(std::mem::size_of::<FloorUniform>() as u64)
@@ -1474,7 +1547,33 @@ impl SceneRenderer {
         self.window_padding_px = config.window.effective_padding_px();
         self.max_border_width_px = config.window.max_border_width_px();
         self.environment_dim = 0.0;
-        let uniform = FloorUniform::from_config(config, self.skybox_diffuse_irradiance);
+        let uniform = FloorUniform::from_config(
+            config,
+            self.skybox_diffuse_irradiance,
+            self.background_exposure,
+        );
+        self.write_floor_uniform(&uniform)?;
+        Ok(())
+    }
+
+    pub fn set_background_exposure(&mut self, exposure: f32, config: &AppConfig) -> Result<()> {
+        ensure!(
+            exposure.is_finite() && (0.0..=1.0).contains(&exposure),
+            "background exposure fade must be between 0 and 1"
+        );
+        if self.background_exposure == exposure {
+            return Ok(());
+        }
+        self.background_exposure = exposure;
+        let uniform = FloorUniform::from_config(
+            config,
+            self.skybox_diffuse_irradiance,
+            self.background_exposure,
+        );
+        self.write_floor_uniform(&uniform)
+    }
+
+    fn write_floor_uniform(&self, uniform: &FloorUniform) -> Result<()> {
         unsafe {
             let mapped = self.device.map_memory(
                 self.floor_memory,
@@ -1483,7 +1582,7 @@ impl SceneRenderer {
                 vk::MemoryMapFlags::empty(),
             )?;
             std::ptr::copy_nonoverlapping(
-                (&uniform as *const FloorUniform).cast::<u8>(),
+                (uniform as *const FloorUniform).cast::<u8>(),
                 mapped.cast::<u8>(),
                 std::mem::size_of::<FloorUniform>(),
             );
@@ -2490,6 +2589,34 @@ mod tests {
                 assert_eq!(pixel[3].to_f32(), 1.0);
             }
         }
+    }
+
+    #[test]
+    fn skybox_hdr_sanitization_replaces_nan_and_clamps_values() {
+        let mut pixels = [
+            f32::NAN,
+            -2.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            3.0,
+            4.0,
+            5.0,
+            6.0,
+        ];
+        sanitize_hdr_pixels(&mut pixels, 123).unwrap();
+
+        assert_eq!(pixels[0], 3.0);
+        assert_eq!(pixels[1], 0.0);
+        assert_eq!(pixels[2], SKYBOX_MAX_CHANNEL);
+        assert_eq!(pixels[3], 0.0);
+        assert!(pixels.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn skybox_hdr_sanitization_handles_nan_only_images() {
+        let mut pixels = [f32::NAN; 4];
+        sanitize_hdr_pixels(&mut pixels, 123).unwrap();
+        assert_eq!(pixels, [0.0; 4]);
     }
 
     #[test]

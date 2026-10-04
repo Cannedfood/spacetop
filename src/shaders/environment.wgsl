@@ -16,7 +16,7 @@ struct SkyVertex {
     return result;
 }
 fn skybox_exposure() -> f32 {
-    return exp2(floor_material.controls.y);
+    return exp2(floor_material.controls.y) * floor_material.sampling.w;
 }
 fn dim_environment(color: vec3<f32>) -> vec3<f32> {
     return color * (1.0 - floor_material.ground_radius.z);
