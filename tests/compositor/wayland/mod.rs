@@ -37,7 +37,7 @@ fn gpu_capture_preserves_moved_and_resized_panel_size() {
     let pose = geometry.resized_pose_from_edges(
         (100, 60).into(),
         [false, true, false, true],
-        app.compositor.window_pixels_per_degree,
+        app.compositor.window_config.pixels_per_degree,
     );
     app.compositor.handle_xr_input(crate::XrInput::ResizePanel {
         panel_id,
@@ -118,7 +118,7 @@ fn gpu_capture_preserves_moved_and_resized_panel_size() {
             geometry.resized_pose_from_edges(
                 actual.logical_size,
                 [false, true, false, true],
-                app.compositor.window_pixels_per_degree,
+                app.compositor.window_config.pixels_per_degree,
             )
         );
     }

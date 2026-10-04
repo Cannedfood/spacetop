@@ -111,10 +111,12 @@ struct Compositor {
     data_device_state: DataDeviceState,
     xdg_shell_state: XdgShellState,
     xwayland_shell_state: XWaylandShellState,
+
     xwm: Option<X11Wm>,
     _output_manager_state: OutputManagerState,
     seat_state: SeatState<Self>,
     seat: Seat<Self>,
+
     output: Output,
     panels: Vec<ToplevelPanel>,
     gpu_renderer: Option<gpu::GpuRenderer>,
@@ -123,21 +125,21 @@ struct Compositor {
     next_panel_id: u64,
     frame_sender: bridge::PanelSender,
     panel_limits: panel::PanelLimits,
-    default_window_distance: f32,
-    default_vertical_angle_degrees: f32,
-    window_pixels_per_degree: f32,
-    window_display_scale: f32,
-    maximized_max_width_degrees: f32,
-    maximized_max_height_degrees: f32,
+
+    window_config: config::WindowConfig,
+
     active_panel: Option<u64>,
     fatal_error: Option<anyhow::Error>,
     started_at: Instant,
+
     popups: PopupManager,
     input_serials: VecDeque<(Serial, WlSurface)>,
     x11_popups: Vec<x11::X11Popup>,
+
     xr_buttons: BTreeSet<u32>,
     key_counts: BTreeMap<u32, usize>,
     button_counts: BTreeMap<u32, usize>,
+
     gaze_ray: Option<Ray3>,
     controller_ray: Option<Ray3>,
     mouse_base_ray: Option<Ray3>,
@@ -145,6 +147,7 @@ struct Compositor {
     cursor_source: CursorSource,
     mouse_last_moved: Option<Instant>,
     mouse_cursor_visible: bool,
+
     ready_callback: Option<runtime::ReadyCallback>,
     dirty_panels: BTreeSet<u64>,
     frame_requested: bool,
@@ -216,8 +219,8 @@ impl XdgShellHandler for Compositor {
             .map(|slot| {
                 PanelPose::for_slot_at_distance(
                     slot,
-                    self.default_window_distance,
-                    self.default_vertical_angle_degrees,
+                    self.window_config.default_distance_m,
+                    self.window_config.default_vertical_angle_degrees,
                 )
             })
             .find(|pose| self.panels.iter().all(|panel| panel.pose != *pose))

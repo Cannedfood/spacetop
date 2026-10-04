@@ -178,36 +178,26 @@ impl Compositor {
                 self.panel_limits = limits;
                 self.configure_gpu(&render_node)
             }
-            XrInput::ConfigReloaded {
-                default_window_distance,
-                default_vertical_angle_degrees,
-                window_pixels_per_degree,
-                window_display_scale,
-                maximized_max_width_degrees,
-                maximized_max_height_degrees,
-            } => {
-                if self.default_window_distance != default_window_distance
-                    || self.default_vertical_angle_degrees != default_vertical_angle_degrees
-                    || self.window_pixels_per_degree != window_pixels_per_degree
+            XrInput::ConfigReloaded { window } => {
+                let window = *window;
+                if self.window_config.default_distance_m != window.default_distance_m
+                    || self.window_config.default_vertical_angle_degrees
+                        != window.default_vertical_angle_degrees
+                    || self.window_config.pixels_per_degree != window.pixels_per_degree
                 {
                     for panel in &mut self.panels {
                         panel.pose_is_explicit = false;
                     }
                 }
-                self.default_window_distance = default_window_distance;
-                self.default_vertical_angle_degrees = default_vertical_angle_degrees;
-                self.window_pixels_per_degree = window_pixels_per_degree;
-                self.maximized_max_width_degrees = maximized_max_width_degrees;
-                self.maximized_max_height_degrees = maximized_max_height_degrees;
-                if self.window_display_scale != window_display_scale {
+                if self.window_config.display_scale != window.display_scale {
                     self.output.change_current_state(
                         None,
                         None,
-                        Some(Scale::Fractional(window_display_scale as f64)),
+                        Some(Scale::Fractional(window.display_scale as f64)),
                         None,
                     );
-                    self.window_display_scale = window_display_scale;
                 }
+                self.window_config = window;
                 self.refresh_panels();
                 Ok(())
             }
@@ -222,9 +212,9 @@ impl Compositor {
         let geometry = self.panels.get(index)?.geometry?;
         Some(geometry.size_for_angular_bounds(
             geometry.pose.center.length(),
-            self.window_pixels_per_degree,
-            self.maximized_max_width_degrees,
-            self.maximized_max_height_degrees,
+            self.window_config.pixels_per_degree,
+            self.window_config.maximized_max_width_degrees,
+            self.window_config.maximized_max_height_degrees,
         ))
     }
 
@@ -327,12 +317,7 @@ impl Compositor {
             next_panel_id: 1,
             frame_sender,
             panel_limits: panel::PanelLimits::default(),
-            default_window_distance: window.default_distance_m,
-            default_vertical_angle_degrees: window.default_vertical_angle_degrees,
-            window_pixels_per_degree: window.pixels_per_degree,
-            window_display_scale: window.display_scale,
-            maximized_max_width_degrees: window.maximized_max_width_degrees,
-            maximized_max_height_degrees: window.maximized_max_height_degrees,
+            window_config: window.clone(),
             active_panel: None,
             fatal_error: None,
             started_at: Instant::now(),
@@ -478,7 +463,7 @@ impl Compositor {
                 geometry.pose = anchor.resized_pose_from_edges(
                     bounds.size,
                     edges,
-                    self.window_pixels_per_degree,
+                    self.window_config.pixels_per_degree,
                 );
                 self.panels[index].pose = geometry.root_pose(logical_size, bounds);
             }
@@ -605,7 +590,7 @@ impl Compositor {
         let (size, scale) = self.panel_limits.capture_size(
             geometry.logical_size,
             buffer_scale,
-            self.window_display_scale,
+            self.window_config.display_scale,
         );
         let dmabuf = self
             .timings
@@ -617,7 +602,7 @@ impl Compositor {
             geometry.pose.width_m = PanelPose::width_for_pixel_density(
                 geometry.logical_size.w as f32,
                 geometry.pose.center.length(),
-                self.window_pixels_per_degree,
+                self.window_config.pixels_per_degree,
             );
         }
         self.panels[index].pose = geometry.root_pose(root_size, bounds);
@@ -759,7 +744,7 @@ impl Compositor {
             return;
         };
         let radians_per_pixel =
-            std::f32::consts::PI / (180.0 * self.window_pixels_per_degree.max(1.0));
+            std::f32::consts::PI / (180.0 * self.window_config.pixels_per_degree.max(1.0));
         self.mouse_angles += glam::Vec2::new(dx, -dy) * radians_per_pixel;
         self.mouse_angles.x = self.mouse_angles.x.rem_euclid(2.0 * std::f32::consts::PI);
         self.mouse_angles.y = self.mouse_angles.y.clamp(
@@ -819,7 +804,7 @@ impl Compositor {
         Some(PanelPose {
             width_m: 0.021,
             ..PanelPose::looking_from_to(
-                ray.origin + ray.direction * self.default_window_distance,
+                ray.origin + ray.direction * self.window_config.default_distance_m,
                 ray.origin,
             )
         })

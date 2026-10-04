@@ -336,8 +336,8 @@ impl Compositor {
             .map(|slot| {
                 PanelPose::for_slot_at_distance(
                     slot,
-                    self.default_window_distance,
-                    self.default_vertical_angle_degrees,
+                    self.window_config.default_distance_m,
+                    self.window_config.default_vertical_angle_degrees,
                 )
             })
             .find(|pose| self.panels.iter().all(|panel| panel.pose != *pose))

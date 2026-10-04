@@ -819,36 +819,9 @@ pub fn run(
                                     grab_radius = next_config.window.default_distance_m;
                                     grab_initial_radius = next_config.window.default_distance_m;
                                 }
-                                let window_config_changed = next_config.window.default_distance_m
-                                    != config.window.default_distance_m
-                                    || next_config.window.default_vertical_angle_degrees
-                                        != config.window.default_vertical_angle_degrees
-                                    || next_config.window.pixels_per_degree
-                                        != config.window.pixels_per_degree
-                                    || next_config.window.display_scale
-                                        != config.window.display_scale
-                                    || next_config.window.maximized_max_width_degrees
-                                        != config.window.maximized_max_width_degrees
-                                    || next_config.window.maximized_max_height_degrees
-                                        != config.window.maximized_max_height_degrees;
-                                if window_config_changed
+                                if next_config.window != config.window
                                     && let Err(error) = input.send(XrInput::ConfigReloaded {
-                                        default_window_distance: next_config
-                                            .window
-                                            .default_distance_m,
-                                        default_vertical_angle_degrees: next_config
-                                            .window
-                                            .default_vertical_angle_degrees,
-                                        window_pixels_per_degree: next_config
-                                            .window
-                                            .pixels_per_degree,
-                                        window_display_scale: next_config.window.display_scale,
-                                        maximized_max_width_degrees: next_config
-                                            .window
-                                            .maximized_max_width_degrees,
-                                        maximized_max_height_degrees: next_config
-                                            .window
-                                            .maximized_max_height_degrees,
+                                        window: Box::new(next_config.window.clone()),
                                     })
                                 {
                                     eprintln!(

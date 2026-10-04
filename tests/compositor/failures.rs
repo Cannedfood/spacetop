@@ -40,18 +40,24 @@ fn config_reload_updates_default_window_settings() {
     let mut compositor = Compositor::new(display.handle(), sender);
 
     compositor.handle_xr_input(crate::XrInput::ConfigReloaded {
-        default_window_distance: 2.4,
-        default_vertical_angle_degrees: 12.0,
-        window_pixels_per_degree: 25.0,
-        window_display_scale: 2.0,
-        maximized_max_width_degrees: 80.0,
-        maximized_max_height_degrees: 60.0,
+        window: Box::new(crate::config::WindowConfig {
+            default_distance_m: 2.4,
+            default_vertical_angle_degrees: 12.0,
+            pixels_per_degree: 25.0,
+            display_scale: 2.0,
+            maximized_max_width_degrees: 80.0,
+            maximized_max_height_degrees: 60.0,
+            ..Default::default()
+        }),
     });
 
-    assert_eq!(compositor.default_window_distance, 2.4);
-    assert_eq!(compositor.default_vertical_angle_degrees, 12.0);
-    assert_eq!(compositor.maximized_max_width_degrees, 80.0);
-    assert_eq!(compositor.maximized_max_height_degrees, 60.0);
+    assert_eq!(compositor.window_config.default_distance_m, 2.4);
+    assert_eq!(
+        compositor.window_config.default_vertical_angle_degrees,
+        12.0
+    );
+    assert_eq!(compositor.window_config.maximized_max_width_degrees, 80.0);
+    assert_eq!(compositor.window_config.maximized_max_height_degrees, 60.0);
     assert_eq!(compositor.output.current_scale().fractional_scale(), 2.0);
     assert!(compositor.fatal_error.is_none());
 }
