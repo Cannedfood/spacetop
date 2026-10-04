@@ -26,7 +26,8 @@ Desktop shells and specialist apps require additional, explicitly scoped support
   X11 menus, subsurface/input-region targeting, and expanded capture bounds.
   Menus share their parent's panel texture without changing its physical pixel scale.
   X11 parent selection uses transient-for hints and active-window/overlap fallbacks.
-- Opt-in evdev keyboards and mouse buttons/wheels, XKB key/modifier delivery,
+- Seat-aware automatic evdev keyboard/mouse discovery, one-second hotplug and
+  reconnection checks, explicit device overrides, XKB key/modifier delivery,
   device-disconnect cleanup, and reliable XR button transitions/tracking cleanup.
   See [README.md](README.md) for device configuration and permission requirements.
 - Native Wayland clipboard offers, MIME negotiation, FD transfers, and
@@ -46,10 +47,11 @@ See [src/lib.rs](src/lib.rs), [src/runtime.rs](src/runtime.rs), [src/x11.rs](src
 
 ## P0: Everyday App Blockers
 
-### Keyboard Discovery And Keyboard-Free Input
+### Input Session Management And Keyboard-Free Input
 
-- Add seat-aware automatic discovery, hotplug/reconnection, and an explicit
-  host-input bridge if device access is not desirable for nested sessions.
+- Add session-managed input-device access and an explicit host-input bridge if
+  raw device access is not desirable for nested sessions. Input currently remains
+  non-exclusive, so the host desktop can receive the same events.
 - Provide an XR virtual keyboard for keyboard-free use, plus text-input/IME.
 
 ### Primary Selection, X11 Clipboard, And XR Drag-And-Drop
