@@ -34,6 +34,12 @@ fn edge_resize_preserves_the_existing_scale_for_small_size_changes() {
 }
 
 #[test]
+fn maximized_surface_size_uses_angular_bounds_and_logical_pixel_density() {
+    let size = panel().size_for_angular_bounds(2.0, 32.0, 70.0, 50.0);
+    assert_eq!(size, (2240, 1120));
+}
+
+#[test]
 fn pixel_grab_margin_accepts_hits_just_outside_panel_bounds() {
     let geometry = panel();
     let ray = Ray3 {
@@ -206,6 +212,24 @@ fn dodge_windows_moves_overlapping_panels_and_keeps_fixed_pose() {
     let original_angles = PanelPose::spherical_angles(second.pose.center);
     let moved_angles = PanelPose::spherical_angles(moved[&2].center);
     assert!((moved_angles.y - original_angles.y).abs() < 1.0e-5);
+}
+
+#[test]
+fn dodge_windows_keeps_maximized_grabbed_panel_fixed_while_moving_neighbor() {
+    let regular = panel();
+    let maximized = PanelGeometry {
+        pose: PanelPose {
+            width_m: regular.pose.width_m * 2.0,
+            ..regular.pose
+        },
+        ..regular
+    };
+
+    let moved = dodge_windows(&[(1, maximized), (2, regular)], &[1], Vec3::ZERO, 0.05);
+
+    assert_eq!(moved[&1], maximized.pose);
+    assert_ne!(moved[&2].center, regular.pose.center);
+    assert!((moved[&2].center.length() - regular.pose.center.length()).abs() < 1.0e-5);
 }
 
 #[test]

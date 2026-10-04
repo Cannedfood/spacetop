@@ -70,7 +70,7 @@ impl PanelSurface {
         Ok(())
     }
 
-    pub fn set_maximized(&self, maximized: bool) -> anyhow::Result<()> {
+    pub fn set_maximized(&self, maximized: bool, size: Option<(i32, i32)>) -> anyhow::Result<()> {
         match self {
             Self::Wayland(surface) => {
                 surface.with_pending_state(|state| {
@@ -82,6 +82,9 @@ impl PanelSurface {
                     } else {
                         state.states.unset(State::Maximized);
                     }
+                    if let Some((width, height)) = size {
+                        state.size = Some((width.max(1), height.max(1)).into());
+                    }
                 });
                 surface.send_configure();
             }
@@ -90,6 +93,12 @@ impl PanelSurface {
                     window.set_fullscreen(false)?;
                 }
                 window.set_maximized(maximized)?;
+                if let Some((width, height)) = size {
+                    let mut geometry = window.geometry();
+                    geometry.size.w = width.max(1);
+                    geometry.size.h = height.max(1);
+                    window.configure(geometry)?;
+                }
             }
             Self::X11 { .. } | Self::Popup(_) => {}
         }
@@ -342,6 +351,7 @@ impl Compositor {
             geometry: None,
             is_fullscreen,
             is_maximized,
+            maximize_restore_size: None,
             pose_is_explicit: false,
             resize_anchor: None,
             id: self.next_panel_id,
@@ -481,7 +491,21 @@ impl XwmHandler for Compositor {
         }
     }
     fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        if window.is_maximized()
+        let index = self.panels.iter().position(|panel| {
+            matches!(
+                &panel.surface,
+                PanelSurface::X11 { window: candidate, .. }
+                    if candidate.xwm_id() == window.xwm_id()
+                        && candidate.window_id() == window.window_id()
+            )
+        });
+        if let Some(index) = index
+            && self.panels[index].is_maximized
+            && let Err(error) = self.request_panel_maximized(index, false)
+        {
+            eprintln!("failed to restore maximized X11 window before fullscreen: {error:#}");
+            return;
+        } else if window.is_maximized()
             && let Err(error) = window.set_maximized(false)
         {
             eprintln!("failed to clear X11 maximize state: {error}");
@@ -511,33 +535,33 @@ impl XwmHandler for Compositor {
         }
     }
     fn maximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        if window.is_fullscreen()
-            && let Err(error) = window.set_fullscreen(false)
+        let index = self.panels.iter().position(|panel| {
+            matches!(
+                &panel.surface,
+                PanelSurface::X11 { window: candidate, .. }
+                    if candidate.xwm_id() == window.xwm_id()
+                        && candidate.window_id() == window.window_id()
+            )
+        });
+        if let Some(index) = index
+            && let Err(error) = self.request_panel_maximized(index, true)
         {
-            eprintln!("failed to clear X11 fullscreen state: {error}");
-            return;
-        }
-        if let Err(error) = window.set_maximized(true) {
-            eprintln!("failed to mark X11 window maximized: {error}");
-            return;
-        }
-        if let Some(surface) = window.wl_surface() {
-            let root = self.root_surface(&surface);
-            if let Some(index) = self.update_panel_from_commit(&root) {
-                self.invalidate_panel(index);
-            }
+            eprintln!("failed to maximize X11 window: {error:#}");
         }
     }
     fn unmaximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        if let Err(error) = window.set_maximized(false) {
-            eprintln!("failed to clear X11 maximize state: {error}");
-            return;
-        }
-        if let Some(surface) = window.wl_surface() {
-            let root = self.root_surface(&surface);
-            if let Some(index) = self.update_panel_from_commit(&root) {
-                self.invalidate_panel(index);
-            }
+        let index = self.panels.iter().position(|panel| {
+            matches!(
+                &panel.surface,
+                PanelSurface::X11 { window: candidate, .. }
+                    if candidate.xwm_id() == window.xwm_id()
+                        && candidate.window_id() == window.window_id()
+            )
+        });
+        if let Some(index) = index
+            && let Err(error) = self.request_panel_maximized(index, false)
+        {
+            eprintln!("failed to unmaximize X11 window: {error:#}");
         }
     }
     fn resize_request(

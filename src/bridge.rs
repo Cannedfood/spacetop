@@ -63,6 +63,8 @@ pub enum XrInput {
         default_vertical_angle_degrees: f32,
         window_pixels_per_degree: f32,
         window_display_scale: f32,
+        maximized_max_width_degrees: f32,
+        maximized_max_height_degrees: f32,
     },
     FatalError {
         message: String,

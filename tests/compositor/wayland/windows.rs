@@ -5,6 +5,22 @@ use glam::Vec3;
 use std::{io::Write, os::fd::AsFd};
 use wayland_client::protocol::wl_shm;
 
+fn has_maximized_state(states: &[u8]) -> bool {
+    has_toplevel_state(states, 1)
+}
+
+fn has_fullscreen_state(states: &[u8]) -> bool {
+    has_toplevel_state(states, 2)
+}
+
+fn has_toplevel_state(states: &[u8], expected_state: u32) -> bool {
+    states
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|state| u32::from_ne_bytes(*state) == expected_state)
+}
+
 #[test]
 fn fullscreen_requests_toggle_compositor_panel_state() {
     let mut app = super::fixture::WaylandApp::new(None);
@@ -48,9 +64,10 @@ fn fullscreen_requests_toggle_compositor_panel_state() {
 }
 
 #[test]
-fn maximize_requests_toggle_compositor_panel_state() {
+fn xdg_maximize_requests_update_client_state_and_surface_size() {
     let mut app = super::fixture::WaylandApp::new(None);
     assert!(!app.compositor.panels[0].is_maximized);
+    let original_size = app.compositor.panels[0].geometry.unwrap().logical_size;
 
     app.toplevel.set_maximized();
     pump(
@@ -70,6 +87,10 @@ fn maximize_requests_toggle_compositor_panel_state() {
     );
     assert!(app.compositor.panels[0].is_maximized);
     assert!(!app.compositor.panels[0].is_fullscreen);
+    assert!(has_maximized_state(
+        app.client.toplevel_states.last().unwrap()
+    ));
+    assert!(app.client.toplevel_configures.last().unwrap().0 > original_size.w);
 
     app.toplevel.unset_maximized();
     pump(
@@ -88,10 +109,69 @@ fn maximize_requests_toggle_compositor_panel_state() {
         &app.connection,
     );
     assert!(!app.compositor.panels[0].is_maximized);
+    assert!(!has_maximized_state(
+        app.client.toplevel_states.last().unwrap()
+    ));
+    assert_eq!(
+        app.client.toplevel_configures.last(),
+        Some(&(original_size.w, original_size.h))
+    );
+}
 
+#[test]
+fn xr_maximize_notifies_client_and_restores_surface_size() {
+    let mut app = super::fixture::WaylandApp::new(None);
     let panel_id = app.compositor.panels[0].id;
+    let original_size = app.compositor.panels[0].geometry.unwrap().logical_size;
+
     app.compositor
         .handle_xr_input(crate::XrInput::ToggleMaximize { panel_id });
+    assert!(app.compositor.panels[0].is_maximized);
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert!(has_maximized_state(
+        app.client.toplevel_states.last().unwrap()
+    ));
+    let maximized_size = *app.client.toplevel_configures.last().unwrap();
+    assert!(maximized_size.0 > original_size.w);
+    assert!(maximized_size.1 > original_size.h);
+    assert_eq!(
+        app.compositor.panels[0].geometry.unwrap().logical_size,
+        original_size
+    );
+
+    app.compositor
+        .handle_xr_input(crate::XrInput::ToggleMaximize { panel_id });
+    assert!(!app.compositor.panels[0].is_maximized);
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert!(!has_maximized_state(
+        app.client.toplevel_states.last().unwrap()
+    ));
+    assert_eq!(
+        app.client.toplevel_configures.last(),
+        Some(&(original_size.w, original_size.h))
+    );
+    assert_eq!(
+        app.compositor.panels[0].geometry.unwrap().logical_size,
+        original_size
+    );
+}
+
+#[test]
+fn maximizing_fullscreen_window_exits_fullscreen() {
+    let mut app = super::fixture::WaylandApp::new(None);
+    app.toplevel.set_fullscreen(None);
     pump(
         &mut app.display,
         &mut app.compositor,
@@ -107,7 +187,23 @@ fn maximize_requests_toggle_compositor_panel_state() {
         &mut app.client,
         &app.connection,
     );
+    assert!(app.compositor.panels[0].is_fullscreen);
+
+    let panel_id = app.compositor.panels[0].id;
+    app.compositor
+        .handle_xr_input(crate::XrInput::ToggleMaximize { panel_id });
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
     assert!(app.compositor.panels[0].is_maximized);
+    assert!(!app.compositor.panels[0].is_fullscreen);
+    let states = app.client.toplevel_states.last().unwrap();
+    assert!(has_maximized_state(states));
+    assert!(!has_fullscreen_state(states));
 }
 
 #[test]

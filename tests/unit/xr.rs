@@ -106,6 +106,27 @@ fn maximize_geometry_updates_preserve_the_restore_width() {
 }
 
 #[test]
+fn unmaximizing_a_grabbed_window_resets_its_drag_size_baseline() {
+    let mut initial_width = 2.0;
+    let mut initial_radius = 1.5;
+    reset_grab_baseline_after_unmaximize(
+        Some(7),
+        7,
+        1.0,
+        2.5,
+        &mut initial_width,
+        &mut initial_radius,
+    );
+
+    assert_eq!(initial_width, 1.0);
+    assert_eq!(initial_radius, 2.5);
+    assert_eq!(
+        PanelPose::width_for_distance(initial_width, initial_radius, 2.5),
+        1.0
+    );
+}
+
+#[test]
 fn cursor_uses_default_player_sphere_without_a_window() {
     let player = glam::Vec3::new(0.4, 1.7, 0.2);
     let ray = Ray3 {

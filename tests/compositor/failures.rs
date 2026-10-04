@@ -44,10 +44,14 @@ fn config_reload_updates_default_window_settings() {
         default_vertical_angle_degrees: 12.0,
         window_pixels_per_degree: 25.0,
         window_display_scale: 2.0,
+        maximized_max_width_degrees: 80.0,
+        maximized_max_height_degrees: 60.0,
     });
 
     assert_eq!(compositor.default_window_distance, 2.4);
     assert_eq!(compositor.default_vertical_angle_degrees, 12.0);
+    assert_eq!(compositor.maximized_max_width_degrees, 80.0);
+    assert_eq!(compositor.maximized_max_height_degrees, 60.0);
     assert_eq!(compositor.output.current_scale().fractional_scale(), 2.0);
     assert!(compositor.fatal_error.is_none());
 }

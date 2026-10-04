@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-pub(crate) use spacetop_config::AppConfig;
+pub(crate) use spacetop_config::{AppConfig, WindowConfig};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ConfigStamp {

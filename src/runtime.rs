@@ -44,14 +44,8 @@ pub fn run(
                 });
             }
         })?;
-    let mut compositor = Compositor::with_window_settings(
-        display_handle.clone(),
-        frame_sender,
-        config.window.default_distance_m,
-        config.window.default_vertical_angle_degrees,
-        config.window.pixels_per_degree,
-        config.window.display_scale,
-    );
+    let mut compositor =
+        Compositor::with_window_settings(display_handle.clone(), frame_sender, &config.window);
     input::start(&event_loop.handle())?;
     let socket = ListeningSocketSource::new_auto()?;
     let wayland_display = socket.socket_name().to_os_string();

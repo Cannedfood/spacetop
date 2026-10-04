@@ -156,6 +156,20 @@ fn update_dodge_targets(
     }
 }
 
+fn reset_grab_baseline_after_unmaximize(
+    grabbed_panel: Option<u64>,
+    panel_id: u64,
+    restored_width: f32,
+    grab_radius: f32,
+    grab_initial_width: &mut f32,
+    grab_initial_radius: &mut f32,
+) {
+    if grabbed_panel == Some(panel_id) {
+        *grab_initial_width = restored_width;
+        *grab_initial_radius = grab_radius;
+    }
+}
+
 fn save_dodge_targets(panels: &mut PanelImages, input: &crate::bridge::InputSender) -> Result<()> {
     save_dodge_targets_except(panels, input, None)
 }
@@ -611,7 +625,7 @@ pub fn run(
             Some("b/click"),
             Some("a/click"),
             Some("a/click"),
-            Some("y/click"),
+            Some("b/click"),
             Some("squeeze/value"),
             Some("thumbstick"),
             Some("thumbstick/click"),
@@ -796,7 +810,11 @@ pub fn run(
                                     || next_config.window.pixels_per_degree
                                         != config.window.pixels_per_degree
                                     || next_config.window.display_scale
-                                        != config.window.display_scale;
+                                        != config.window.display_scale
+                                    || next_config.window.maximized_max_width_degrees
+                                        != config.window.maximized_max_width_degrees
+                                    || next_config.window.maximized_max_height_degrees
+                                        != config.window.maximized_max_height_degrees;
                                 if window_config_changed
                                     && let Err(error) = input.send(XrInput::ConfigReloaded {
                                         default_window_distance: next_config
@@ -809,6 +827,12 @@ pub fn run(
                                             .window
                                             .pixels_per_degree,
                                         window_display_scale: next_config.window.display_scale,
+                                        maximized_max_width_degrees: next_config
+                                            .window
+                                            .maximized_max_width_degrees,
+                                        maximized_max_height_degrees: next_config
+                                            .window
+                                            .maximized_max_height_degrees,
                                     })
                                 {
                                     eprintln!(
@@ -946,7 +970,6 @@ pub fn run(
                             if maximized_changed {
                                 maximize_layout_dirty = true;
                                 if is_maximized {
-                                    grabbed_panel = None;
                                     resizing_panel = None;
                                     resize_geometry = None;
                                     resize_requested_size = None;
@@ -954,6 +977,14 @@ pub fn run(
                                     panel.saved_pose.width_m = width;
                                     panel.temporary_pose.width_m = width;
                                     panel.geometry.pose.width_m = width;
+                                    reset_grab_baseline_after_unmaximize(
+                                        grabbed_panel,
+                                        panel_id,
+                                        width,
+                                        grab_radius,
+                                        &mut grab_initial_width,
+                                        &mut grab_initial_radius,
+                                    );
                                 }
                             }
                             if fullscreen_changed {
@@ -1111,13 +1142,17 @@ pub fn run(
                 );
             }
             if maximize_layout_dirty && active_fullscreen_panel.is_none() {
+                let fixed_panel = grabbed_panel.or(resizing_panel);
+                let fixed_windows: Vec<_> = fixed_panel.into_iter().collect();
                 update_dodge_targets(
                     &mut panel_frames,
-                    &[],
+                    &fixed_windows,
                     grab_player_position,
                     config.window.collision_margin_m,
                 );
-                save_dodge_targets(&mut panel_frames, &input)?;
+                if fixed_panel.is_none() {
+                    save_dodge_targets(&mut panel_frames, &input)?;
+                }
                 maximize_layout_dirty = false;
             }
             if let (Some(panel_id), Some(look_direction)) =
@@ -1395,20 +1430,22 @@ pub fn run(
                     && launcher.is_active
                     && launcher.current_state;
                 let right_chord_was_down = maximize_right_chord_pressed;
-                if right_chord_down && !right_chord_was_down {
-                    input.send(XrInput::ToggleMaximize {
-                        panel_id: grabbed_panel.expect("maximize chord requires a grabbed panel"),
-                    })?;
+                if right_chord_down
+                    && !right_chord_was_down
+                    && let Some(panel_id) = grabbed_panel
+                {
+                    input.send(XrInput::ToggleMaximize { panel_id })?;
                 }
                 let left_chord_down = grip.is_active
                     && grip.current_state
                     && grabbed_panel.is_some()
                     && left_secondary.is_active
                     && left_secondary.current_state;
-                if left_chord_down && left_secondary.changed_since_last_sync {
-                    input.send(XrInput::ToggleMaximize {
-                        panel_id: grabbed_panel.expect("maximize chord requires a grabbed panel"),
-                    })?;
+                if left_chord_down
+                    && left_secondary.changed_since_last_sync
+                    && let Some(panel_id) = grabbed_panel
+                {
+                    input.send(XrInput::ToggleMaximize { panel_id })?;
                 }
                 let right_face = timings.measure("openxr/action-state", Duration::ZERO, || {
                     face_click_action.state(&session, right_hand)

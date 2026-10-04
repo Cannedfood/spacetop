@@ -96,6 +96,7 @@ struct ToplevelPanel {
     geometry: Option<PanelGeometry>,
     is_fullscreen: bool,
     is_maximized: bool,
+    maximize_restore_size: Option<(i32, i32)>,
     pose_is_explicit: bool,
     resize_anchor: Option<(PanelGeometry, [bool; 4])>,
     id: u64,
@@ -125,6 +126,8 @@ struct Compositor {
     default_vertical_angle_degrees: f32,
     window_pixels_per_degree: f32,
     window_display_scale: f32,
+    maximized_max_width_degrees: f32,
+    maximized_max_height_degrees: f32,
     active_panel: Option<u64>,
     fatal_error: Option<anyhow::Error>,
     started_at: Instant,
@@ -294,21 +297,16 @@ impl Compositor {
                 }
                 Ok(())
             }
-            XrInput::ToggleMaximize { panel_id } => (|| {
-                let Some(index) = self.panels.iter().position(|panel| panel.id == panel_id) else {
-                    return Ok(());
-                };
-                let maximized = !self.panels[index].is_maximized;
-                self.panels[index]
-                    .surface
-                    .set_maximized(maximized)
-                    .context("failed to toggle window maximize state")?;
-                let surface = self.panels[index].surface.wl_surface().clone();
-                if let Some(index) = self.update_panel_from_commit(&surface) {
-                    self.invalidate_panel(index);
+            XrInput::ToggleMaximize { panel_id } => {
+                if let Some(index) = self.panels.iter().position(|panel| panel.id == panel_id) {
+                    let result =
+                        self.request_panel_maximized(index, !self.panels[index].is_maximized);
+                    if let Err(error) = result {
+                        self.fatal_error = Some(error);
+                    }
                 }
                 Ok(())
-            })(),
+            }
             XrInput::ClosePanel { panel_id } => {
                 if let Some(panel) = self.panels.iter().find(|panel| panel.id == panel_id) {
                     match &panel.surface {
@@ -335,6 +333,8 @@ impl Compositor {
                 default_vertical_angle_degrees,
                 window_pixels_per_degree,
                 window_display_scale,
+                maximized_max_width_degrees,
+                maximized_max_height_degrees,
             } => {
                 if self.default_window_distance != default_window_distance
                     || self.default_vertical_angle_degrees != default_vertical_angle_degrees
@@ -347,6 +347,8 @@ impl Compositor {
                 self.default_window_distance = default_window_distance;
                 self.default_vertical_angle_degrees = default_vertical_angle_degrees;
                 self.window_pixels_per_degree = window_pixels_per_degree;
+                self.maximized_max_width_degrees = maximized_max_width_degrees;
+                self.maximized_max_height_degrees = maximized_max_height_degrees;
                 if self.window_display_scale != window_display_scale {
                     self.output.change_current_state(
                         None,
@@ -366,6 +368,40 @@ impl Compositor {
         }
     }
 
+    fn maximized_panel_size(&self, index: usize) -> Option<(i32, i32)> {
+        let geometry = self.panels.get(index)?.geometry?;
+        Some(geometry.size_for_angular_bounds(
+            geometry.pose.center.length(),
+            self.window_pixels_per_degree,
+            self.maximized_max_width_degrees,
+            self.maximized_max_height_degrees,
+        ))
+    }
+
+    fn request_panel_maximized(&mut self, index: usize, maximized: bool) -> anyhow::Result<()> {
+        let restore_size = self.panels[index].maximize_restore_size.or_else(|| {
+            self.panels[index]
+                .geometry
+                .map(|geometry| (geometry.logical_size.w, geometry.logical_size.h))
+        });
+        let size = if maximized {
+            self.maximized_panel_size(index)
+        } else {
+            self.panels[index].maximize_restore_size
+        };
+        self.panels[index]
+            .surface
+            .set_maximized(maximized, size)
+            .context("failed to set window maximize state")?;
+        self.panels[index].maximize_restore_size = if maximized { restore_size } else { None };
+        self.panels[index].is_maximized = maximized;
+        if maximized {
+            self.panels[index].is_fullscreen = false;
+        }
+        self.invalidate_panel(index);
+        Ok(())
+    }
+
     fn flush_clients(&mut self) {
         if let Err(error) = self.display_handle.flush_clients() {
             eprintln!("failed to flush Wayland events: {error}");
@@ -375,23 +411,13 @@ impl Compositor {
     #[cfg(test)]
     fn new(display_handle: DisplayHandle, frame_sender: bridge::PanelSender) -> Self {
         let defaults = config::AppConfig::default();
-        Self::with_window_settings(
-            display_handle,
-            frame_sender,
-            defaults.window.default_distance_m,
-            defaults.window.default_vertical_angle_degrees,
-            defaults.window.pixels_per_degree,
-            defaults.window.display_scale,
-        )
+        Self::with_window_settings(display_handle, frame_sender, &defaults.window)
     }
 
     fn with_window_settings(
         display_handle: DisplayHandle,
         frame_sender: bridge::PanelSender,
-        default_window_distance: f32,
-        default_vertical_angle_degrees: f32,
-        window_pixels_per_degree: f32,
-        window_display_scale: f32,
+        window: &config::WindowConfig,
     ) -> Self {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
@@ -423,7 +449,7 @@ impl Compositor {
         output.change_current_state(
             Some(mode),
             None,
-            Some(Scale::Fractional(window_display_scale as f64)),
+            Some(Scale::Fractional(window.display_scale as f64)),
             None,
         );
         output.create_global::<Self>(&display_handle);
@@ -447,10 +473,12 @@ impl Compositor {
             next_panel_id: 1,
             frame_sender,
             panel_limits: panel::PanelLimits::default(),
-            default_window_distance,
-            default_vertical_angle_degrees,
-            window_pixels_per_degree,
-            window_display_scale,
+            default_window_distance: window.default_distance_m,
+            default_vertical_angle_degrees: window.default_vertical_angle_degrees,
+            window_pixels_per_degree: window.pixels_per_degree,
+            window_display_scale: window.display_scale,
+            maximized_max_width_degrees: window.maximized_max_width_degrees,
+            maximized_max_height_degrees: window.maximized_max_height_degrees,
             active_panel: None,
             fatal_error: None,
             started_at: Instant::now(),
@@ -1160,6 +1188,7 @@ impl XdgShellHandler for Compositor {
             is_maximized: surface.current_state().states.contains(
                 smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
             ),
+            maximize_restore_size: None,
             pose_is_explicit: false,
             resize_anchor: None,
             id: panel_id,
@@ -1178,6 +1207,16 @@ impl XdgShellHandler for Compositor {
         surface: ToplevelSurface,
         output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
     ) {
+        if let Some(index) = self
+            .panels
+            .iter()
+            .position(|panel| panel.surface.wl_surface() == surface.wl_surface())
+            && self.panels[index].is_maximized
+            && let Err(error) = self.request_panel_maximized(index, false)
+        {
+            eprintln!("failed to restore maximized Wayland window before fullscreen: {error:#}");
+            return;
+        }
         surface.with_pending_state(|state| {
             use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
             state.states.set(State::Fullscreen);
@@ -1195,20 +1234,40 @@ impl XdgShellHandler for Compositor {
         let _ = surface.send_configure();
     }
     fn maximize_request(&mut self, surface: ToplevelSurface) {
-        surface.with_pending_state(|state| {
-            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
-            state.states.set(State::Maximized);
-            state.states.unset(State::Fullscreen);
-            state.fullscreen_output = None;
-        });
-        let _ = surface.send_configure();
+        if let Some(index) = self
+            .panels
+            .iter()
+            .position(|panel| panel.surface.wl_surface() == surface.wl_surface())
+        {
+            if let Err(error) = self.request_panel_maximized(index, true) {
+                eprintln!("failed to maximize Wayland window: {error:#}");
+            }
+        } else {
+            surface.with_pending_state(|state| {
+                use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+                state.states.set(State::Maximized);
+                state.states.unset(State::Fullscreen);
+                state.fullscreen_output = None;
+            });
+            let _ = surface.send_configure();
+        }
     }
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
-        surface.with_pending_state(|state| {
-            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
-            state.states.unset(State::Maximized);
-        });
-        let _ = surface.send_configure();
+        if let Some(index) = self
+            .panels
+            .iter()
+            .position(|panel| panel.surface.wl_surface() == surface.wl_surface())
+        {
+            if let Err(error) = self.request_panel_maximized(index, false) {
+                eprintln!("failed to unmaximize Wayland window: {error:#}");
+            }
+        } else {
+            surface.with_pending_state(|state| {
+                use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+                state.states.unset(State::Maximized);
+            });
+            let _ = surface.send_configure();
+        }
     }
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
         surface.with_pending_state(|state| {
