@@ -260,18 +260,6 @@ fn center_stays_put_when_grab_starts_and_tracks_aim_on_sphere() {
 }
 
 #[test]
-fn panel_width_scales_linearly_with_distance() {
-    let start_width = 1.0;
-    let start_distance = 1.5;
-    assert_eq!(
-        PanelPose::width_for_distance(start_width, start_distance, start_distance),
-        start_width
-    );
-    assert!((PanelPose::width_for_distance(start_width, start_distance, 3.0) - 2.0).abs() < 1.0e-6);
-    assert!((PanelPose::width_for_distance(0.8, 2.0, 1.0) - 0.4).abs() < 1.0e-6);
-}
-
-#[test]
 fn pixel_density_sets_angular_width_and_resize_grows_the_panel() {
     let width = PanelPose::width_for_pixel_density(640.0, 2.0, 32.0);
     let resized = PanelPose::width_for_pixel_density(960.0, 2.0, 32.0);

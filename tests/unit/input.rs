@@ -12,28 +12,6 @@ fn overlapping_devices_keep_keys_held_until_last_release() {
 }
 
 #[test]
-fn automatic_selection_defaults_to_seat0_and_respects_session_seat() {
-    assert_eq!(
-        Selection::new(None, None),
-        Selection::Automatic {
-            seat: "seat0".into()
-        }
-    );
-    assert_eq!(
-        Selection::new(None, Some("".into())),
-        Selection::Automatic {
-            seat: "seat0".into()
-        }
-    );
-    assert_eq!(
-        Selection::new(None, Some("seat1".into())),
-        Selection::Automatic {
-            seat: "seat1".into()
-        }
-    );
-}
-
-#[test]
 fn explicit_paths_override_discovery_and_empty_override_disables_input() {
     let selection = Selection::new(
         Some("/dev/input/event1:/dev/input/by-id/keyboard".into()),

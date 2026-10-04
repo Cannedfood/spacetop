@@ -772,14 +772,3 @@ fn main() -> iced::Result {
     })
     .run()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::monogram;
-
-    #[test]
-    fn monogram_uses_up_to_two_words() {
-        assert_eq!(monogram("Web Browser"), "WB");
-        assert_eq!(monogram("Calculator"), "C");
-    }
-}

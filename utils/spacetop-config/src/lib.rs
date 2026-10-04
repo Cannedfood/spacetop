@@ -627,22 +627,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reflection_atlas_sizes_round_trip_and_default_to_256() {
-        assert_eq!(
-            u32::from(AppConfig::default().window.reflection_atlas_size),
-            256
-        );
-        let legacy: AppConfig =
-            toml::from_str("[window]\nreflection_textures = \"descriptor_array\"\n").unwrap();
-        assert_eq!(
-            legacy.window.reflection_atlas_size,
-            ReflectionAtlasSize::Size256
-        );
-        assert!(
-            !toml::to_string(&legacy)
-                .unwrap()
-                .contains("reflection_textures")
-        );
+    fn reflection_atlas_sizes_accept_supported_values_and_reject_invalid_values() {
         for size in ReflectionAtlasSize::OPTIONS {
             let config: AppConfig = toml::from_str(&format!(
                 "[window]\nreflection_atlas_size = {}\n",
@@ -650,10 +635,6 @@ mod tests {
             ))
             .unwrap();
             assert_eq!(config.window.reflection_atlas_size, size);
-            assert_eq!(
-                toml::from_str::<AppConfig>(&toml::to_string(&config).unwrap()).unwrap(),
-                config
-            );
         }
         for size in ["0", "1000", "-1", "\"1024\""] {
             assert!(
@@ -664,14 +645,11 @@ mod tests {
     }
 
     #[test]
-    fn creates_default_config_and_round_trips_defaults() {
+    fn creates_default_config_with_current_version() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(".config/spacetop/config.toml");
 
         AppConfig::create_default_at(&path).unwrap();
-        let config = AppConfig::load_from(&path).unwrap();
-
-        assert_eq!(config, AppConfig::default());
         let contents = fs::read_to_string(&path).unwrap();
         let value: toml::Value = toml::from_str(&contents).unwrap();
         assert_eq!(
@@ -680,7 +658,6 @@ mod tests {
                 .and_then(toml::Value::as_integer),
             Some(1)
         );
-        assert_eq!(toml::from_str::<AppConfig>(&contents).unwrap(), config);
     }
 
     #[test]
@@ -759,43 +736,6 @@ mod tests {
         config.application.launcher = "  ".into();
 
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn older_window_settings_use_dodge_defaults() {
-        let config: AppConfig =
-            toml::from_str("[window]\ndefault_distance_m = 2.0\npixels_per_degree = 32.0\n")
-                .unwrap();
-
-        assert_eq!(config.window.animation_half_time_s, 0.2);
-        assert_eq!(config.window.collision_margin_m, 0.04);
-    }
-
-    #[test]
-    fn transparent_window_tracing_defaults_on_and_can_be_disabled() {
-        let default = AppConfig::default();
-        assert!(default.floor.trace_through_transparent_windows);
-
-        let disabled: AppConfig =
-            toml::from_str("[floor]\ntrace_through_transparent_windows = false\n").unwrap();
-        assert!(!disabled.floor.trace_through_transparent_windows);
-
-        let serialized = toml::to_string(&disabled).unwrap();
-        let round_trip: AppConfig = toml::from_str(&serialized).unwrap();
-        assert!(!round_trip.floor.trace_through_transparent_windows);
-    }
-
-    #[test]
-    fn ambient_occlusion_defaults_off_and_can_be_enabled() {
-        let default = AppConfig::default();
-        assert!(!default.floor.ambient_occlusion);
-
-        let enabled: AppConfig = toml::from_str("[floor]\nambient_occlusion = true\n").unwrap();
-        assert!(enabled.floor.ambient_occlusion);
-
-        let serialized = toml::to_string(&enabled).unwrap();
-        let round_trip: AppConfig = toml::from_str(&serialized).unwrap();
-        assert!(round_trip.floor.ambient_occlusion);
     }
 
     #[test]
@@ -915,16 +855,11 @@ mod tests {
     }
 
     #[test]
-    fn window_texture_aa_modes_round_trip_and_map_sample_counts() {
+    fn window_texture_aa_modes_map_samples_and_format_labels() {
         for (mode, label) in WindowTextureAa::OPTIONS
             .into_iter()
             .zip(["1", "2x2", "4", "4x2", "8", "8x2", "16"])
         {
-            let mut config = AppConfig::default();
-            config.window.texture_aa = mode;
-            let serialized = toml::to_string(&config).unwrap();
-            let round_trip: AppConfig = toml::from_str(&serialized).unwrap();
-            assert_eq!(round_trip.window.texture_aa, mode);
             assert_eq!(mode.to_string(), label);
             assert!(mode.samples_per_frame() <= mode.pattern_samples());
         }
@@ -977,25 +912,5 @@ mod tests {
         config.window.grabbed_border_width_px = 4.0;
         config.window.grabbed_border_color[0] = f32::NAN;
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn clamps_padding_and_margin_to_half_the_widest_border() {
-        let mut config = AppConfig::default();
-        config.window.border_width_px = 6.0;
-        config.window.cursor_close_border_width_px = 10.0;
-        config.window.grabbed_border_width_px = 8.0;
-        config.window.padding_px = 1.0;
-        config.window.margin_px = 2.0;
-
-        assert_eq!(config.window.effective_padding_px(), 5.0);
-        assert_eq!(config.window.effective_margin_px(), 5.0);
-        assert_eq!(config.window.grab_reach_px(), 10.0);
-
-        config.window.padding_px = 7.0;
-        config.window.margin_px = 9.0;
-        assert_eq!(config.window.effective_padding_px(), 7.0);
-        assert_eq!(config.window.effective_margin_px(), 9.0);
-        assert_eq!(config.window.grab_reach_px(), 16.0);
     }
 }

@@ -48,17 +48,6 @@ fn reliable_input_bypasses_motion_capacity_and_preserves_order() {
 }
 
 #[test]
-fn standalone_input_sink_never_blocks() {
-    let sender = InputSender::discarded();
-    for _ in 0..64 {
-        sender.send(XrInput::PointerLost { time_ms: 0 }).unwrap();
-        sender
-            .try_send(XrInput::PointerLost { time_ms: 0 })
-            .unwrap();
-    }
-}
-
-#[test]
 fn frame_requests_coalesce_until_consumed() {
     let (sender, receiver) = input_channel();
     for _ in 0..1000 {

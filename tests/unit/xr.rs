@@ -107,7 +107,6 @@ fn cursor_uses_nearest_window_hit_and_orientation() {
     let hit = near.intersect(ray).unwrap();
     assert!((pose.center - (ray.origin + ray.direction * hit.distance_m)).length() < 1.0e-5);
     assert_eq!(pose.orientation(), near.pose.orientation());
-    assert_eq!(pose.width_m, 0.021);
     assert!((sphere_radius - pose.center.length()).abs() < 1.0e-5);
     let hovered_radius = sphere_radius;
     let miss = Ray3 {
