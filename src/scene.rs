@@ -201,9 +201,93 @@ fn memory_type(
         .context("no compatible Vulkan memory type")
 }
 
+#[derive(Clone, Copy)]
+struct SkyboxMip {
+    width: u32,
+    height: u32,
+    buffer_offset: u64,
+}
+
+fn build_skybox_mips(width: u32, height: u32, mut pixels: Vec<f16>) -> (Vec<f16>, Vec<SkyboxMip>) {
+    let mut mips = vec![SkyboxMip {
+        width,
+        height,
+        buffer_offset: 0,
+    }];
+    let mut previous_width = width;
+    let mut previous_height = height;
+
+    while previous_width > 1 || previous_height > 1 {
+        let next_width = (previous_width / 2).max(1);
+        let next_height = (previous_height / 2).max(1);
+        let previous = *mips.last().expect("base skybox mip exists");
+        let previous_offset = previous.buffer_offset as usize / std::mem::size_of::<f16>();
+        let previous_len = (previous.width * previous.height * 4) as usize;
+        let next = downsample_skybox_mip(
+            &pixels[previous_offset..previous_offset + previous_len],
+            previous.width,
+            previous.height,
+            next_width,
+            next_height,
+        );
+        let buffer_offset = std::mem::size_of_val(pixels.as_slice()) as u64;
+        pixels.extend(next);
+        mips.push(SkyboxMip {
+            width: next_width,
+            height: next_height,
+            buffer_offset,
+        });
+        previous_width = next_width;
+        previous_height = next_height;
+    }
+
+    (pixels, mips)
+}
+
+fn downsample_skybox_mip(
+    source: &[f16],
+    source_width: u32,
+    source_height: u32,
+    width: u32,
+    height: u32,
+) -> Vec<f16> {
+    let mut output = vec![f16::ZERO; (width * height * 4) as usize];
+    for y in 0..height {
+        let source_y_start = y as f32 * source_height as f32 / height as f32;
+        let source_y_end = (y + 1) as f32 * source_height as f32 / height as f32;
+        for x in 0..width {
+            let source_x_start = x as f32 * source_width as f32 / width as f32;
+            let source_x_end = (x + 1) as f32 * source_width as f32 / width as f32;
+            let mut sum = [0.0; 4];
+            let mut total_weight = 0.0;
+            for source_y in source_y_start.floor() as u32..source_y_end.ceil() as u32 {
+                let y_start = source_y_start.max(source_y as f32);
+                let y_end = source_y_end.min(source_y as f32 + 1.0);
+                let latitude_weight = (std::f32::consts::PI * y_start / source_height as f32).cos()
+                    - (std::f32::consts::PI * y_end / source_height as f32).cos();
+                for source_x in source_x_start.floor() as u32..source_x_end.ceil() as u32 {
+                    let x_start = source_x_start.max(source_x as f32);
+                    let x_end = source_x_end.min(source_x as f32 + 1.0);
+                    let weight = (x_end - x_start) * latitude_weight;
+                    let source_index = ((source_y * source_width + source_x) * 4) as usize;
+                    for channel in 0..4 {
+                        sum[channel] += source[source_index + channel].to_f32() * weight;
+                    }
+                    total_weight += weight;
+                }
+            }
+            let destination_index = ((y * width + x) * 4) as usize;
+            for channel in 0..4 {
+                output[destination_index + channel] = f16::from_f32(sum[channel] / total_weight);
+            }
+        }
+    }
+    output
+}
+
 pub(crate) struct SkyboxTexture {
     device: ash::Device,
-    extent: vk::Extent2D,
+    mips: Vec<SkyboxMip>,
     image: vk::Image,
     memory: vk::DeviceMemory,
     view: vk::ImageView,
@@ -235,11 +319,12 @@ impl SkyboxTexture {
             .into_iter()
             .map(f16::from_f32)
             .collect::<Vec<_>>();
+        let (pixels, mips) = build_skybox_mips(extent.width, extent.height, pixels);
         let upload_size = std::mem::size_of_val(pixels.as_slice()) as u64;
         let device = &renderer.device;
         let mut skybox = Self {
             device: device.clone(),
-            extent,
+            mips,
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: vk::ImageView::null(),
@@ -255,7 +340,7 @@ impl SkyboxTexture {
                         height: extent.height,
                         depth: 1,
                     })
-                    .mip_levels(1)
+                    .mip_levels(skybox.mips.len() as u32)
                     .array_layers(1)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
@@ -275,11 +360,18 @@ impl SkyboxTexture {
                 None,
             )?;
             device.bind_image_memory(skybox.image, skybox.memory, 0)?;
-            skybox.view = image_view(
-                device,
-                skybox.image,
-                vk::Format::R16G16B16A16_SFLOAT,
-                vk::ImageAspectFlags::COLOR,
+            skybox.view = device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(skybox.image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(vk::Format::R16G16B16A16_SFLOAT)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .level_count(skybox.mips.len() as u32)
+                            .layer_count(1),
+                    ),
+                None,
             )?;
             let buffer = device.create_buffer(
                 &vk::BufferCreateInfo::default()
@@ -347,7 +439,30 @@ impl SkyboxTexture {
         let Some((buffer, _)) = self.staging else {
             return;
         };
-        let range = image_range(vk::ImageAspectFlags::COLOR);
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(self.mips.len() as u32)
+            .layer_count(1);
+        let regions = self
+            .mips
+            .iter()
+            .enumerate()
+            .map(|(level, mip)| {
+                vk::BufferImageCopy::default()
+                    .buffer_offset(mip.buffer_offset)
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(level as u32)
+                            .layer_count(1),
+                    )
+                    .image_extent(vk::Extent3D {
+                        width: mip.width,
+                        height: mip.height,
+                        depth: 1,
+                    })
+            })
+            .collect::<Vec<_>>();
         let to_transfer = vk::ImageMemoryBarrier::default()
             .image(self.image)
             .subresource_range(range)
@@ -371,17 +486,7 @@ impl SkyboxTexture {
                 buffer,
                 self.image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[vk::BufferImageCopy::default()
-                    .image_subresource(
-                        vk::ImageSubresourceLayers::default()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .layer_count(1),
-                    )
-                    .image_extent(vk::Extent3D {
-                        width: self.extent.width,
-                        height: self.extent.height,
-                        depth: 1,
-                    })],
+                &regions,
             );
             let to_shader = vk::ImageMemoryBarrier::default()
                 .image(self.image)
@@ -1035,9 +1140,11 @@ impl SceneRenderer {
                 &vk::SamplerCreateInfo::default()
                     .mag_filter(vk::Filter::LINEAR)
                     .min_filter(vk::Filter::LINEAR)
+                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
                     .address_mode_u(vk::SamplerAddressMode::REPEAT)
                     .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .max_lod(vk::LOD_CLAMP_NONE),
                 None,
             )?;
             let constants = [vk::PushConstantRange::default()
@@ -1691,6 +1798,38 @@ mod tests {
             shader("environment", naga::ShaderStage::Fragment, true).unwrap()[0],
             0x0723_0203
         );
+    }
+
+    #[test]
+    fn skybox_mip_chain_reduces_dimensions_and_preserves_constant_color() {
+        let base = (0..4 * 2)
+            .flat_map(|_| {
+                [
+                    f16::from_f32(2.0),
+                    f16::from_f32(1.0),
+                    f16::from_f32(0.5),
+                    f16::from_f32(1.0),
+                ]
+            })
+            .collect();
+        let (pixels, mips) = build_skybox_mips(4, 2, base);
+
+        assert_eq!(
+            mips.iter()
+                .map(|mip| (mip.width, mip.height))
+                .collect::<Vec<_>>(),
+            [(4, 2), (2, 1), (1, 1)]
+        );
+        assert_eq!(pixels.len(), (4 * 2 + 2 + 1) * 4);
+        for mip in mips {
+            let offset = mip.buffer_offset as usize / std::mem::size_of::<f16>();
+            for pixel in pixels[offset..offset + (mip.width * mip.height * 4) as usize].chunks(4) {
+                assert_eq!(pixel[0].to_f32(), 2.0);
+                assert_eq!(pixel[1].to_f32(), 1.0);
+                assert_eq!(pixel[2].to_f32(), 0.5);
+                assert_eq!(pixel[3].to_f32(), 1.0);
+            }
+        }
     }
 
     #[test]
