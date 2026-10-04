@@ -39,3 +39,11 @@ fn sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
     let random = vec2(sample_hash(seed), sample_hash(seed ^ 0x85ebca6bu));
     return vec2<f32>(random >> vec2(8u)) / 16777216.0;
 }
+fn ao_sample_jitter(position: vec3<f32>, index: u32) -> vec2<f32> {
+    let position_bits = bitcast<vec2<u32>>(position.xz);
+    let seed = sample_hash(
+        position_bits.x ^ sample_hash(position_bits.y) ^ sample_hash(index + 0x9e3779b9u),
+    );
+    let random = vec2(sample_hash(seed), sample_hash(seed ^ 0x85ebca6bu));
+    return vec2<f32>(random >> vec2(8u)) / 16777216.0;
+}

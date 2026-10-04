@@ -72,6 +72,7 @@ reflectance = 0.18
 ray_count = 4
 reflection_grain_size_m = 0.002
 trace_through_transparent_windows = false
+ambient_occlusion = false
 radius_degrees = 90.0
 feathering_m = 0.0
 
@@ -112,6 +113,10 @@ ray samples only its nearest window hit (or the skybox on a miss). Set it to
 `true` to continue through transparent window texels and composite farther hits.
 The renderer uses separate precompiled shader variants, so the setting does not
 add a runtime shader branch to the default first-hit path.
+`floor.ambient_occlusion` defaults to `false` and can be enabled from the
+experimental ambient-occlusion setting in SpaceSettings. When enabled, windows
+reduce the floor's diffuse sky illumination according to their coverage of the
+sky.
 `floor.radius_degrees` sets the ground's outer radius as an angle from straight
 down (`-Y`), between 0 and 90 degrees. `floor.feathering_m` sets how far inward
 from that edge the ground smoothly fades into the skybox, between 0 and 7 meters.

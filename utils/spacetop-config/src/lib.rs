@@ -44,6 +44,7 @@ pub struct FloorConfig {
     pub reflectance: f32,
     pub ray_count: u32,
     pub trace_through_transparent_windows: bool,
+    pub ambient_occlusion: bool,
     pub reflection_grain_size_m: f32,
     pub radius_degrees: f32,
     pub feathering_m: f32,
@@ -283,6 +284,7 @@ impl Default for FloorConfig {
             reflectance: 0.15,
             ray_count: 1,
             trace_through_transparent_windows: true,
+            ambient_occlusion: false,
             reflection_grain_size_m: 0.001,
             radius_degrees: 90.0,
             feathering_m: 0.0,
@@ -863,6 +865,19 @@ mod tests {
         let serialized = toml::to_string(&disabled).unwrap();
         let round_trip: AppConfig = toml::from_str(&serialized).unwrap();
         assert!(!round_trip.floor.trace_through_transparent_windows);
+    }
+
+    #[test]
+    fn ambient_occlusion_defaults_off_and_can_be_enabled() {
+        let default = AppConfig::default();
+        assert!(!default.floor.ambient_occlusion);
+
+        let enabled: AppConfig = toml::from_str("[floor]\nambient_occlusion = true\n").unwrap();
+        assert!(enabled.floor.ambient_occlusion);
+
+        let serialized = toml::to_string(&enabled).unwrap();
+        let round_trip: AppConfig = toml::from_str(&serialized).unwrap();
+        assert!(round_trip.floor.ambient_occlusion);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = false;
+const AMBIENT_OCCLUSION: bool = false;
 
 struct SkyVertex {
     @builtin(position) position: vec4<f32>,
@@ -104,6 +105,128 @@ fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f3
     }
     return sample_environment_skybox(ray, mip_level);
 }
+// Returns a truncated Cauchy sample and its inverse PDF in window-space meters.
+fn sample_window_offset(bounds: vec2<f32>, scale: f32, random: f32) -> vec2<f32> {
+    let angle_span = atan2(
+        scale * (bounds.y - bounds.x),
+        scale * scale + bounds.x * bounds.y,
+    );
+    let angle = random * angle_span;
+    let sine = sin(angle);
+    let cosine = cos(angle);
+    let offset = clamp(
+        scale * (bounds.x * cosine + scale * sine)
+            / (scale * cosine - bounds.x * sine),
+        bounds.x,
+        bounds.y,
+    );
+    let inverse_pdf = angle_span * (scale * scale + offset * offset) / scale;
+    return vec2(offset, inverse_pdf);
+}
+fn window_blocked_diffuse_irradiance(origin: vec3<f32>) -> vec3<f32> {
+    var blocked = vec3(0.0);
+    let base_dimensions = textureDimensions(environment_skybox, 0u);
+    let mip_count = textureNumLevels(environment_skybox);
+    for (var index = 0u; index < window_buffer.count; index += 1u) {
+        let window = window_buffer.windows[index];
+        let center = window.center_width.xyz;
+        let width = window.center_width.w;
+        let right = window.right_height.xyz;
+        let height = window.right_height.w;
+        let up = window.up.xyz;
+
+        let center_to_window = center - origin;
+        let center_distance_squared = dot(center_to_window, center_to_window);
+        if center_distance_squared <= 0.0001 { continue; }
+        let reference_u = skybox_uv(normalize(center_to_window)).x;
+        var window_uv_min = vec2(1.0e30);
+        var window_uv_max = vec2(-1.0e30);
+        var crosses_pole = false;
+        for (var corner_index = 0u; corner_index < 4u; corner_index += 1u) {
+            let horizontal = select(-0.5, 0.5, (corner_index & 1u) != 0u);
+            let vertical = select(-0.5, 0.5, (corner_index & 2u) != 0u);
+            let corner = center + right * horizontal * width + up * vertical * height;
+            let to_corner = corner - origin;
+            if dot(to_corner, to_corner) <= 0.0001 {
+                crosses_pole = true;
+                break;
+            }
+            let corner_uv = skybox_uv(normalize(to_corner));
+            var delta_u = corner_uv.x - reference_u;
+            if delta_u > 0.5 { delta_u -= 1.0; }
+            if delta_u < -0.5 { delta_u += 1.0; }
+            let unwrapped_u = reference_u + delta_u;
+            window_uv_min = min(window_uv_min, vec2(unwrapped_u, corner_uv.y));
+            window_uv_max = max(window_uv_max, vec2(unwrapped_u, corner_uv.y));
+        }
+        if crosses_pole { continue; }
+        let window_uv_center = (window_uv_min + window_uv_max) * 0.5;
+        let sky_uv = vec2(fract(window_uv_center.x), window_uv_center.y);
+        let window_texel_width =
+            (window_uv_max.x - window_uv_min.x) * f32(base_dimensions.x);
+        let window_texel_height =
+            (window_uv_max.y - window_uv_min.y) * f32(base_dimensions.y);
+        var coarsest_two_row_mip = 0u;
+        for (var candidate_mip = 0u; candidate_mip < mip_count; candidate_mip += 1u) {
+            if textureDimensions(environment_skybox, candidate_mip).y < 2u { break; }
+            coarsest_two_row_mip = candidate_mip;
+        }
+        let mip_level = min(
+            max(log2(max(max(window_texel_width, window_texel_height), 1.0)), 0.0),
+            f32(coarsest_two_row_mip),
+        );
+        let jitter = ao_sample_jitter(origin, index);
+        let normal = normalize(cross(right, up));
+        let plane_distance = abs(dot(center_to_window, normal));
+        var offset = vec2((jitter.x - 0.5) * width, (0.5 - jitter.y) * height);
+        var inverse_area_pdf = width * height;
+        // Keep uniform sampling beyond a window diagonal, where distance weighting is weak.
+        if plane_distance * plane_distance < width * width + height * height {
+            let projected_center = vec2(dot(center_to_window, right), dot(center_to_window, up));
+            let horizontal_bounds = projected_center.x + vec2(-0.5, 0.5) * width;
+            let vertical_bounds = projected_center.y + vec2(-0.5, 0.5) * height;
+            let nearest_vertical = clamp(0.0, vertical_bounds.x, vertical_bounds.y);
+            // Bias toward nearby surface area; regularize only the proposal, not the geometry.
+            let horizontal_scale = max(
+                sqrt(plane_distance * plane_distance + nearest_vertical * nearest_vertical),
+                0.0001,
+            );
+            let horizontal_sample =
+                sample_window_offset(horizontal_bounds, horizontal_scale, jitter.x);
+            let vertical_scale = max(
+                sqrt(plane_distance * plane_distance + horizontal_sample.x * horizontal_sample.x),
+                0.0001,
+            );
+            let vertical_sample = sample_window_offset(vertical_bounds, vertical_scale, jitter.y);
+            offset = vec2(horizontal_sample.x, vertical_sample.x) - projected_center;
+            inverse_area_pdf = horizontal_sample.y * vertical_sample.y;
+        }
+        let window_uv = vec2(offset.x / width + 0.5, 0.5 - offset.y / height);
+        let point_on_window = center
+            + right * offset.x
+            + up * offset.y;
+        let to_window_sample = point_on_window - origin;
+        let distance_squared = dot(to_window_sample, to_window_sample);
+        if distance_squared <= 0.0001 { continue; }
+        let direction_to_window_sample = to_window_sample * inverseSqrt(distance_squared);
+        if direction_to_window_sample.y <= 0.0 { continue; }
+
+        let window_cosine = abs(dot(normal, direction_to_window_sample));
+        if window_cosine <= 0.00001 { continue; }
+
+        // Divide by the joint area PDF instead of multiplying by uniform window area.
+        let window_cosine_weighted_area =
+            inverse_area_pdf * window_cosine * direction_to_window_sample.y / distance_squared;
+        let radiance = skybox_exposure() * textureSampleLevel(
+            environment_skybox,
+            environment_sky_filter,
+            sky_uv,
+            mip_level,
+        ).rgb;
+        blocked += radiance * window_cosine_weighted_area / PI;
+    }
+    return blocked;
+}
 @fragment fn environment(input: SkyVertex) -> @location(0) vec4<f32> {
     let eye = transform.eye_position.xyz;
     let incident = normalize(input.direction);
@@ -146,7 +269,14 @@ fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f3
     let view_masking = ggx_masking(view.y, alpha_squared);
     let fresnel = fresnel_schlick(-incident.y);
     let opacity = floor_material.albedo.a;
-    var ground = floor_material.albedo.rgb * floor_material.diffuse_irradiance.rgb
+    var visible_diffuse_irradiance = floor_material.diffuse_irradiance.rgb;
+    if AMBIENT_OCCLUSION {
+        visible_diffuse_irradiance = max(
+            visible_diffuse_irradiance - window_blocked_diffuse_irradiance(world),
+            vec3(0.0),
+        );
+    }
+    var ground = floor_material.albedo.rgb * visible_diffuse_irradiance
         * (1.0 - fresnel) * opacity;
     if opacity < 1.0 {
         ground += sample_environment_skybox(incident, 0.0) * (1.0 - opacity);

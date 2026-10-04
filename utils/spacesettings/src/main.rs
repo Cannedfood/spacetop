@@ -54,6 +54,7 @@ enum Message {
     ReflectionGrainSizeChanged(f32),
     RayCountChanged(u32),
     TransparentReflectionsChanged(bool),
+    AmbientOcclusionChanged(bool),
     GroundRadiusChanged(f32),
     GroundFeatheringChanged(f32),
     WindowDistanceChanged(String),
@@ -89,6 +90,7 @@ enum ResetTarget {
     FloorReflectance,
     FloorRayCount,
     FloorTransparentReflections,
+    FloorAmbientOcclusion,
     FloorReflectionGrainSize,
     FloorRadius,
     FloorFeathering,
@@ -187,6 +189,7 @@ impl SettingsApp {
                 | Message::ReflectionGrainSizeChanged(_)
                 | Message::RayCountChanged(_)
                 | Message::TransparentReflectionsChanged(_)
+                | Message::AmbientOcclusionChanged(_)
                 | Message::WindowDistanceChanged(_)
                 | Message::WindowVerticalAngleChanged(_)
                 | Message::WindowPixelsPerDegreeChanged(_)
@@ -282,6 +285,9 @@ impl SettingsApp {
             Message::RayCountChanged(value) => self.config.floor.ray_count = value,
             Message::TransparentReflectionsChanged(value) => {
                 self.config.floor.trace_through_transparent_windows = value;
+            }
+            Message::AmbientOcclusionChanged(value) => {
+                self.config.floor.ambient_occlusion = value;
             }
             Message::GroundRadiusChanged(value) => self.config.floor.radius_degrees = value,
             Message::GroundFeatheringChanged(value) => self.config.floor.feathering_m = value,
@@ -392,6 +398,9 @@ impl SettingsApp {
             ResetTarget::FloorTransparentReflections => {
                 self.config.floor.trace_through_transparent_windows =
                     defaults.floor.trace_through_transparent_windows;
+            }
+            ResetTarget::FloorAmbientOcclusion => {
+                self.config.floor.ambient_occlusion = defaults.floor.ambient_occlusion;
             }
             ResetTarget::FloorReflectionGrainSize => {
                 self.config.floor.reflection_grain_size_m = defaults.floor.reflection_grain_size_m;
@@ -864,6 +873,17 @@ impl SettingsApp {
                     ),
                 ]
                 .align_y(iced::Alignment::Center),
+                row![
+                    checkbox(self.config.floor.ambient_occlusion)
+                        .label("Enable ambient occlusion (experimental)")
+                        .on_toggle(Message::AmbientOcclusionChanged)
+                        .width(Length::Fill),
+                    reset_button(
+                        self.config.floor.ambient_occlusion == defaults.floor.ambient_occlusion,
+                        ResetTarget::FloorAmbientOcclusion,
+                    ),
+                ]
+                .align_y(iced::Alignment::Center),
                 slider_row(
                     "REFLECTION GRID (MM)",
                     self.config.floor.reflection_grain_size_m * 1000.0,
@@ -907,7 +927,8 @@ impl SettingsApp {
                 && self.config.floor.radius_degrees == defaults.floor.radius_degrees
                 && self.config.floor.feathering_m == defaults.floor.feathering_m
                 && self.config.floor.trace_through_transparent_windows
-                    == defaults.floor.trace_through_transparent_windows,
+                    == defaults.floor.trace_through_transparent_windows
+                && self.config.floor.ambient_occlusion == defaults.floor.ambient_occlusion,
             ResetTarget::FloorSection,
         );
 
@@ -1613,6 +1634,17 @@ mod tests {
     }
 
     #[test]
+    fn ambient_occlusion_setting_can_be_toggled_and_reset() {
+        let mut app = SettingsApp::from_config(AppConfig::default(), String::new(), false);
+
+        let _ = app.update(Message::AmbientOcclusionChanged(true));
+        assert!(app.config.floor.ambient_occlusion);
+
+        app.reset(ResetTarget::FloorAmbientOcclusion);
+        assert!(!app.config.floor.ambient_occlusion);
+    }
+
+    #[test]
     fn section_resets_restore_defaults_and_text_fields() {
         let defaults = AppConfig::default();
         let mut config = defaults.clone();
@@ -1621,6 +1653,7 @@ mod tests {
         config.background.brightness_stops = 1.0;
         config.floor.height_m = -2.0;
         config.floor.roughness = 0.8;
+        config.floor.ambient_occlusion = true;
         config.window.default_distance_m = 2.0;
         config.window.default_vertical_angle_degrees = 10.0;
         config.window.pixels_per_degree = 40.0;

@@ -40,6 +40,7 @@ fn shader(
     entry: &str,
     stage: naga::ShaderStage,
     trace_through_transparent_windows: bool,
+    ambient_occlusion: bool,
     reflection_arrays: bool,
 ) -> Result<Vec<u32>> {
     let mut shader_source = SHADER_PARTS.join("\n").replace(
@@ -48,6 +49,10 @@ fn shader(
             "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = {};",
             trace_through_transparent_windows
         ),
+    );
+    shader_source = shader_source.replace(
+        "const AMBIENT_OCCLUSION: bool = false;",
+        &format!("const AMBIENT_OCCLUSION: bool = {ambient_occlusion};"),
     );
     if !reflection_arrays {
         shader_source = shader_source
@@ -1052,9 +1057,9 @@ pub(crate) struct SceneRenderer {
     layout: vk::PipelineLayout,
     window_pipeline: vk::Pipeline,
     cursor_pipeline: vk::Pipeline,
-    environment_first_hit_pipeline: vk::Pipeline,
-    environment_transparent_pipeline: vk::Pipeline,
+    environment_pipelines: [vk::Pipeline; 4],
     trace_through_transparent_windows: bool,
+    ambient_occlusion: bool,
     window_padding_px: f32,
     max_border_width_px: f32,
 }
@@ -1189,9 +1194,9 @@ impl SceneRenderer {
             layout: vk::PipelineLayout::null(),
             window_pipeline: vk::Pipeline::null(),
             cursor_pipeline: vk::Pipeline::null(),
-            environment_first_hit_pipeline: vk::Pipeline::null(),
-            environment_transparent_pipeline: vk::Pipeline::null(),
+            environment_pipelines: [vk::Pipeline::null(); 4],
             trace_through_transparent_windows: config.floor.trace_through_transparent_windows,
+            ambient_occlusion: config.floor.ambient_occlusion,
             window_padding_px: config.window.effective_padding_px(),
             max_border_width_px: config.window.max_border_width_px(),
         };
@@ -1434,10 +1439,14 @@ impl SceneRenderer {
                 None,
             )?;
         }
-        renderer.window_pipeline = renderer.pipeline("window", false)?;
-        renderer.cursor_pipeline = renderer.pipeline("cursor", false)?;
-        renderer.environment_first_hit_pipeline = renderer.pipeline("environment", false)?;
-        renderer.environment_transparent_pipeline = renderer.pipeline("environment", true)?;
+        renderer.window_pipeline = renderer.pipeline("window", false, false)?;
+        renderer.cursor_pipeline = renderer.pipeline("cursor", false, false)?;
+        renderer.environment_pipelines = [
+            renderer.pipeline("environment", false, false)?,
+            renderer.pipeline("environment", true, false)?,
+            renderer.pipeline("environment", false, true)?,
+            renderer.pipeline("environment", true, true)?,
+        ];
         Ok(renderer)
     }
 
@@ -1504,6 +1513,7 @@ impl SceneRenderer {
         self.validate_atlas_size(atlas_size)?;
         self.atlas_size = atlas_size;
         self.trace_through_transparent_windows = config.floor.trace_through_transparent_windows;
+        self.ambient_occlusion = config.floor.ambient_occlusion;
         self.window_padding_px = config.window.effective_padding_px();
         self.max_border_width_px = config.window.max_border_width_px();
         let uniform = FloorUniform::from_config(config, self.skybox_diffuse_irradiance);
@@ -1974,6 +1984,7 @@ impl SceneRenderer {
         &self,
         fragment: &str,
         trace_through_transparent_windows: bool,
+        ambient_occlusion: bool,
     ) -> Result<vk::Pipeline> {
         let vertex_name = if fragment == "environment" {
             c"sky_vertex"
@@ -1984,12 +1995,14 @@ impl SceneRenderer {
             vertex_name.to_str()?,
             naga::ShaderStage::Vertex,
             trace_through_transparent_windows,
+            ambient_occlusion,
             self.reflection_arrays,
         )?;
         let fragment_code = shader(
             fragment,
             naga::ShaderStage::Fragment,
             trace_through_transparent_windows,
+            ambient_occlusion,
             self.reflection_arrays,
         )?;
         let vertex = unsafe {
@@ -2172,11 +2185,8 @@ impl SceneRenderer {
             self.device.cmd_bind_pipeline(
                 command,
                 vk::PipelineBindPoint::GRAPHICS,
-                if self.trace_through_transparent_windows {
-                    self.environment_transparent_pipeline
-                } else {
-                    self.environment_first_hit_pipeline
-                },
+                self.environment_pipelines[usize::from(self.ambient_occlusion) * 2
+                    + usize::from(self.trace_through_transparent_windows)],
             );
             self.draw_panel(command, sky_matrix(view));
             self.device.cmd_bind_pipeline(
@@ -2285,10 +2295,9 @@ impl SceneRenderer {
 impl Drop for SceneRenderer {
     fn drop(&mut self) {
         unsafe {
-            self.device
-                .destroy_pipeline(self.environment_first_hit_pipeline, None);
-            self.device
-                .destroy_pipeline(self.environment_transparent_pipeline, None);
+            for pipeline in self.environment_pipelines {
+                self.device.destroy_pipeline(pipeline, None);
+            }
             self.device.destroy_pipeline(self.cursor_pipeline, None);
             self.device.destroy_pipeline(self.window_pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
@@ -2479,20 +2488,25 @@ mod tests {
                 ("environment", naga::ShaderStage::Fragment),
             ] {
                 assert_eq!(
-                    shader(entry, stage, false, reflection_arrays).unwrap()[0],
+                    shader(entry, stage, false, false, reflection_arrays).unwrap()[0],
                     0x0723_0203
                 );
             }
-            assert_eq!(
-                shader(
-                    "environment",
-                    naga::ShaderStage::Fragment,
-                    true,
-                    reflection_arrays
-                )
-                .unwrap()[0],
-                0x0723_0203
-            );
+            for trace_transparent in [false, true] {
+                for ambient_occlusion in [false, true] {
+                    assert_eq!(
+                        shader(
+                            "environment",
+                            naga::ShaderStage::Fragment,
+                            trace_transparent,
+                            ambient_occlusion,
+                            reflection_arrays
+                        )
+                        .unwrap()[0],
+                        0x0723_0203
+                    );
+                }
+            }
         }
     }
 
