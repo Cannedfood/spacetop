@@ -67,14 +67,49 @@ fn pointer_coordinates_match_logical_content_pixels() {
 }
 
 #[test]
-fn resize_panel_excludes_wayland_window_padding() {
+fn panel_bounds_use_wayland_window_geometry() {
+    let mut app = super::fixture::WaylandApp::new(None);
+    app.xdg_surface.set_window_geometry(10, 5, 80, 40);
+    app.surface.commit();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+
+    let panel = &app.compositor.panels[0];
+    let geometry = panel.geometry.unwrap();
+    assert_eq!(geometry.logical_size, (80, 40).into());
+    assert_eq!(panel.bounds.loc, (10, 5).into());
+
+    let ray = Ray3 {
+        origin: geometry.pose.center
+            + geometry.pose.orientation()
+                * Vec3::new(0.0, 0.0, 1.0),
+        direction: geometry.pose.orientation() * Vec3::NEG_Z,
+    };
+    assert!(app.compositor.dispatch_ray(ray, 1));
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert_eq!(app.client.motions.last(), Some(&(50.0, 25.0)));
+}
+
+#[test]
+fn resize_panel_uses_wayland_window_geometry_size() {
     let mut app = super::fixture::WaylandApp::new(None);
     let panel_id = app.compositor.panels[0].id;
     for (geometry, requested, expected) in [
         (None, (120, 70), (120, 70)),
-        (Some((10, 5, 80, 40)), (100, 50), (80, 40)),
-        (Some((10, 5, 80, 40)), (120, 70), (100, 60)),
-        (Some((10, 5, 80, 40)), (130, 80), (110, 70)),
+        (Some((10, 5, 80, 40)), (100, 50), (100, 50)),
+        (Some((10, 5, 80, 40)), (120, 70), (120, 70)),
+        (Some((10, 5, 80, 40)), (130, 80), (130, 80)),
         (Some((10, 5, 80, 40)), (1, 1), (1, 1)),
     ] {
         if let Some((x, y, width, height)) = geometry {

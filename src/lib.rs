@@ -503,9 +503,13 @@ impl Compositor {
             });
         }
         self.panels[index].geometry = logical_size.map(|logical_size| {
+            let root = self.panels[index].surface.wl_surface().clone();
             let bounds = self.panel_surfaces(index).into_iter().fold(
-                Rectangle::from_size(logical_size),
+                Self::surface_geometry(&root),
                 |bounds, (surface, offset)| {
+                    if surface == root {
+                        return bounds;
+                    }
                     let child = bbox_from_surface_tree(&surface, offset);
                     if child.size.w > 0 && child.size.h > 0 {
                         bounds.merge(child)
