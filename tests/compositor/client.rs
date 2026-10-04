@@ -34,6 +34,7 @@ pub(super) struct TestClient {
     pub(super) pointer_surface: Option<wl_surface::WlSurface>,
     pub(super) popup_configures: Vec<(i32, i32, i32, i32)>,
     pub(super) toplevel_configures: Vec<(i32, i32)>,
+    pub(super) toplevel_closes: usize,
     pub(super) popup_done: usize,
     pub(super) repositioned: Vec<u32>,
     pub(super) motions: Vec<(f64, f64)>,
@@ -289,6 +290,8 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for TestClient {
     ) {
         if let xdg_toplevel::Event::Configure { width, height, .. } = event {
             state.toplevel_configures.push((width, height));
+        } else if let xdg_toplevel::Event::Close = event {
+            state.toplevel_closes += 1;
         }
     }
 }
