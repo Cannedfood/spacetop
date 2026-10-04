@@ -5,7 +5,7 @@
 The Cargo package provides both the `spacetop` library and executable:
 
 - [src/lib.rs](src/lib.rs) owns private compositor state and Wayland protocol handlers. Rendering, input, X11, and XR implementation modules remain private.
-- [src/runtime.rs](src/runtime.rs) owns backend startup, sockets, the event loop, and fatal-error propagation. The library exports `run`, `run_xr_client`, and `DisplayNames` from this module.
+- [src/runtime.rs](src/runtime.rs) owns backend startup, sockets, the event loop, and fatal-error propagation. The library exports the runtime entry points and `DisplayNames` from this module.
 - [src/main.rs](src/main.rs) handles CLI parsing and application process spawning, including the child's display environment. The library does not parse CLI arguments or choose which application to launch.
 
 `run` blocks until the compositor stops and accepts a one-shot readiness callback
@@ -14,7 +14,7 @@ The callback runs on the compositor thread after XWayland's window manager is
 ready, or after socket registration when XWayland is unavailable. Readiness does
 not imply that XR/GPU setup has completed. Callback failures stop the compositor.
 The executable uses this callback for `--app`; library callers can provide their
-own startup action. `run_xr_client` retains the standalone XR mode.
+own startup action. The OpenXR client starts alongside the compositor.
 
 ## X11 Applications
 

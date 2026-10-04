@@ -1,55 +1,16 @@
-use std::{
-    process::{Child, Command},
-    sync::{Arc, Mutex},
-};
+use std::process::{Child, Command};
 
-use anyhow::{Context, anyhow};
-use spacetop_config::AppConfig;
+use anyhow::Context;
 
-pub(crate) fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
-    let args = args.into_iter().collect::<Vec<_>>();
-    if args.iter().any(|argument| argument == "--xr-client") {
-        if args
-            .iter()
-            .any(|argument| argument.starts_with("--launcher="))
-        {
-            anyhow::bail!("--launcher cannot be used with --xr-client");
-        }
-        return spacetop::run_xr_client();
+impl spacetop::RuntimeCallbacks for LauncherController {
+    fn on_ready(&mut self, displays: spacetop::DisplayNames) -> anyhow::Result<()> {
+        self.set_displays(displays);
+        Ok(())
     }
 
-    let mut config = AppConfig::load()?;
-    apply_launcher_override(&mut config, &args)?;
-    let launcher = Arc::new(Mutex::new(LauncherController::new(
-        config.application.launcher.clone(),
-    )));
-    let ready_launcher = Arc::clone(&launcher);
-    spacetop::run_with_config(
-        config,
-        move |displays| {
-            ready_launcher
-                .lock()
-                .map_err(|_| anyhow!("launcher controller lock poisoned"))?
-                .set_displays(displays);
-            Ok(())
-        },
-        move || {
-            launcher
-                .lock()
-                .map_err(|_| anyhow!("launcher controller lock poisoned"))?
-                .toggle()
-        },
-    )
-}
-
-pub(crate) fn apply_launcher_override(
-    config: &mut AppConfig,
-    args: &[String],
-) -> anyhow::Result<()> {
-    if let Some(program) = parse_launcher_argument(args).map_err(anyhow::Error::msg)? {
-        config.application.launcher = program;
+    fn on_launcher_toggle(&mut self) -> anyhow::Result<()> {
+        self.toggle()
     }
-    Ok(())
 }
 
 pub(crate) struct LauncherController {
@@ -132,25 +93,4 @@ impl Drop for LauncherController {
             }
         }
     }
-}
-
-pub(crate) fn parse_launcher_argument(args: &[String]) -> Result<Option<String>, String> {
-    let mut launcher = None;
-    for argument in args {
-        if let Some(value) = argument.strip_prefix("--launcher=") {
-            if value.is_empty() {
-                return Err(
-                    "--launcher requires an executable name, e.g. --launcher=spacelauncher".into(),
-                );
-            }
-            if launcher.replace(value.to_owned()).is_some() {
-                return Err("--launcher may only be specified once".into());
-            }
-        } else if argument != "--xr-client" {
-            return Err(format!(
-                "unknown argument `{argument}`; supported: --launcher=PROGRAM"
-            ));
-        }
-    }
-    Ok(launcher)
 }

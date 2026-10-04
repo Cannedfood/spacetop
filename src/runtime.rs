@@ -1,4 +1,4 @@
-use std::{ffi::OsString, sync::Arc, thread};
+use std::{cell::RefCell, ffi::OsString, rc::Rc, sync::Arc, thread};
 
 use smithay::{
     reexports::{
@@ -20,6 +20,11 @@ pub struct DisplayNames {
     pub x11: Option<String>,
 }
 
+pub trait RuntimeCallbacks {
+    fn on_ready(&mut self, displays: DisplayNames) -> anyhow::Result<()>;
+    fn on_launcher_toggle(&mut self) -> anyhow::Result<()>;
+}
+
 pub(crate) type ReadyCallback = Box<dyn FnOnce(Option<String>) -> anyhow::Result<()>>;
 
 pub fn run(
@@ -33,8 +38,22 @@ pub fn run(
 pub fn run_with_config(
     config: AppConfig,
     on_ready: impl FnOnce(DisplayNames) -> anyhow::Result<()> + 'static,
-    mut on_launcher_toggle: impl FnMut() -> anyhow::Result<()> + 'static,
+    on_launcher_toggle: impl FnMut() -> anyhow::Result<()> + 'static,
 ) -> anyhow::Result<()> {
+    run_with_callbacks(
+        config,
+        CallbackPair {
+            on_ready: Some(on_ready),
+            on_launcher_toggle,
+        },
+    )
+}
+
+pub fn run_with_callbacks(
+    config: AppConfig,
+    callbacks: impl RuntimeCallbacks + 'static,
+) -> anyhow::Result<()> {
+    let callbacks = Rc::new(RefCell::new(callbacks));
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
     let display: Display<Compositor> = Display::new()?;
     let display_handle = display.handle();
@@ -58,8 +77,9 @@ pub fn run_with_config(
     let socket = ListeningSocketSource::new_auto()?;
     let wayland_display = socket.socket_name().to_os_string();
     eprintln!("Wayland display: {}", wayland_display.to_string_lossy());
+    let ready_callbacks = Rc::clone(&callbacks);
     compositor.ready_callback = Some(Box::new(move |x11| {
-        on_ready(DisplayNames {
+        ready_callbacks.borrow_mut().on_ready(DisplayNames {
             wayland: wayland_display,
             x11,
         })
@@ -76,6 +96,7 @@ pub fn run_with_config(
     if waiting_for_xwayland.is_none() {
         compositor.notify_ready(None)?;
     }
+    let launcher_callbacks = Rc::clone(&callbacks);
     event_loop
         .handle()
         .insert_source(input_receiver, move |event, _, compositor| {
@@ -84,7 +105,7 @@ pub fn run_with_config(
                 let started = std::time::Instant::now();
                 match command {
                     XrInput::LauncherToggle => {
-                        if let Err(error) = on_launcher_toggle() {
+                        if let Err(error) = launcher_callbacks.borrow_mut().on_launcher_toggle() {
                             eprintln!("Could not toggle launcher: {error:#}");
                         }
                     }
@@ -142,8 +163,25 @@ pub fn run_with_config(
     Ok(())
 }
 
-pub fn run_xr_client() -> anyhow::Result<()> {
-    let config = AppConfig::load()?;
-    let (_frame_sender, frame_receiver) = bridge::new_panel_channel();
-    xr::run(frame_receiver, bridge::InputSender::discarded(), config)
+struct CallbackPair<Ready, Toggle> {
+    on_ready: Option<Ready>,
+    on_launcher_toggle: Toggle,
+}
+
+impl<Ready, Toggle> RuntimeCallbacks for CallbackPair<Ready, Toggle>
+where
+    Ready: FnOnce(DisplayNames) -> anyhow::Result<()>,
+    Toggle: FnMut() -> anyhow::Result<()>,
+{
+    fn on_ready(&mut self, displays: DisplayNames) -> anyhow::Result<()> {
+        let on_ready = self
+            .on_ready
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("ready callback was already called"))?;
+        on_ready(displays)
+    }
+
+    fn on_launcher_toggle(&mut self) -> anyhow::Result<()> {
+        (self.on_launcher_toggle)()
+    }
 }

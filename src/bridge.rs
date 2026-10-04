@@ -72,7 +72,7 @@ pub enum XrInput {
 }
 
 #[derive(Clone)]
-pub struct InputSender(Option<Arc<InputQueue>>);
+pub struct InputSender(Arc<InputQueue>);
 
 struct InputQueue {
     sender: Sender<XrInput>,
@@ -81,60 +81,43 @@ struct InputQueue {
 }
 
 impl InputSender {
-    pub fn discarded() -> Self {
-        Self(None)
-    }
-
     pub fn send(&self, input: XrInput) -> Result<(), std::sync::mpsc::SendError<XrInput>> {
-        if let Some(queue) = &self.0 {
-            queue.pending.fetch_add(1, Ordering::Relaxed);
-            queue.sender.send(input).inspect_err(|_| {
-                queue.pending.fetch_sub(1, Ordering::Relaxed);
-            })
-        } else {
-            Ok(())
-        }
+        self.0.pending.fetch_add(1, Ordering::Relaxed);
+        self.0.sender.send(input).inspect_err(|_| {
+            self.0.pending.fetch_sub(1, Ordering::Relaxed);
+        })
     }
 
     pub fn try_send(&self, input: XrInput) -> Result<(), std::sync::mpsc::TrySendError<XrInput>> {
-        if let Some(queue) = &self.0 {
-            if queue
-                .pending
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
-                    (pending < 16).then_some(pending + 1)
-                })
-                .is_err()
-            {
-                return Err(std::sync::mpsc::TrySendError::Full(input));
-            }
-            queue.sender.send(input).map_err(|error| {
-                queue.pending.fetch_sub(1, Ordering::Relaxed);
-                std::sync::mpsc::TrySendError::Disconnected(error.0)
+        if self
+            .0
+            .pending
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+                (pending < 16).then_some(pending + 1)
             })
-        } else {
-            Ok(())
+            .is_err()
+        {
+            return Err(std::sync::mpsc::TrySendError::Full(input));
         }
+        self.0.sender.send(input).map_err(|error| {
+            self.0.pending.fetch_sub(1, Ordering::Relaxed);
+            std::sync::mpsc::TrySendError::Disconnected(error.0)
+        })
     }
 
     pub fn request_frame(&self) -> Result<(), std::sync::mpsc::SendError<XrInput>> {
-        if let Some(queue) = &self.0 {
-            if queue.frame_pending.swap(true, Ordering::Relaxed) {
-                return Ok(());
-            }
-            self.send(XrInput::FrameTick).inspect_err(|_| {
-                queue.frame_pending.store(false, Ordering::Relaxed);
-            })
-        } else {
-            Ok(())
+        if self.0.frame_pending.swap(true, Ordering::Relaxed) {
+            return Ok(());
         }
+        self.send(XrInput::FrameTick).inspect_err(|_| {
+            self.0.frame_pending.store(false, Ordering::Relaxed);
+        })
     }
 
     pub fn received(&self, input: &XrInput) {
-        if let Some(queue) = &self.0 {
-            queue.pending.fetch_sub(1, Ordering::Relaxed);
-            if matches!(input, XrInput::FrameTick) {
-                queue.frame_pending.store(false, Ordering::Relaxed);
-            }
+        self.0.pending.fetch_sub(1, Ordering::Relaxed);
+        if matches!(input, XrInput::FrameTick) {
+            self.0.frame_pending.store(false, Ordering::Relaxed);
         }
     }
 }
@@ -223,11 +206,11 @@ pub fn new_panel_channel() -> (PanelSender, PanelReceiver) {
 pub fn new_input_channel() -> (InputSender, Channel<XrInput>) {
     let (sender, receiver) = channel::channel();
     (
-        InputSender(Some(Arc::new(InputQueue {
+        InputSender(Arc::new(InputQueue {
             sender,
             pending: AtomicUsize::new(0),
             frame_pending: AtomicBool::new(false),
-        }))),
+        })),
         receiver,
     )
 }

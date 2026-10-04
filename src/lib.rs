@@ -16,7 +16,7 @@ mod timing;
 mod x11;
 mod xr;
 
-pub use runtime::{DisplayNames, run, run_with_config, run_xr_client};
+pub use runtime::{DisplayNames, RuntimeCallbacks, run, run_with_callbacks, run_with_config};
 
 #[cfg(test)]
 use smithay::reexports::wayland_server::Display;
