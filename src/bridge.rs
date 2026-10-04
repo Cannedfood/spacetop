@@ -42,6 +42,9 @@ pub enum XrInput {
         panel_id: u64,
         pose: PanelPose,
     },
+    ClosePanel {
+        panel_id: u64,
+    },
     ResizePanel {
         panel_id: u64,
         width: i32,

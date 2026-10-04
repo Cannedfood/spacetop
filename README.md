@@ -144,10 +144,13 @@ new settings automatically.
 
 ## Keyboard And Pointer Input
 
-Point with the right controller and pull the trigger to click. Secondary click
-uses B on Touch/Index controllers or trackpad click on Vive/Microsoft motion
-controllers. The simple-controller profile has no secondary-click binding.
-Grip moves the panel; the stick scrolls when not gripping.
+Point with the right controller and pull the trigger, or press X/A on the
+Touch controllers (A on Index controllers), to left-click. Pressing the right
+thumbstick clicks the middle mouse button on controllers with a thumbstick;
+while grabbing a window, pressing it closes the grabbed window instead.
+Press B on Touch/Index controllers or trackpad click on Vive/Microsoft motion
+controllers to open or close the configured launcher. Grip moves the panel;
+the stick scrolls when not gripping.
 
 Spacetop automatically discovers readable keyboard and mouse event devices on
 the current seat (`XDG_SEAT`, or `seat0` if unset), using udev's keyboard/mouse

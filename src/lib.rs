@@ -291,6 +291,20 @@ impl Compositor {
                 }
                 Ok(())
             }
+            XrInput::ClosePanel { panel_id } => {
+                if let Some(panel) = self.panels.iter().find(|panel| panel.id == panel_id) {
+                    match &panel.surface {
+                        x11::PanelSurface::Wayland(surface) => surface.send_close(),
+                        x11::PanelSurface::X11 { window, .. } => {
+                            if let Err(error) = window.close() {
+                                eprintln!("failed to close X11 window: {error}");
+                            }
+                        }
+                        x11::PanelSurface::Popup(_) => {}
+                    }
+                }
+                Ok(())
+            }
             XrInput::GpuDevice {
                 render_node,
                 limits,
