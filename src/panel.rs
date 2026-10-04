@@ -26,10 +26,16 @@ impl PanelLimits {
         self,
         logical_size: Size<i32, smithay::utils::Logical>,
         buffer_scale: i32,
+        display_scale: f32,
     ) -> (Size<i32, smithay::utils::Buffer>, f64) {
+        let requested_scale = if buffer_scale > 1 {
+            (buffer_scale as f64).max(display_scale as f64)
+        } else {
+            display_scale as f64
+        };
         let scale = (self.max_width as f64 / logical_size.w as f64)
             .min(self.max_height as f64 / logical_size.h as f64)
-            .min(buffer_scale.max(1) as f64);
+            .min(requested_scale);
         let size = (
             (logical_size.w as f64 * scale).round().max(1.0) as i32,
             (logical_size.h as f64 * scale).round().max(1.0) as i32,
@@ -135,8 +141,12 @@ impl PanelPose {
         base_width * distance / base_distance.max(f32::EPSILON)
     }
 
-    pub fn width_for_pixel_density(pixel_width: f32, distance: f32, pixels_per_degree: f32) -> f32 {
-        let angle = (pixel_width / pixels_per_degree.max(f32::EPSILON))
+    pub fn width_for_pixel_density(
+        density_pixel_width: f32,
+        distance: f32,
+        pixels_per_degree: f32,
+    ) -> f32 {
+        let angle = (density_pixel_width / pixels_per_degree.max(f32::EPSILON))
             .to_radians()
             .clamp(0.0, 170.0_f32.to_radians());
         2.0 * distance.max(f32::EPSILON) * (angle * 0.5).tan()

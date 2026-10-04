@@ -50,6 +50,7 @@ pub fn run(
         config.window.default_distance_m,
         config.window.default_vertical_angle_degrees,
         config.window.pixels_per_degree,
+        config.window.display_scale,
     );
     input::start(&event_loop.handle())?;
     let socket = ListeningSocketSource::new_auto()?;

@@ -36,7 +36,7 @@ use smithay::{
         keyboard::{FilterResult, XkbConfig},
         pointer::AxisFrame,
     },
-    output::{Mode, Output, PhysicalProperties, Subpixel},
+    output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::LoopSignal,
         wayland_server::{
@@ -122,6 +122,7 @@ struct Compositor {
     default_window_distance: f32,
     default_vertical_angle_degrees: f32,
     window_pixels_per_degree: f32,
+    window_display_scale: f32,
     active_panel: Option<u64>,
     fatal_error: Option<anyhow::Error>,
     started_at: Instant,
@@ -302,6 +303,7 @@ impl Compositor {
                 default_window_distance,
                 default_vertical_angle_degrees,
                 window_pixels_per_degree,
+                window_display_scale,
             } => {
                 if self.default_window_distance != default_window_distance
                     || self.default_vertical_angle_degrees != default_vertical_angle_degrees
@@ -314,6 +316,15 @@ impl Compositor {
                 self.default_window_distance = default_window_distance;
                 self.default_vertical_angle_degrees = default_vertical_angle_degrees;
                 self.window_pixels_per_degree = window_pixels_per_degree;
+                if self.window_display_scale != window_display_scale {
+                    self.output.change_current_state(
+                        None,
+                        None,
+                        Some(Scale::Fractional(window_display_scale as f64)),
+                        None,
+                    );
+                    self.window_display_scale = window_display_scale;
+                }
                 self.refresh_panels();
                 Ok(())
             }
@@ -339,6 +350,7 @@ impl Compositor {
             defaults.window.default_distance_m,
             defaults.window.default_vertical_angle_degrees,
             defaults.window.pixels_per_degree,
+            defaults.window.display_scale,
         )
     }
 
@@ -348,6 +360,7 @@ impl Compositor {
         default_window_distance: f32,
         default_vertical_angle_degrees: f32,
         window_pixels_per_degree: f32,
+        window_display_scale: f32,
     ) -> Self {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
@@ -376,7 +389,12 @@ impl Compositor {
             refresh: 60_000,
         };
         output.set_preferred(mode);
-        output.change_current_state(Some(mode), None, None, None);
+        output.change_current_state(
+            Some(mode),
+            None,
+            Some(Scale::Fractional(window_display_scale as f64)),
+            None,
+        );
         output.create_global::<Self>(&display_handle);
 
         Self {
@@ -401,6 +419,7 @@ impl Compositor {
             default_window_distance,
             default_vertical_angle_degrees,
             window_pixels_per_degree,
+            window_display_scale,
             active_panel: None,
             fatal_error: None,
             started_at: Instant::now(),
@@ -656,9 +675,11 @@ impl Compositor {
             "OpenXR supports at most {} mapped window layers",
             self.panel_limits.max_layers
         );
-        let (size, scale) = self
-            .panel_limits
-            .capture_size(geometry.logical_size, buffer_scale);
+        let (size, scale) = self.panel_limits.capture_size(
+            geometry.logical_size,
+            buffer_scale,
+            self.window_display_scale,
+        );
         let dmabuf = self
             .timings
             .measure("app/compositor-capture", std::time::Duration::ZERO, || {
@@ -667,7 +688,7 @@ impl Compositor {
             .context("mandatory GPU panel capture failed")?;
         if !self.panels[index].pose_is_explicit {
             geometry.pose.width_m = PanelPose::width_for_pixel_density(
-                size.w as f32,
+                geometry.logical_size.w as f32,
                 geometry.pose.center.length(),
                 self.window_pixels_per_degree,
             );

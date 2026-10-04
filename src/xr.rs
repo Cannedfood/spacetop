@@ -703,7 +703,9 @@ pub fn run(
                                     || next_config.window.default_vertical_angle_degrees
                                         != config.window.default_vertical_angle_degrees
                                     || next_config.window.pixels_per_degree
-                                        != config.window.pixels_per_degree;
+                                        != config.window.pixels_per_degree
+                                    || next_config.window.display_scale
+                                        != config.window.display_scale;
                                 if window_config_changed
                                     && let Err(error) = input.send(XrInput::ConfigReloaded {
                                         default_window_distance: next_config
@@ -715,6 +717,7 @@ pub fn run(
                                         window_pixels_per_degree: next_config
                                             .window
                                             .pixels_per_degree,
+                                        window_display_scale: next_config.window.display_scale,
                                     })
                                 {
                                     eprintln!(

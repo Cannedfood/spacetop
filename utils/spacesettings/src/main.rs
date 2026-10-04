@@ -60,6 +60,7 @@ enum Message {
     WindowDistanceChanged(String),
     WindowVerticalAngleChanged(String),
     WindowPixelsPerDegreeChanged(String),
+    WindowDisplayScaleChanged(f32),
     WindowTextureAaChanged(WindowTextureAa),
     ReflectionAtlasSizeChanged(ReflectionAtlasSize),
     WindowPaddingChanged(f32),
@@ -97,6 +98,7 @@ enum ResetTarget {
     WindowDistance,
     WindowVerticalAngle,
     WindowPixelsPerDegree,
+    WindowDisplayScale,
     WindowAnimationHalfTime,
     WindowCollisionMargin,
     WindowCursorProximity,
@@ -128,6 +130,7 @@ struct SettingsApp {
     window_distance: String,
     window_vertical_angle: String,
     window_pixels_per_degree: String,
+    window_display_scale: f32,
     status: String,
     status_is_error: bool,
 }
@@ -150,6 +153,7 @@ impl SettingsApp {
         let window_distance = format!("{}", config.window.default_distance_m);
         let window_vertical_angle = format!("{}", config.window.default_vertical_angle_degrees);
         let window_pixels_per_degree = format!("{}", config.window.pixels_per_degree);
+        let window_display_scale = config.window.display_scale;
         let mut app = Self {
             config,
             backgrounds,
@@ -164,6 +168,7 @@ impl SettingsApp {
             window_distance,
             window_vertical_angle,
             window_pixels_per_degree,
+            window_display_scale,
             status,
             status_is_error,
         };
@@ -192,6 +197,7 @@ impl SettingsApp {
                 | Message::WindowDistanceChanged(_)
                 | Message::WindowVerticalAngleChanged(_)
                 | Message::WindowPixelsPerDegreeChanged(_)
+                | Message::WindowDisplayScaleChanged(_)
                 | Message::WindowTextureAaChanged(_)
                 | Message::ReflectionAtlasSizeChanged(_)
                 | Message::WindowPaddingChanged(_)
@@ -292,6 +298,7 @@ impl SettingsApp {
             Message::WindowDistanceChanged(value) => self.window_distance = value,
             Message::WindowVerticalAngleChanged(value) => self.window_vertical_angle = value,
             Message::WindowPixelsPerDegreeChanged(value) => self.window_pixels_per_degree = value,
+            Message::WindowDisplayScaleChanged(value) => self.window_display_scale = value,
             Message::WindowTextureAaChanged(value) => self.config.window.texture_aa = value,
             Message::ReflectionAtlasSizeChanged(value) => {
                 self.config.window.reflection_atlas_size = value
@@ -423,6 +430,10 @@ impl SettingsApp {
                 self.config.window.pixels_per_degree = defaults.window.pixels_per_degree;
                 self.window_pixels_per_degree = defaults.window.pixels_per_degree.to_string();
             }
+            ResetTarget::WindowDisplayScale => {
+                self.config.window.display_scale = defaults.window.display_scale;
+                self.window_display_scale = defaults.window.display_scale;
+            }
             ResetTarget::WindowAnimationHalfTime => {
                 self.config.window.animation_half_time_s = defaults.window.animation_half_time_s;
             }
@@ -479,6 +490,8 @@ impl SettingsApp {
                 self.config.window.texture_aa = defaults.window.texture_aa;
                 self.config.window.reflection_atlas_size = defaults.window.reflection_atlas_size;
                 self.window_pixels_per_degree = defaults.window.pixels_per_degree.to_string();
+                self.config.window.display_scale = defaults.window.display_scale;
+                self.window_display_scale = defaults.window.display_scale;
             }
             ResetTarget::WindowBorderSection => {
                 self.config.window.padding_px = defaults.window.padding_px;
@@ -611,6 +624,7 @@ impl SettingsApp {
             parse_number("Default window vertical angle", &self.window_vertical_angle)?;
         config.window.pixels_per_degree =
             parse_number("Window pixels per degree", &self.window_pixels_per_degree)?;
+        config.window.display_scale = self.window_display_scale;
         config
             .validate()
             .map_err(|error| format!("Invalid settings: {error}"))?;
@@ -977,15 +991,25 @@ impl SettingsApp {
             "WINDOW RESOLUTION & AA",
             column![
                 labeled_input(
-                    "PIXELS PER DEGREE",
+                    "DENSITY PIXELS PER DEGREE",
                     &self.window_pixels_per_degree,
-                    "32",
+                    "30",
                     Message::WindowPixelsPerDegreeChanged,
                     number_is_default(
                         &self.window_pixels_per_degree,
                         defaults.window.pixels_per_degree,
                     ),
                     ResetTarget::WindowPixelsPerDegree,
+                ),
+                slider_row(
+                    "DISPLAY SCALE",
+                    self.window_display_scale,
+                    0.5,
+                    4.0,
+                    0.5,
+                    Message::WindowDisplayScaleChanged,
+                    self.window_display_scale == defaults.window.display_scale,
+                    ResetTarget::WindowDisplayScale,
                 ),
                 row![
                     text("TEXTURE AA MODE").size(11).color(MUTED),
@@ -1004,7 +1028,8 @@ impl SettingsApp {
             number_is_default(
                 &self.window_pixels_per_degree,
                 defaults.window.pixels_per_degree,
-            ) && self.config.window.texture_aa == defaults.window.texture_aa
+            ) && self.window_display_scale == defaults.window.display_scale
+                && self.config.window.texture_aa == defaults.window.texture_aa
                 && self.config.window.reflection_atlas_size
                     == defaults.window.reflection_atlas_size,
             ResetTarget::WindowResolutionSection,
@@ -1636,6 +1661,7 @@ mod tests {
         config.window.default_distance_m = 2.0;
         config.window.default_vertical_angle_degrees = 10.0;
         config.window.pixels_per_degree = 40.0;
+        config.window.display_scale = 2.0;
         config.window.reflection_atlas_size = ReflectionAtlasSize::Size4096;
         config.window.border_width_px = 5.0;
 
@@ -1661,5 +1687,6 @@ mod tests {
             app.window_pixels_per_degree,
             defaults.window.pixels_per_degree.to_string()
         );
+        assert_eq!(app.window_display_scale, defaults.window.display_scale);
     }
 }

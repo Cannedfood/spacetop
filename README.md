@@ -77,11 +77,18 @@ feathering_m = 0.0
 
 [window]
 default_distance_m = 1.6
+pixels_per_degree = 30.0
+display_scale = 1.0
 reflection_atlas_size = 256
 
 [cursor]
 default_distance_m = 1.6
 ```
+
+`window.pixels_per_degree` is the density in logical pixels per degree.
+`window.display_scale` (0.5–4.0 in 0.5 increments, default 1.0) is advertised
+to Wayland clients; lower values reduce capture resolution, while higher values
+let clients render larger buffers without changing spatial density or panel size.
 
 Floor reflections use a texture atlas. `window.reflection_atlas_size` sets its
 width and height in pixels (default: 256 x 256, approximately 256 KiB). Options

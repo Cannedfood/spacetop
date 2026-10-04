@@ -54,6 +54,7 @@ pub struct FloorConfig {
 #[serde(default)]
 pub struct WindowConfig {
     pub pixels_per_degree: f32,
+    pub display_scale: f32,
     pub texture_aa: WindowTextureAa,
     pub reflection_atlas_size: ReflectionAtlasSize,
 
@@ -258,6 +259,7 @@ impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             pixels_per_degree: 30.0,
+            display_scale: 1.0,
             texture_aa: WindowTextureAa::default(),
             reflection_atlas_size: ReflectionAtlasSize::default(),
 
@@ -545,6 +547,12 @@ impl AppConfig {
             "window.pixels_per_degree must be between 1 and 200"
         );
         ensure!(
+            self.window.display_scale.is_finite()
+                && (0.5..=4.0).contains(&self.window.display_scale)
+                && (self.window.display_scale * 2.0).fract() == 0.0,
+            "window.display_scale must be between 0.5 and 4 in 0.5 increments"
+        );
+        ensure!(
             self.window.animation_half_time_s.is_finite()
                 && (0.0..=1.0).contains(&self.window.animation_half_time_s),
             "window.animation_half_time_s must be between 0 and 1 second"
@@ -685,6 +693,7 @@ mod tests {
 
         assert_eq!(config.floor.albedo, [0.2, 0.3, 0.4, 0.9]);
         assert_eq!(config.window.texture_aa, WindowTextureAa::SuperSample8);
+        assert_eq!(config.window.display_scale, 1.0);
 
         config.save_to(&path).unwrap();
         let saved: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
@@ -829,6 +838,24 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.window.pixels_per_degree = f32::NAN;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_window_display_scale() {
+        let mut config = AppConfig::default();
+        for scale in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0] {
+            config.window.display_scale = scale;
+            assert!(config.validate().is_ok(), "{scale}");
+        }
+
+        config.window.display_scale = 0.75;
+        assert!(config.validate().is_err());
+
+        config.window.display_scale = 4.5;
+        assert!(config.validate().is_err());
+
+        config.window.display_scale = f32::NAN;
         assert!(config.validate().is_err());
     }
 
