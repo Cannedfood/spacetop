@@ -54,6 +54,8 @@ enum Message {
     ReflectionGrainSizeChanged(f32),
     RayCountChanged(u32),
     TransparentReflectionsChanged(bool),
+    GroundRadiusChanged(f32),
+    GroundFeatheringChanged(f32),
     WindowDistanceChanged(String),
     WindowVerticalAngleChanged(String),
     WindowPixelsPerDegreeChanged(String),
@@ -86,6 +88,8 @@ enum ResetTarget {
     FloorRayCount,
     FloorTransparentReflections,
     FloorReflectionGrainSize,
+    FloorRadius,
+    FloorFeathering,
     FloorSection,
     WindowDistance,
     WindowVerticalAngle,
@@ -275,6 +279,8 @@ impl SettingsApp {
             Message::TransparentReflectionsChanged(value) => {
                 self.config.floor.trace_through_transparent_windows = value;
             }
+            Message::GroundRadiusChanged(value) => self.config.floor.radius_degrees = value,
+            Message::GroundFeatheringChanged(value) => self.config.floor.feathering_m = value,
             Message::WindowDistanceChanged(value) => self.window_distance = value,
             Message::WindowVerticalAngleChanged(value) => self.window_vertical_angle = value,
             Message::WindowPixelsPerDegreeChanged(value) => self.window_pixels_per_degree = value,
@@ -362,6 +368,12 @@ impl SettingsApp {
             }
             ResetTarget::FloorReflectionGrainSize => {
                 self.config.floor.reflection_grain_size_m = defaults.floor.reflection_grain_size_m;
+            }
+            ResetTarget::FloorRadius => {
+                self.config.floor.radius_degrees = defaults.floor.radius_degrees;
+            }
+            ResetTarget::FloorFeathering => {
+                self.config.floor.feathering_m = defaults.floor.feathering_m;
             }
             ResetTarget::FloorSection => {
                 self.floor_height = defaults.floor.height_m.to_string();
@@ -834,6 +846,26 @@ impl SettingsApp {
                         == defaults.floor.reflection_grain_size_m,
                     ResetTarget::FloorReflectionGrainSize,
                 ),
+                slider_row(
+                    "FLOOR RADIUS (°)",
+                    self.config.floor.radius_degrees,
+                    0.0,
+                    90.0,
+                    0.1,
+                    Message::GroundRadiusChanged,
+                    self.config.floor.radius_degrees == defaults.floor.radius_degrees,
+                    ResetTarget::FloorRadius,
+                ),
+                slider_row(
+                    "FEATHERING (M)",
+                    self.config.floor.feathering_m,
+                    0.0,
+                    7.0,
+                    0.1,
+                    Message::GroundFeatheringChanged,
+                    self.config.floor.feathering_m == defaults.floor.feathering_m,
+                    ResetTarget::FloorFeathering,
+                ),
             ]
             .spacing(18),
             number_is_default(&self.floor_height, defaults.floor.height_m)
@@ -843,6 +875,8 @@ impl SettingsApp {
                 && self.config.floor.ray_count == defaults.floor.ray_count
                 && self.config.floor.reflection_grain_size_m
                     == defaults.floor.reflection_grain_size_m
+                && self.config.floor.radius_degrees == defaults.floor.radius_degrees
+                && self.config.floor.feathering_m == defaults.floor.feathering_m
                 && self.config.floor.trace_through_transparent_windows
                     == defaults.floor.trace_through_transparent_windows,
             ResetTarget::FloorSection,

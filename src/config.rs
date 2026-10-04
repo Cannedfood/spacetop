@@ -79,6 +79,14 @@ mod tests {
         assert_eq!(config.floor.roughness, 0.4);
         assert_eq!(config.floor.albedo, AppConfig::default().floor.albedo);
         assert_eq!(
+            config.floor.radius_degrees,
+            AppConfig::default().floor.radius_degrees
+        );
+        assert_eq!(
+            config.floor.feathering_m,
+            AppConfig::default().floor.feathering_m
+        );
+        assert_eq!(
             config.background.image,
             AppConfig::default().background.image
         );

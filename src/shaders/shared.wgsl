@@ -17,6 +17,7 @@ struct FloorMaterial {
     grabbed_style: vec4<f32>,
     grabbed_border_color: vec4<f32>,
     diffuse_irradiance: vec4<f32>,
+    ground_radius: vec4<f32>,
 }
 struct Window {
     center_width: vec4<f32>,
