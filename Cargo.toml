@@ -14,10 +14,10 @@ anyhow = "1"
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
 calloop = "0.14"
 evdev = "0.13"
-glam = "0.33"
+glam = "0.34"
 half = "2"
 image = { version = "0.25", default-features = false, features = ["exr"] }
-naga = { version = "29", features = ["wgsl-in", "spv-out"] }
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 openxr = { version = "0.22", default-features = false, features = ["loaded"] }
 smithay = { version = "0.7.0", default-features = false, features = ["desktop", "wayland_frontend", "renderer_gl", "backend_gbm", "backend_gbm_has_create_with_modifiers2", "backend_gbm_has_fd_for_plane", "xwayland"] }
 spacetop-config = { path = "utils/spacetop-config" }
@@ -25,6 +25,6 @@ udev = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
-toml = "0.8"
+toml = "1.1"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client"] }

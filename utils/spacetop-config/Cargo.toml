@@ -7,4 +7,4 @@ edition = "2024"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
-toml = "0.8"
+toml = "1.1"
