@@ -363,23 +363,6 @@ pub fn run(
             >= vk::API_VERSION_1_2,
         "the OpenXR runtime-selected GPU does not support Vulkan 1.2"
     );
-    let mut supported_indexing = vk::PhysicalDeviceVulkan12Features::default();
-    let mut supported_features =
-        vk::PhysicalDeviceFeatures2::default().push_next(&mut supported_indexing);
-    unsafe {
-        vk_instance.get_physical_device_features2(physical_device, &mut supported_features);
-    }
-    let reflection_arrays = config.window.reflection_textures.use_descriptor_array(
-        crate::scene::supports_reflection_arrays(&supported_indexing),
-    )?;
-    eprintln!(
-        "Reflection textures: {}",
-        if reflection_arrays {
-            "descriptor array"
-        } else {
-            "texture atlas"
-        }
-    );
     let queue_family =
         unsafe { vk_instance.get_physical_device_queue_family_properties(physical_device) }
             .iter()
@@ -394,14 +377,9 @@ pub fn run(
         "GPU sharing requires Vulkan 1.1 and DMA-BUF external-memory, DRM-modifier, DRM-device, image-format-list, and foreign-queue-family support"
     );
     let sharing_extensions = gpu::SHARING_EXTENSIONS.map(|extension| extension.as_ptr());
-    let mut enabled_indexing = vk::PhysicalDeviceVulkan12Features::default()
-        .runtime_descriptor_array(reflection_arrays)
-        .shader_sampled_image_array_non_uniform_indexing(reflection_arrays)
-        .descriptor_binding_variable_descriptor_count(reflection_arrays);
     let device_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_info)
-        .enabled_extension_names(&sharing_extensions)
-        .push_next(&mut enabled_indexing);
+        .enabled_extension_names(&sharing_extensions);
     #[allow(clippy::missing_transmute_annotations)]
     let raw_device = unsafe {
         instance.create_vulkan_device(
@@ -493,14 +471,7 @@ pub fn run(
         .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT),
         "Vulkan GPU lacks D32 depth attachment support"
     );
-    let mut scene = SceneRenderer::new(
-        &device,
-        &vk_instance,
-        physical_device,
-        format,
-        &config,
-        reflection_arrays,
-    )?;
+    let mut scene = SceneRenderer::new(&device, &vk_instance, physical_device, format, &config)?;
     let mut skybox = None;
     let mut pending_skybox = Some(PendingSkybox::new(
         &scene,
@@ -693,13 +664,6 @@ pub fn run(
             if let Some(reload) = config_watcher.reload_if_changed() {
                 match reload {
                     Ok(next_config) => {
-                        if next_config.window.reflection_textures
-                            != config.window.reflection_textures
-                        {
-                            eprintln!(
-                                "Changed window.reflection_textures; restart Spacetop to apply the reflection texture mode"
-                            );
-                        }
                         let result: Result<Option<String>> = (|| {
                             let next_skybox_image = (next_config.background.image
                                 != config.background.image)

@@ -77,7 +77,19 @@ fn nearest_window_hit(origin: vec3<f32>, ray: vec3<f32>, minimum_distance: f32) 
     return nearest;
 }
 fn sample_reflected_window(index: u32, uv: vec2<f32>) -> vec4<f32> {
-    return textureSampleLevel(panel_textures[index], environment_filter, uv, 0.0);
+    let rect = window_buffer.windows[index].atlas_rect;
+    let pixel = clamp(
+        rect.xy + uv * rect.zw,
+        rect.xy + vec2(0.5),
+        rect.xy + rect.zw - vec2(0.5),
+    );
+    let atlas_dimensions = vec2<f32>(textureDimensions(panel_atlas));
+    return textureSampleLevel(
+        panel_atlas,
+        environment_filter,
+        pixel / atlas_dimensions,
+        0.0,
+    );
 }
 fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f32) -> vec3<f32> {
     if TRACE_THROUGH_TRANSPARENT_WINDOWS {

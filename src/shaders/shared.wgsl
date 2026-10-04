@@ -1,5 +1,3 @@
-enable wgpu_binding_array;
-
 struct Transform {
     matrix: mat4x4<f32>,
     emitter_center_width: vec4<f32>,
@@ -47,4 +45,4 @@ var<immediate> transform: Transform;
 @group(2) @binding(1) var environment_filter: sampler;
 @group(2) @binding(2) var environment_skybox: texture_2d<f32>;
 @group(2) @binding(3) var environment_sky_filter: sampler;
-@group(2) @binding(4) var panel_textures: binding_array<texture_2d<f32>>;
+@group(2) @binding(4) var panel_atlas: texture_2d<f32>;
