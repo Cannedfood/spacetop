@@ -474,7 +474,7 @@ fn image_view(
 
 pub(crate) struct PanelTexture {
     device: ash::Device,
-    pub(super) id: u64,
+    pub(super) id: PanelTextureId,
     pub shared: SharedImage,
     view: vk::ImageView,
     pool: vk::DescriptorPool,
@@ -493,7 +493,7 @@ impl PanelTexture {
                 .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
             {
-                break current;
+                break PanelTextureId(current);
             }
         };
         let mut texture = Self {
@@ -775,8 +775,8 @@ pub(super) fn pack_reflection_atlas(
 }
 
 pub(super) fn atlas_dirty_indices(
-    previous_ids: &[u64],
-    current_ids: &[u64],
+    previous_ids: &[PanelTextureId],
+    current_ids: &[PanelTextureId],
     layout_changed: bool,
     atlas_changed: bool,
 ) -> Vec<usize> {

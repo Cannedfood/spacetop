@@ -80,13 +80,25 @@ fn reflection_atlas_rejects_invalid_sizes_and_capacity_overflow() {
 
 #[test]
 fn atlas_only_marks_redrawn_windows_dirty_unless_layout_changes() {
-    assert_eq!(atlas_dirty_indices(&[10, 20], &[10, 20], false, false), []);
-    assert_eq!(atlas_dirty_indices(&[10, 20], &[10, 21], false, false), [1]);
+    let first = PanelTextureId(10);
+    let second = PanelTextureId(20);
+    let changed = PanelTextureId(21);
     assert_eq!(
-        atlas_dirty_indices(&[10, 20], &[10, 20], true, false),
+        atlas_dirty_indices(&[first, second], &[first, second], false, false),
+        []
+    );
+    assert_eq!(
+        atlas_dirty_indices(&[first, second], &[first, changed], false, false),
+        [1]
+    );
+    assert_eq!(
+        atlas_dirty_indices(&[first, second], &[first, second], true, false),
         [0, 1]
     );
-    assert_eq!(atlas_dirty_indices(&[], &[10, 20], false, true), [0, 1]);
+    assert_eq!(
+        atlas_dirty_indices(&[], &[first, second], false, true),
+        [0, 1]
+    );
 }
 
 #[test]

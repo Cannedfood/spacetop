@@ -4,6 +4,19 @@ use glam::{Vec2, Vec3};
 use smithay::utils::Size;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct PanelId(u64);
+
+impl PanelId {
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PanelLimits {
     pub max_width: u32,
@@ -168,11 +181,11 @@ pub struct PanelGeometry {
 /// Fixed panels anchor the layout; movable panels are placed at the closest
 /// available horizontal position to their saved pose.
 pub fn dodge_windows(
-    panels: &[(u64, PanelGeometry)],
-    fixed_windows: &[u64],
+    panels: &[(PanelId, PanelGeometry)],
+    fixed_windows: &[PanelId],
     player: Vec3,
     margin_m: f32,
-) -> BTreeMap<u64, PanelPose> {
+) -> BTreeMap<PanelId, PanelPose> {
     #[derive(Clone, Copy)]
     struct Bounds {
         center: Vec2,

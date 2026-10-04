@@ -204,13 +204,18 @@ fn dodge_windows_moves_overlapping_panels_and_keeps_fixed_pose() {
         pose: first.pose,
         ..first
     };
-    let moved = dodge_windows(&[(1, first), (2, second)], &[1], Vec3::ZERO, 0.05);
+    let moved = dodge_windows(
+        &[(PanelId::new(1), first), (PanelId::new(2), second)],
+        &[PanelId::new(1)],
+        Vec3::ZERO,
+        0.05,
+    );
 
-    assert_eq!(moved[&1], first.pose);
-    assert_ne!(moved[&2].center, second.pose.center);
-    assert!((moved[&2].center.length() - second.pose.center.length()).abs() < 1.0e-5);
+    assert_eq!(moved[&PanelId::new(1)], first.pose);
+    assert_ne!(moved[&PanelId::new(2)].center, second.pose.center);
+    assert!((moved[&PanelId::new(2)].center.length() - second.pose.center.length()).abs() < 1.0e-5);
     let original_angles = PanelPose::spherical_angles(second.pose.center);
-    let moved_angles = PanelPose::spherical_angles(moved[&2].center);
+    let moved_angles = PanelPose::spherical_angles(moved[&PanelId::new(2)].center);
     assert!((moved_angles.y - original_angles.y).abs() < 1.0e-5);
 }
 
@@ -225,17 +230,28 @@ fn dodge_windows_keeps_maximized_grabbed_panel_fixed_while_moving_neighbor() {
         ..regular
     };
 
-    let moved = dodge_windows(&[(1, maximized), (2, regular)], &[1], Vec3::ZERO, 0.05);
+    let moved = dodge_windows(
+        &[(PanelId::new(1), maximized), (PanelId::new(2), regular)],
+        &[PanelId::new(1)],
+        Vec3::ZERO,
+        0.05,
+    );
 
-    assert_eq!(moved[&1], maximized.pose);
-    assert_ne!(moved[&2].center, regular.pose.center);
-    assert!((moved[&2].center.length() - regular.pose.center.length()).abs() < 1.0e-5);
+    assert_eq!(moved[&PanelId::new(1)], maximized.pose);
+    assert_ne!(moved[&PanelId::new(2)].center, regular.pose.center);
+    assert!(
+        (moved[&PanelId::new(2)].center.length() - regular.pose.center.length()).abs() < 1.0e-5
+    );
 }
 
 #[test]
 fn dodge_windows_separates_multiple_panels_with_margin() {
     let first = panel();
-    let panels = [(1, first), (2, first), (3, first)];
+    let panels = [
+        (PanelId::new(1), first),
+        (PanelId::new(2), first),
+        (PanelId::new(3), first),
+    ];
     let moved = dodge_windows(&panels, &[], Vec3::ZERO, 0.05);
     let geometries: Vec<_> = panels
         .iter()

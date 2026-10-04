@@ -11,7 +11,8 @@ fn resize_release_reliably_sends_the_final_size_when_motion_queue_is_full() {
         logical_size: (100, 50).into(),
     };
     let edges = [false, true, false, true];
-    let mut resizing_panel = Some(7);
+    let panel_id = crate::panel::PanelId::new(7);
+    let mut resizing_panel = Some(panel_id);
     finish_resize(
         &mut PanelImages::new(),
         &input,
@@ -38,7 +39,7 @@ fn resize_release_reliably_sends_the_final_size_when_motion_queue_is_full() {
     else {
         panic!("resize release must send the final request");
     };
-    assert_eq!(panel_id, 7);
+    assert_eq!(panel_id, crate::panel::PanelId::new(7));
     assert_eq!((width, height), (140, 90));
     assert_eq!(anchor, Some((geometry, edges)));
     assert!(receiver.try_recv().is_err());
@@ -110,8 +111,8 @@ fn unmaximizing_a_grabbed_window_resets_its_drag_size_baseline() {
     let mut initial_width = 2.0;
     let mut initial_radius = 1.5;
     reset_grab_baseline_after_unmaximize(
-        Some(7),
-        7,
+        Some(crate::panel::PanelId::new(7)),
+        crate::panel::PanelId::new(7),
         1.0,
         2.5,
         &mut initial_width,

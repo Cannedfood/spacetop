@@ -22,7 +22,7 @@ pub use runtime::{DisplayNames, RuntimeCallbacks, run, run_with_callbacks, run_w
 use smithay::reexports::wayland_server::Display;
 
 use bridge::{PanelMode, PanelUpdate, XrInput};
-use panel::{PanelGeometry, PanelPose, Ray3};
+use panel::{PanelGeometry, PanelId, PanelPose, Ray3};
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
@@ -99,7 +99,7 @@ struct ToplevelPanel {
     maximize_restore_size: Option<(i32, i32)>,
     pose_is_explicit: bool,
     resize_anchor: Option<(PanelGeometry, [bool; 4])>,
-    id: u64,
+    id: PanelId,
     bounds: Rectangle<i32, Logical>,
 }
 
@@ -121,13 +121,13 @@ struct Compositor {
     gpu_renderer: Option<gpu::GpuRenderer>,
     dmabuf_state: DmabufState,
     dmabuf_global: Option<DmabufGlobal>,
-    next_panel_id: u64,
+    next_panel_id: PanelId,
     frame_sender: bridge::PanelSender,
     panel_limits: panel::PanelLimits,
 
     window_config: config::WindowConfig,
 
-    active_panel: Option<u64>,
+    active_panel: Option<PanelId>,
     fatal_error: Option<anyhow::Error>,
     started_at: Instant,
 
@@ -148,7 +148,7 @@ struct Compositor {
     mouse_cursor_visible: bool,
 
     ready_callback: Option<runtime::ReadyCallback>,
-    dirty_panels: BTreeSet<u64>,
+    dirty_panels: BTreeSet<PanelId>,
     frame_requested: bool,
     timings: timing::Timings,
 }
@@ -245,7 +245,7 @@ impl XdgShellHandler for Compositor {
             id: panel_id,
             bounds: Rectangle::default(),
         });
-        self.next_panel_id = self.next_panel_id.saturating_add(1);
+        self.next_panel_id = self.next_panel_id.next();
         let activate = self.active_panel.is_none();
         if activate {
             self.set_panel_active(Some(panel_id), SERIAL_COUNTER.next_serial());
@@ -395,7 +395,7 @@ impl XdgShellHandler for Compositor {
         }
     }
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        let removed: Vec<u64> = self
+        let removed: Vec<PanelId> = self
             .panels
             .iter()
             .filter(|panel| panel.surface.wl_surface() == surface.wl_surface())

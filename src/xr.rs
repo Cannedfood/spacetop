@@ -10,7 +10,7 @@ use std::{
 use crate::bridge::{CursorState, PanelMode, PanelReceiver, PanelUpdate, XrInput};
 use crate::config::{AppConfig, ConfigWatcher};
 use crate::gpu::{self, SharedImage};
-use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3, dodge_windows};
+use crate::panel::{PanelGeometry, PanelId, PanelLimits, PanelPose, Ray3, dodge_windows};
 use crate::scene::{PanelTexture, RenderTarget, SceneFrame, SceneRenderer, SkyboxTexture};
 use anyhow::{Context, Result, ensure};
 use ash::{
@@ -96,7 +96,7 @@ impl XrEye {
     }
 }
 
-type PanelImages = std::collections::BTreeMap<u64, XrPanel>;
+type PanelImages = std::collections::BTreeMap<PanelId, XrPanel>;
 
 fn reconcile_panel_geometry(
     current: &mut PanelGeometry,
@@ -123,7 +123,7 @@ fn reconcile_panel_geometry(
 
 fn update_dodge_targets(
     panels: &mut PanelImages,
-    fixed_windows: &[u64],
+    fixed_windows: &[PanelId],
     player: glam::Vec3,
     margin_m: f32,
 ) {
@@ -156,8 +156,8 @@ fn update_dodge_targets(
 }
 
 fn reset_grab_baseline_after_unmaximize(
-    grabbed_panel: Option<u64>,
-    panel_id: u64,
+    grabbed_panel: Option<PanelId>,
+    panel_id: PanelId,
     restored_width: f32,
     grab_radius: f32,
     grab_initial_width: &mut f32,
@@ -176,7 +176,7 @@ fn save_dodge_targets(panels: &mut PanelImages, input: &crate::bridge::InputSend
 fn save_dodge_targets_except(
     panels: &mut PanelImages,
     input: &crate::bridge::InputSender,
-    excluded_panel: Option<u64>,
+    excluded_panel: Option<PanelId>,
 ) -> Result<()> {
     if panels.values().any(|panel| panel.mode.is_fullscreen()) {
         return Ok(());
@@ -207,7 +207,7 @@ fn save_dodge_targets_except(
 fn finish_resize(
     panels: &mut PanelImages,
     input: &crate::bridge::InputSender,
-    resizing_panel: &mut Option<u64>,
+    resizing_panel: &mut Option<PanelId>,
     geometry: Option<PanelGeometry>,
     edges: [bool; 4],
     requested_size: Option<(i32, i32)>,
@@ -723,7 +723,7 @@ pub fn run(
     let mut stick_click_consumed = false;
     let mut launcher_pressed = false;
     let mut maximize_right_chord_pressed = false;
-    let mut grabbed_panel: Option<u64> = None;
+    let mut grabbed_panel: Option<PanelId> = None;
     let mut grab_radius = config.window.default_distance_m;
     let mut grab_player_position = glam::Vec3::ZERO;
     let mut grab_initial_radius = config.window.default_distance_m;

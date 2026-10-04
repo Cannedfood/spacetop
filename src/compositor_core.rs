@@ -315,7 +315,7 @@ impl Compositor {
             gpu_renderer: None,
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
-            next_panel_id: 1,
+            next_panel_id: crate::panel::PanelId::new(1),
             frame_sender,
             panel_limits: panel::PanelLimits::default(),
             window_config: window.clone(),
@@ -630,7 +630,7 @@ impl Compositor {
 
     pub(super) fn set_panel_active(
         &mut self,
-        panel_id: Option<u64>,
+        panel_id: Option<crate::panel::PanelId>,
         serial: smithay::utils::Serial,
     ) {
         for panel in &self.panels {

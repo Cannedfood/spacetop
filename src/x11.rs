@@ -365,7 +365,7 @@ impl Compositor {
             id: self.next_panel_id,
             bounds: Rectangle::default(),
         });
-        self.next_panel_id = self.next_panel_id.saturating_add(1);
+        self.next_panel_id = self.next_panel_id.next();
         if let Some(index) = self.update_panel_from_commit(&surface) {
             self.invalidate_panel(index);
         }

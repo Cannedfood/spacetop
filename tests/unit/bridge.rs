@@ -65,8 +65,12 @@ fn frame_requests_coalesce_until_consumed() {
 fn removals_are_not_lost_when_many_windows_update() {
     let (sender, receiver) = new_panel_channel();
     for panel_id in 0..32 {
-        sender.publish(PanelUpdate::Removed { panel_id });
-        sender.publish(PanelUpdate::Removed { panel_id });
+        sender.publish(PanelUpdate::Removed {
+            panel_id: crate::panel::PanelId::new(panel_id),
+        });
+        sender.publish(PanelUpdate::Removed {
+            panel_id: crate::panel::PanelId::new(panel_id),
+        });
     }
     assert_eq!(receiver.drain().len(), 32);
     assert!(receiver.drain().is_empty());

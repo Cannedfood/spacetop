@@ -12,7 +12,7 @@ use std::{
     },
 };
 
-use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3};
+use crate::panel::{PanelGeometry, PanelId, PanelLimits, PanelPose, Ray3};
 
 #[derive(Debug)]
 pub enum XrInput {
@@ -39,17 +39,17 @@ pub enum XrInput {
         time_ms: u32,
     },
     MovePanel {
-        panel_id: u64,
+        panel_id: PanelId,
         pose: PanelPose,
     },
     ToggleMaximize {
-        panel_id: u64,
+        panel_id: PanelId,
     },
     ClosePanel {
-        panel_id: u64,
+        panel_id: PanelId,
     },
     ResizePanel {
-        panel_id: u64,
+        panel_id: PanelId,
         width: i32,
         height: i32,
         anchor: Option<(PanelGeometry, [bool; 4])>,
@@ -137,13 +137,13 @@ impl PanelMode {
 #[derive(Debug)]
 pub enum PanelUpdate {
     GpuFrame {
-        panel_id: u64,
+        panel_id: PanelId,
         dmabuf: Dmabuf,
         geometry: PanelGeometry,
         mode: PanelMode,
     },
     Removed {
-        panel_id: u64,
+        panel_id: PanelId,
     },
 }
 
@@ -155,12 +155,12 @@ pub struct CursorState {
 
 #[derive(Clone)]
 pub struct PanelSender {
-    updates: Arc<Mutex<BTreeMap<u64, PanelUpdate>>>,
+    updates: Arc<Mutex<BTreeMap<PanelId, PanelUpdate>>>,
     cursor: Arc<Mutex<Option<CursorState>>>,
 }
 
 pub struct PanelReceiver {
-    updates: Arc<Mutex<BTreeMap<u64, PanelUpdate>>>,
+    updates: Arc<Mutex<BTreeMap<PanelId, PanelUpdate>>>,
     cursor: Arc<Mutex<Option<CursorState>>>,
 }
 

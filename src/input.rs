@@ -95,19 +95,28 @@ fn eligible_device(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct FilesystemDeviceId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct InodeId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DeviceNodeId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct DeviceIdentity {
-    dev: u64,
-    ino: u64,
-    rdev: u64,
+    dev: FilesystemDeviceId,
+    ino: InodeId,
+    rdev: DeviceNodeId,
 }
 
 impl DeviceIdentity {
     fn at(path: &Path) -> io::Result<Self> {
         let metadata = fs::metadata(path)?;
         Ok(Self {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-            rdev: metadata.rdev(),
+            dev: FilesystemDeviceId(metadata.dev()),
+            ino: InodeId(metadata.ino()),
+            rdev: DeviceNodeId(metadata.rdev()),
         })
     }
 }

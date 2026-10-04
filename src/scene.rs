@@ -40,6 +40,9 @@ const SHADER_PARTS: [&str; 5] = [
 ];
 static NEXT_PANEL_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PanelTextureId(u64);
+
 fn shader(
     entry: &str,
     stage: naga::ShaderStage,
@@ -260,7 +263,7 @@ struct EnvironmentRenderer {
 struct ReflectionAtlas {
     texture: Option<ReflectionAtlasImage>,
     rects: Vec<vk::Rect2D>,
-    panel_ids: Vec<u64>,
+    panel_ids: Vec<PanelTextureId>,
     dirty_indices: Vec<usize>,
     size: u32,
 }
