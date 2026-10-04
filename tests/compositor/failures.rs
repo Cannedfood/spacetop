@@ -6,7 +6,7 @@ fn readiness_callback_runs_once_with_or_without_xwayland() {
 
     for display_name in [None, Some(":test".to_owned())] {
         let display = Display::<Compositor>::new().unwrap();
-        let (sender, _receiver) = bridge::panel_channel();
+        let (sender, _receiver) = bridge::new_panel_channel();
         let mut compositor = Compositor::new(display.handle(), sender);
         let calls = Rc::new(RefCell::new(Vec::new()));
         let callback_calls = calls.clone();
@@ -23,7 +23,7 @@ fn readiness_callback_runs_once_with_or_without_xwayland() {
 #[test]
 fn readiness_callback_errors_are_returned() {
     let display = Display::<Compositor>::new().unwrap();
-    let (sender, _receiver) = bridge::panel_channel();
+    let (sender, _receiver) = bridge::new_panel_channel();
     let mut compositor = Compositor::new(display.handle(), sender);
     compositor.ready_callback = Some(Box::new(|_| anyhow::bail!("application startup failed")));
     assert_eq!(
@@ -36,7 +36,7 @@ fn readiness_callback_errors_are_returned() {
 #[test]
 fn config_reload_updates_default_window_settings() {
     let display = Display::<Compositor>::new().unwrap();
-    let (sender, _receiver) = bridge::panel_channel();
+    let (sender, _receiver) = bridge::new_panel_channel();
     let mut compositor = Compositor::new(display.handle(), sender);
 
     compositor.handle_xr_input(crate::XrInput::ConfigReloaded {
@@ -69,7 +69,7 @@ fn gpu_and_xr_failures_are_fatal() {
         },
     ] {
         let display = Display::<Compositor>::new().unwrap();
-        let (sender, receiver) = bridge::panel_channel();
+        let (sender, receiver) = bridge::new_panel_channel();
         let mut compositor = Compositor::new(display.handle(), sender);
         compositor.handle_xr_input(command);
         assert!(compositor.fatal_error.is_some());

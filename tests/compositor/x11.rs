@@ -54,7 +54,7 @@ fn exercise_x11_app(vulkan: Option<crate::gpu::test_support::Vulkan>) {
 
     let mut event_loop = EventLoop::<Compositor>::try_new().unwrap();
     let display = Display::<Compositor>::new().unwrap();
-    let (sender, receiver) = bridge::panel_channel();
+    let (sender, receiver) = bridge::new_panel_channel();
     let mut compositor = Compositor::new(display.handle(), sender);
     let readiness = Rc::new(RefCell::new(Vec::new()));
     let callback_readiness = readiness.clone();

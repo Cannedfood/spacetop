@@ -24,7 +24,7 @@ pub(super) struct WaylandApp {
 impl WaylandApp {
     pub(super) fn new(vulkan: Option<crate::gpu::test_support::Vulkan>) -> Self {
         let mut display = Display::<Compositor>::new().unwrap();
-        let (sender, receiver) = bridge::panel_channel();
+        let (sender, receiver) = bridge::new_panel_channel();
         let mut compositor = Compositor::new(display.handle(), sender);
         let (server_socket, client_socket) = UnixStream::pair().unwrap();
         display

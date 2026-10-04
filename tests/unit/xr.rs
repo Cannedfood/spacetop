@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn resize_release_reliably_sends_the_final_size_when_motion_queue_is_full() {
-    let (input, receiver) = crate::bridge::input_channel();
+    let (input, receiver) = crate::bridge::new_input_channel();
     for time_ms in 0..16 {
         input.try_send(XrInput::PointerLost { time_ms }).unwrap();
     }

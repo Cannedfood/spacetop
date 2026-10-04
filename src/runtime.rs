@@ -24,14 +24,22 @@ pub(crate) type ReadyCallback = Box<dyn FnOnce(Option<String>) -> anyhow::Result
 
 pub fn run(
     on_ready: impl FnOnce(DisplayNames) -> anyhow::Result<()> + 'static,
-    mut on_launcher_toggle: impl FnMut() -> anyhow::Result<()> + 'static,
+    on_launcher_toggle: impl FnMut() -> anyhow::Result<()> + 'static,
 ) -> anyhow::Result<()> {
     let config = AppConfig::load()?;
+    run_with_config(config, on_ready, on_launcher_toggle)
+}
+
+pub fn run_with_config(
+    config: AppConfig,
+    on_ready: impl FnOnce(DisplayNames) -> anyhow::Result<()> + 'static,
+    mut on_launcher_toggle: impl FnMut() -> anyhow::Result<()> + 'static,
+) -> anyhow::Result<()> {
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
     let display: Display<Compositor> = Display::new()?;
     let display_handle = display.handle();
-    let (frame_sender, frame_receiver) = bridge::panel_channel();
-    let (input_sender, input_receiver) = bridge::input_channel();
+    let (frame_sender, frame_receiver) = bridge::new_panel_channel();
+    let (input_sender, input_receiver) = bridge::new_input_channel();
     let xr_input_sender = input_sender.clone();
     let xr_error_sender = input_sender.clone();
     let xr_config = config.clone();
@@ -136,6 +144,6 @@ pub fn run(
 
 pub fn run_xr_client() -> anyhow::Result<()> {
     let config = AppConfig::load()?;
-    let (_frame_sender, frame_receiver) = bridge::panel_channel();
+    let (_frame_sender, frame_receiver) = bridge::new_panel_channel();
     xr::run(frame_receiver, bridge::InputSender::discarded(), config)
 }

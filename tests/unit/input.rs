@@ -129,7 +129,7 @@ fn hotplug_removal_releases_only_the_removed_devices_keys_and_buttons() {
         failures: BTreeMap::new(),
     };
     let display = smithay::reexports::wayland_server::Display::<Compositor>::new().unwrap();
-    let (sender, _receiver) = crate::bridge::panel_channel();
+    let (sender, _receiver) = crate::bridge::new_panel_channel();
     let mut compositor = Compositor::new(display.handle(), sender);
     compositor.dispatch_key(30, true, 0);
     compositor.dispatch_key(30, true, 0);

@@ -208,7 +208,7 @@ impl PanelReceiver {
     }
 }
 
-pub fn panel_channel() -> (PanelSender, PanelReceiver) {
+pub fn new_panel_channel() -> (PanelSender, PanelReceiver) {
     let updates = Arc::new(Mutex::new(BTreeMap::new()));
     let cursor = Arc::new(Mutex::new(None));
     (
@@ -220,7 +220,7 @@ pub fn panel_channel() -> (PanelSender, PanelReceiver) {
     )
 }
 
-pub fn input_channel() -> (InputSender, Channel<XrInput>) {
+pub fn new_input_channel() -> (InputSender, Channel<XrInput>) {
     let (sender, receiver) = channel::channel();
     (
         InputSender(Some(Arc::new(InputQueue {
