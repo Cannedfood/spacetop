@@ -45,8 +45,7 @@ See [TECHNICAL.md](TECHNICAL.md) for runtime requirements, renderer details, and
 ## Configuration
 
 On first startup Spacetop creates `~/.config/spacetop/config.toml` with defaults.
-Changes are picked up automatically while running (polled every 250 ms), except
-the reflection texture mode, which requires a restart. Invalid
+Changes are picked up automatically while running (polled every 250 ms). Invalid
 settings or an unreadable replacement background leave the current settings active;
 the default window distance applies to windows opened after the reload.
 The background image can be `"random"` to select an EXR from
@@ -77,26 +76,16 @@ feathering_m = 0.0
 
 [window]
 default_distance_m = 1.6
-reflection_textures = "auto"
 reflection_atlas_size = 256
 
 [cursor]
 default_distance_m = 1.6
 ```
 
-`window.reflection_textures` selects how window images are sampled in floor
-reflections: `"auto"` (default) uses descriptor arrays when supported by the GPU
-and otherwise copies the images into a texture atlas. Use `"atlas"` to force the
-fallback or `"descriptor_array"` to force direct sampling (an unsupported GPU
-will report an error). This setting is also available in SpaceSettings and
-requires restarting Spacetop. Ordinary window rendering still samples the
-original images directly in every mode.
-
-`window.reflection_atlas_size` fixes the atlas width and height in pixels
-(default: 256 x 256, approximately 256 KiB). Options are 256, 512, 1024, 2048,
-4096, and 8192. SpaceSettings shows this size dropdown only when the mode is
-explicitly `"atlas"`; the configured size also applies to the `"auto"` fallback.
-Size changes apply while running. Window textures are scaled down proportionally
+Floor reflections use a texture atlas. `window.reflection_atlas_size` sets its
+width and height in pixels (default: 256 x 256, approximately 256 KiB). Options
+are 256, 512, 1024, 2048, 4096, and 8192. Size changes apply while running.
+Window textures are scaled down proportionally
 when necessary to fit every window, without changing ordinary window rendering.
 Sizes exceeding the GPU's image limit are rejected.
 

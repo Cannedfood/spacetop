@@ -28,54 +28,23 @@ const SHADER_PARTS: [&str; 5] = [
 ];
 static NEXT_PANEL_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
-pub(crate) fn supports_reflection_arrays(
-    features: &vk::PhysicalDeviceVulkan12Features<'_>,
-) -> bool {
-    features.runtime_descriptor_array != 0
-        && features.shader_sampled_image_array_non_uniform_indexing != 0
-        && features.descriptor_binding_variable_descriptor_count != 0
-}
-
 fn shader(
     entry: &str,
     stage: naga::ShaderStage,
     trace_through_transparent_windows: bool,
-    reflection_arrays: bool,
 ) -> Result<Vec<u32>> {
-    let mut shader_source = SHADER_PARTS.join("\n").replace(
+    let shader_source = SHADER_PARTS.join("\n").replace(
         "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = false;",
         &format!(
             "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = {};",
             trace_through_transparent_windows
         ),
     );
-    if !reflection_arrays {
-        shader_source = shader_source
-            .replace("enable wgpu_binding_array;", "")
-            .replace(
-                "var panel_textures: binding_array<texture_2d<f32>>;",
-                "var panel_atlas: texture_2d<f32>;",
-            )
-            .replace(
-                "return textureSampleLevel(panel_textures[index], environment_filter, uv, 0.0);",
-                "let rect = window_buffer.windows[index].atlas_rect;\n\
-                 let pixel = clamp(rect.xy + uv * rect.zw, rect.xy + vec2(0.5),\n\
-                     rect.xy + rect.zw - vec2(0.5));\n\
-                 return textureSampleLevel(panel_atlas, environment_filter,\n\
-                     pixel / vec2<f32>(textureDimensions(panel_atlas)), 0.0);",
-            );
-    }
     let module = naga::front::wgsl::parse_str(&shader_source)
         .map_err(|error| anyhow::anyhow!(error.emit_to_string(&shader_source)))?;
     let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::IMMEDIATES
-            | if reflection_arrays {
-                naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
-                    | naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING
-            } else {
-                naga::valid::Capabilities::empty()
-            },
+        naga::valid::Capabilities::IMMEDIATES,
     )
     .validate(&module)?;
     let options = naga::back::spv::Options {
@@ -945,6 +914,22 @@ fn pack_reflection_atlas(
     Ok((extent, rects))
 }
 
+fn atlas_dirty_indices(
+    previous_ids: &[u64],
+    current_ids: &[u64],
+    layout_changed: bool,
+    atlas_changed: bool,
+) -> Vec<usize> {
+    if layout_changed || atlas_changed {
+        return (0..current_ids.len()).collect();
+    }
+    current_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| (previous_ids.get(index) != Some(id)).then_some(index))
+        .collect()
+}
+
 struct ReflectionAtlas {
     device: ash::Device,
     image: vk::Image,
@@ -1039,13 +1024,13 @@ pub(crate) struct SceneRenderer {
     environment_memory: vk::DeviceMemory,
     environment_buffer_size: u64,
     environment_descriptor_capacity: u32,
-    environment_panel_ids: Vec<u64>,
     environment_skybox_view: vk::ImageView,
     skybox_diffuse_irradiance: Vec3,
     max_environment_windows: u32,
-    reflection_arrays: bool,
     atlas: Option<ReflectionAtlas>,
     atlas_rects: Vec<vk::Rect2D>,
+    atlas_panel_ids: Vec<u64>,
+    atlas_dirty_indices: Vec<usize>,
     atlas_size: u32,
     sampler: vk::Sampler,
     sky_sampler: vk::Sampler,
@@ -1155,7 +1140,6 @@ impl SceneRenderer {
         physical_device: vk::PhysicalDevice,
         format: vk::Format,
         config: &AppConfig,
-        reflection_arrays: bool,
     ) -> Result<Self> {
         let mut renderer = Self {
             device: device.clone(),
@@ -1176,13 +1160,13 @@ impl SceneRenderer {
             environment_memory: vk::DeviceMemory::null(),
             environment_buffer_size: 0,
             environment_descriptor_capacity: 0,
-            environment_panel_ids: Vec::new(),
             environment_skybox_view: vk::ImageView::null(),
             skybox_diffuse_irradiance: Vec3::ONE,
             max_environment_windows: 0,
-            reflection_arrays,
             atlas: None,
             atlas_rects: Vec::new(),
+            atlas_panel_ids: Vec::new(),
+            atlas_dirty_indices: Vec::new(),
             atlas_size: config.window.reflection_atlas_size.into(),
             sampler: vk::Sampler::null(),
             sky_sampler: vk::Sampler::null(),
@@ -1279,15 +1263,7 @@ impl SceneRenderer {
                 .max_storage_buffer_range
                 .saturating_sub(std::mem::size_of::<WindowBufferHeader>() as u32)
                 / std::mem::size_of::<WindowGpuData>() as u32;
-            renderer.max_environment_windows = if reflection_arrays {
-                limits
-                    .max_per_stage_descriptor_sampled_images
-                    .min(limits.max_descriptor_set_sampled_images)
-                    .saturating_sub(2)
-                    .min(buffer_capacity)
-            } else {
-                buffer_capacity
-            };
+            renderer.max_environment_windows = buffer_capacity;
             ensure!(
                 renderer.max_environment_windows > 0,
                 "Vulkan device has no capacity for reflected window descriptors"
@@ -1316,30 +1292,11 @@ impl SceneRenderer {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(4)
                     .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .descriptor_count(if reflection_arrays {
-                        renderer.max_environment_windows
-                    } else {
-                        1
-                    })
+                    .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::FRAGMENT),
             ];
-            let binding_flags = [
-                vk::DescriptorBindingFlags::empty(),
-                vk::DescriptorBindingFlags::empty(),
-                vk::DescriptorBindingFlags::empty(),
-                vk::DescriptorBindingFlags::empty(),
-                if reflection_arrays {
-                    vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT
-                } else {
-                    vk::DescriptorBindingFlags::empty()
-                },
-            ];
-            let mut binding_flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
-                .binding_flags(&binding_flags);
             renderer.environment_descriptor_layout = device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default()
-                    .bindings(&environment_bindings)
-                    .push_next(&mut binding_flags_info),
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&environment_bindings),
                 None,
             )?;
             let uniform = FloorUniform::from_config(config, renderer.skybox_diffuse_irradiance);
@@ -1442,9 +1399,6 @@ impl SceneRenderer {
     }
 
     fn validate_atlas_size(&self, size: u32) -> Result<()> {
-        if self.reflection_arrays {
-            return Ok(());
-        }
         let limit = unsafe {
             self.instance
                 .get_physical_device_properties(self.physical_device)
@@ -1542,35 +1496,40 @@ impl SceneRenderer {
             "window count {window_count} exceeds this GPU's reflected-window capacity {}",
             self.max_environment_windows
         );
-        let mut atlas_changed = false;
-        if !self.reflection_arrays {
-            let sizes = frame
-                .panels
-                .iter()
-                .map(|(texture, _)| {
-                    let size = texture.shared.dmabuf.size();
-                    vk::Extent2D {
-                        width: size.w as u32,
-                        height: size.h as u32,
-                    }
-                })
-                .collect::<Vec<_>>();
-            let (extent, rects) = pack_reflection_atlas(&sizes, self.atlas_size)?;
-            if self
-                .atlas
-                .as_ref()
-                .is_none_or(|atlas| atlas.extent != extent)
-            {
-                self.atlas = Some(ReflectionAtlas::new(self, extent)?);
-                atlas_changed = true;
-            }
-            self.atlas_rects = rects;
+        let sizes = frame
+            .panels
+            .iter()
+            .map(|(texture, _)| {
+                let size = texture.shared.dmabuf.size();
+                vk::Extent2D {
+                    width: size.w as u32,
+                    height: size.h as u32,
+                }
+            })
+            .collect::<Vec<_>>();
+        let (extent, rects) = pack_reflection_atlas(&sizes, self.atlas_size)?;
+        let atlas_changed = self
+            .atlas
+            .as_ref()
+            .is_none_or(|atlas| atlas.extent != extent);
+        let layout_changed = rects != self.atlas_rects;
+        if atlas_changed {
+            self.atlas = Some(ReflectionAtlas::new(self, extent)?);
         }
-        let descriptor_count = if self.reflection_arrays {
-            window_count.max(1)
-        } else {
-            1
-        };
+        let panel_ids = frame
+            .panels
+            .iter()
+            .map(|(texture, _)| texture.id)
+            .collect::<Vec<_>>();
+        self.atlas_dirty_indices = atlas_dirty_indices(
+            &self.atlas_panel_ids,
+            &panel_ids,
+            layout_changed,
+            atlas_changed,
+        );
+        self.atlas_rects = rects;
+        self.atlas_panel_ids = panel_ids;
+        let descriptor_count = 1;
         let descriptor_changed = descriptor_count > self.environment_descriptor_capacity;
         if descriptor_changed {
             unsafe {
@@ -1599,20 +1558,12 @@ impl SceneRenderer {
                         ]),
                     None,
                 )?;
-                let counts = [descriptor_count];
-                let mut variable_count =
-                    vk::DescriptorSetVariableDescriptorCountAllocateInfo::default()
-                        .descriptor_counts(&counts);
                 let layouts = [self.environment_descriptor_layout];
-                let mut allocation = vk::DescriptorSetAllocateInfo::default()
+                let allocation = vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(self.environment_pool)
                     .set_layouts(&layouts);
-                if self.reflection_arrays {
-                    allocation = allocation.push_next(&mut variable_count);
-                }
                 self.environment_descriptor = self.device.allocate_descriptor_sets(&allocation)?[0];
                 self.environment_descriptor_capacity = descriptor_count;
-                self.environment_panel_ids.clear();
                 self.environment_skybox_view = vk::ImageView::null();
             }
         }
@@ -1686,9 +1637,7 @@ impl SceneRenderer {
                     center_width: [pose.center.x, pose.center.y, pose.center.z, pose.width_m],
                     right_height: [right.x, right.y, right.z, height],
                     up: [up.x, up.y, up.z, 0.0],
-                    atlas_rect: if self.reflection_arrays {
-                        [0.0; 4]
-                    } else {
+                    atlas_rect: {
                         let rect = self.atlas_rects[index];
                         [
                             rect.offset.x as f32,
@@ -1704,6 +1653,11 @@ impl SceneRenderer {
             count: window_count,
             padding: [0; 3],
         };
+        let atlas_view = self
+            .atlas
+            .as_ref()
+            .context("reflection atlas was not initialized")?
+            .view;
         unsafe {
             let mapped = self.device.map_memory(
                 self.environment_memory,
@@ -1725,11 +1679,6 @@ impl SceneRenderer {
             );
             self.device.unmap_memory(self.environment_memory);
 
-            let panel_ids = frame
-                .panels
-                .iter()
-                .map(|(texture, _)| texture.id)
-                .collect::<Vec<_>>();
             let skybox_changed = skybox.view != self.environment_skybox_view;
             if descriptor_changed {
                 let filtering = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
@@ -1778,34 +1727,10 @@ impl SceneRenderer {
                 );
                 self.environment_skybox_view = skybox.view;
             }
-            if descriptor_changed
-                || atlas_changed
-                || skybox_changed
-                || panel_ids != self.environment_panel_ids
-            {
-                let window_images = if let Some(atlas) = &self.atlas {
-                    vec![
-                        vk::DescriptorImageInfo::default()
-                            .image_view(atlas.view)
-                            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-                    ]
-                } else {
-                    frame
-                        .panels
-                        .iter()
-                        .map(|(texture, _)| {
-                            vk::DescriptorImageInfo::default()
-                                .image_view(texture.view)
-                                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        })
-                        .chain(std::iter::repeat_n(
-                            vk::DescriptorImageInfo::default()
-                                .image_view(skybox.view)
-                                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-                            self.environment_descriptor_capacity as usize - panel_ids.len(),
-                        ))
-                        .collect::<Vec<_>>()
-                };
+            if descriptor_changed || atlas_changed || skybox_changed {
+                let window_images = [vk::DescriptorImageInfo::default()
+                    .image_view(atlas_view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
                 self.device.update_descriptor_sets(
                     &[vk::WriteDescriptorSet::default()
                         .dst_set(self.environment_descriptor)
@@ -1814,7 +1739,6 @@ impl SceneRenderer {
                         .image_info(&window_images)],
                     &[],
                 );
-                self.environment_panel_ids = panel_ids;
             }
         }
         Ok(())
@@ -1825,6 +1749,11 @@ impl SceneRenderer {
         command: vk::CommandBuffer,
         frame: &SceneFrame<'_>,
     ) {
+        if self.atlas_dirty_indices.is_empty()
+            && self.atlas.as_ref().is_none_or(|atlas| atlas.initialized)
+        {
+            return;
+        }
         let Some(atlas) = &mut self.atlas else {
             return;
         };
@@ -1860,7 +1789,9 @@ impl SceneRenderer {
                     })
                     .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)],
             );
-            for ((texture, _), rect) in frame.panels.iter().zip(&self.atlas_rects) {
+            for &index in &self.atlas_dirty_indices {
+                let (texture, _) = &frame.panels[index];
+                let rect = &self.atlas_rects[index];
                 let source_barrier = vk::ImageMemoryBarrier::default()
                     .image(texture.shared.image)
                     .subresource_range(range)
@@ -1984,13 +1915,11 @@ impl SceneRenderer {
             vertex_name.to_str()?,
             naga::ShaderStage::Vertex,
             trace_through_transparent_windows,
-            self.reflection_arrays,
         )?;
         let fragment_code = shader(
             fragment,
             naga::ShaderStage::Fragment,
             trace_through_transparent_windows,
-            self.reflection_arrays,
         )?;
         let vertex = unsafe {
             self.device.create_shader_module(
@@ -2333,22 +2262,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reflection_arrays_require_all_optional_features() {
-        let supported = vk::PhysicalDeviceVulkan12Features::default()
-            .runtime_descriptor_array(true)
-            .shader_sampled_image_array_non_uniform_indexing(true)
-            .descriptor_binding_variable_descriptor_count(true);
-        assert!(supports_reflection_arrays(&supported));
-        for unsupported in [
-            supported.runtime_descriptor_array(false),
-            supported.shader_sampled_image_array_non_uniform_indexing(false),
-            supported.descriptor_binding_variable_descriptor_count(false),
-        ] {
-            assert!(!supports_reflection_arrays(&unsupported));
-        }
-    }
-
-    #[test]
     fn reflection_atlas_packs_native_sizes_without_overlap() {
         for sizes in [
             vec![],
@@ -2427,6 +2340,17 @@ mod tests {
     }
 
     #[test]
+    fn atlas_only_marks_redrawn_windows_dirty_unless_layout_changes() {
+        assert_eq!(atlas_dirty_indices(&[10, 20], &[10, 20], false, false), []);
+        assert_eq!(atlas_dirty_indices(&[10, 20], &[10, 21], false, false), [1]);
+        assert_eq!(
+            atlas_dirty_indices(&[10, 20], &[10, 20], true, false),
+            [0, 1]
+        );
+        assert_eq!(atlas_dirty_indices(&[], &[10, 20], false, true), [0, 1]);
+    }
+
+    #[test]
     fn fixed_atlas_downscales_all_windows_proportionally() {
         let sizes = [vk::Extent2D {
             width: 1920,
@@ -2470,30 +2394,19 @@ mod tests {
 
     #[test]
     fn shaders_compile() {
-        for reflection_arrays in [false, true] {
-            for (entry, stage) in [
-                ("sky_vertex", naga::ShaderStage::Vertex),
-                ("vertex", naga::ShaderStage::Vertex),
-                ("window", naga::ShaderStage::Fragment),
-                ("cursor", naga::ShaderStage::Fragment),
-                ("environment", naga::ShaderStage::Fragment),
-            ] {
-                assert_eq!(
-                    shader(entry, stage, false, reflection_arrays).unwrap()[0],
-                    0x0723_0203
-                );
-            }
-            assert_eq!(
-                shader(
-                    "environment",
-                    naga::ShaderStage::Fragment,
-                    true,
-                    reflection_arrays
-                )
-                .unwrap()[0],
-                0x0723_0203
-            );
+        for (entry, stage) in [
+            ("sky_vertex", naga::ShaderStage::Vertex),
+            ("vertex", naga::ShaderStage::Vertex),
+            ("window", naga::ShaderStage::Fragment),
+            ("cursor", naga::ShaderStage::Fragment),
+            ("environment", naga::ShaderStage::Fragment),
+        ] {
+            assert_eq!(shader(entry, stage, false).unwrap()[0], 0x0723_0203);
         }
+        assert_eq!(
+            shader("environment", naga::ShaderStage::Fragment, true).unwrap()[0],
+            0x0723_0203
+        );
     }
 
     #[test]
