@@ -217,6 +217,7 @@ enum Message {
     Keyboard(iced::keyboard::Event),
     RefreshSearchFocus,
     SearchFocusChanged(bool),
+    CloseLauncher,
     WindowUnfocused,
     LaunchFocused,
     Launch(usize),
@@ -255,6 +256,7 @@ impl Launcher {
                     .map(Message::SearchFocusChanged);
             }
             Message::SearchFocusChanged(focused) => self.search_focused = focused,
+            Message::CloseLauncher => return close_window(),
             Message::WindowUnfocused => return close_window(),
             Message::Keyboard(iced::keyboard::Event::KeyPressed { key, text, .. }) => {
                 if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) {
@@ -439,7 +441,36 @@ impl Launcher {
                 radius: 14.0.into(),
             };
             style
-        });
+        })
+        .width(Length::Fill);
+        let close_button = iced::widget::tooltip(
+            button(
+                container(text("×").size(24).color(TEXT))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            )
+                .width(Length::Fixed(48.0))
+                .height(Length::Fixed(48.0))
+                .padding(0)
+                .on_press(Message::CloseLauncher)
+                .style(|_theme: &Theme, status| button::Style {
+                    background: Some(Background::Color(match status {
+                        button::Status::Hovered | button::Status::Pressed => TILE_HOVER,
+                        _ => TILE,
+                    })),
+                    text_color: TEXT,
+                    border: Border {
+                        color: Color::from_rgba(0.55, 0.72, 0.95, 0.23),
+                        width: 1.0,
+                        radius: 14.0.into(),
+                    },
+                    ..Default::default()
+                }),
+            "Close launcher",
+            iced::widget::tooltip::Position::Bottom,
+        );
         let count = format!("{} APPLICATIONS", apps.len());
         let footer = row![
             text(count).size(11).color(MUTED),
@@ -449,7 +480,13 @@ impl Launcher {
         .align_y(iced::Alignment::Center);
 
         container(
-            column![search, scrollable(cards).height(Length::Fill), footer]
+            column![
+                row![search, close_button]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                scrollable(cards).height(Length::Fill),
+                footer
+            ]
                 .spacing(20)
                 .padding(26),
         )
@@ -716,6 +753,10 @@ fn main() -> iced::Result {
     })
     .title("Spacetop App Launcher")
     .window_size((920.0, 680.0))
+    .window(iced::window::Settings {
+        decorations: false,
+        ..Default::default()
+    })
     .transparent(true)
     .centered()
     .theme(Theme::Dark)
