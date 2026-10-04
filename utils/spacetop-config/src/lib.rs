@@ -45,6 +45,8 @@ pub struct FloorConfig {
     pub ray_count: u32,
     pub trace_through_transparent_windows: bool,
     pub reflection_grain_size_m: f32,
+    pub radius_degrees: f32,
+    pub feathering_m: f32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -282,6 +284,8 @@ impl Default for FloorConfig {
             ray_count: 1,
             trace_through_transparent_windows: true,
             reflection_grain_size_m: 0.001,
+            radius_degrees: 90.0,
+            feathering_m: 0.0,
         }
     }
 }
@@ -552,6 +556,15 @@ impl AppConfig {
             self.floor.reflection_grain_size_m.is_finite()
                 && (0.001..=0.05).contains(&self.floor.reflection_grain_size_m),
             "floor.reflection_grain_size_m must be between 0.001 and 0.05 meters"
+        );
+        ensure!(
+            self.floor.radius_degrees.is_finite()
+                && (0.0..=90.0).contains(&self.floor.radius_degrees),
+            "floor.radius_degrees must be between 0 and 90 degrees"
+        );
+        ensure!(
+            self.floor.feathering_m.is_finite() && (0.0..=7.0).contains(&self.floor.feathering_m),
+            "floor.feathering_m must be between 0 and 7 meters"
         );
         ensure!(
             self.window.default_distance_m.is_finite()
@@ -834,6 +847,8 @@ mod tests {
         assert_eq!(config.floor.reflectance, 0.15);
         assert_eq!(config.floor.ray_count, 1);
         assert_eq!(config.floor.reflection_grain_size_m, 0.001);
+        assert_eq!(config.floor.radius_degrees, 90.0);
+        assert_eq!(config.floor.feathering_m, 0.0);
         assert!(config.floor.trace_through_transparent_windows);
         assert_eq!(config.window.default_distance_m, 1.6);
         assert_eq!(config.window.default_vertical_angle_degrees, 0.0);
@@ -947,6 +962,29 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.floor.reflection_grain_size_m = f32::NAN;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_floor_radius_angles() {
+        let mut config = AppConfig::default();
+        config.floor.radius_degrees = 60.0;
+        assert!(config.validate().is_ok());
+
+        config.floor.radius_degrees = -1.0;
+        assert!(config.validate().is_err());
+
+        config.floor.radius_degrees = f32::NAN;
+        assert!(config.validate().is_err());
+
+        config.floor.radius_degrees = 60.0;
+        config.floor.feathering_m = 7.0;
+        assert!(config.validate().is_ok());
+
+        config.floor.feathering_m = 7.1;
+        assert!(config.validate().is_err());
+
+        config.floor.feathering_m = f32::NAN;
         assert!(config.validate().is_err());
     }
 

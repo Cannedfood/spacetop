@@ -115,6 +115,29 @@ fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f3
         return vec4(sample_environment_skybox(incident, 0.0), 1.0);
     }
     let world = eye + incident * floor_distance;
+    let ground_distance_from_origin = length(world.xz);
+    let height_from_origin = abs(transform.emitter_up.w);
+    let ground_angle_degrees =
+        atan2(ground_distance_from_origin, height_from_origin) * (180.0 / PI);
+    let radius_degrees = floor_material.ground_radius.x;
+    if ground_angle_degrees >= radius_degrees {
+        return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+    }
+    var ground_coverage = 1.0;
+    if radius_degrees < 90.0 && floor_material.ground_radius.y > 0.0 {
+        let radius_radians = radius_degrees * PI / 180.0;
+        let floor_radius_m = height_from_origin * sin(radius_radians)
+            / max(cos(radius_radians), 0.000001);
+        if ground_distance_from_origin >= floor_radius_m {
+            return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+        }
+        let feather_start_m = max(0.0, floor_radius_m - floor_material.ground_radius.y);
+        ground_coverage = 1.0 - smoothstep(
+            feather_start_m,
+            floor_radius_m,
+            ground_distance_from_origin,
+        );
+    }
     let view = -incident;
     let roughness = floor_material.controls.z;
     let ray_count = u32(floor_material.controls.w);
@@ -152,5 +175,7 @@ fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f3
             / (view_masking + light_masking - view_masking * light_masking);
         sum += radiance * weight;
     }
-    return vec4(ground + sum * opacity / f32(ray_count), 1.0);
+    let sky = sample_environment_skybox(incident, 0.0);
+    let floor = ground + sum * opacity / f32(ray_count);
+    return vec4(mix(sky, floor, ground_coverage), 1.0);
 }

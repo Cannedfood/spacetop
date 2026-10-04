@@ -135,9 +135,14 @@ derivative-filtered signed-distance coverage. The rendered window quad includes
 a one-source-pixel fringe so the analytic edge coverage also applies to the
 outer silhouette.
 
-The floor occupies a 60-meter square and uses the configured albedo and
-transparency, with sky and window reflections rendered in one full-screen
-environment pass. When OpenXR STAGE space is supported, its floor origin
+The floor uses the configured albedo and transparency, with sky and window
+reflections rendered in one full-screen environment pass. Its visible radius is
+specified by `floor.radius_degrees`, an angle from straight down (`-Y`) centered
+on the LOCAL-space origin projected onto the floor. Its ground-plane radius scales
+with the LOCAL-origin-to-floor height. The shader skips all floor lighting and
+reflection work outside this boundary. `floor.feathering_m` smoothly fades the
+floor into the skybox over a fixed ground distance inward from the boundary.
+When OpenXR STAGE space is supported, its floor origin
 (STAGE Y = 0) is located relative to LOCAL space at each frame's predicted
 display time; that position's Y coordinate sets the rendered floor height.
 Panels, views, and input remain in LOCAL space, preserving window placement.

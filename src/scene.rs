@@ -1081,6 +1081,7 @@ struct FloorUniform {
     grabbed_style: [f32; 4],
     grabbed_border_color: [f32; 4],
     diffuse_irradiance: [f32; 4],
+    ground_radius: [f32; 4],
 }
 
 #[repr(C, align(16))]
@@ -1135,6 +1136,12 @@ impl FloorUniform {
                 skybox_diffuse_irradiance.x * exposure,
                 skybox_diffuse_irradiance.y * exposure,
                 skybox_diffuse_irradiance.z * exposure,
+                0.0,
+            ],
+            ground_radius: [
+                config.floor.radius_degrees,
+                config.floor.feathering_m,
+                0.0,
                 0.0,
             ],
         }
