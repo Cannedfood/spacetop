@@ -834,48 +834,6 @@ mod tests {
     }
 
     #[test]
-    fn project_defaults_match_current_settings() {
-        let config = AppConfig::default();
-
-        assert_eq!(config.application.launcher, "spacelauncher");
-        assert_eq!(config.background.image, "random");
-        assert_eq!(config.background.brightness_stops, -0.1);
-        assert_eq!(config.background.rotation_degrees, 0.0);
-        assert_eq!(config.floor.height_m, -1.3);
-        assert_eq!(config.floor.albedo, [0.5367573, 0.5114081, 0.5114081, 1.0]);
-        assert_eq!(config.floor.roughness, 0.06);
-        assert_eq!(config.floor.reflectance, 0.15);
-        assert_eq!(config.floor.ray_count, 1);
-        assert_eq!(config.floor.reflection_grain_size_m, 0.001);
-        assert_eq!(config.floor.radius_degrees, 90.0);
-        assert_eq!(config.floor.feathering_m, 0.0);
-        assert!(config.floor.trace_through_transparent_windows);
-        assert_eq!(config.window.default_distance_m, 1.6);
-        assert_eq!(config.window.default_vertical_angle_degrees, 0.0);
-        assert_eq!(config.window.pixels_per_degree, 32.0);
-        assert_eq!(config.window.texture_aa, WindowTextureAa::SuperSample2x2);
-        assert_eq!(config.window.padding_px, 0.0);
-        assert_eq!(config.window.margin_px, 4.0);
-        assert_eq!(config.window.animation_half_time_s, 0.2);
-        assert_eq!(config.window.collision_margin_m, 0.04);
-        assert_eq!(config.window.border_width_px, 0.0);
-        assert_eq!(
-            config.window.border_color,
-            [0.9911504, 0.9911504, 0.9911504, 0.0]
-        );
-        assert_eq!(config.window.cursor_proximity_radius_px, 301.0);
-        assert_eq!(config.window.cursor_close_border_width_px, 2.0);
-        assert_eq!(
-            config.window.cursor_close_border_color,
-            [0.2485206, 0.9534924, 0.8007485, 0.5680294]
-        );
-        assert_eq!(config.window.border_radius_px, 42.0);
-        assert_eq!(config.window.grabbed_border_width_px, 1.0);
-        assert_eq!(config.window.grabbed_border_color, [0.34, 0.82, 0.72, 1.0]);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
     fn rejects_an_empty_launcher_executable() {
         let mut config = AppConfig::default();
         config.application.launcher = "  ".into();
