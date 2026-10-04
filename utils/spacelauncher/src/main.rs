@@ -8,6 +8,7 @@ use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths, get_languages
 use iced::{
     Background, Border, Color, Element, Length, Theme,
     alignment::Horizontal,
+    padding::right,
     widget::{button, column, container, grid, image, row, scrollable, svg, text, text_input},
 };
 
@@ -260,6 +261,9 @@ impl Launcher {
             Message::WindowUnfocused => return close_window(),
             Message::Keyboard(iced::keyboard::Event::KeyPressed { key, text, .. }) => {
                 if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) {
+                    if self.search_focused {
+                        return close_window();
+                    }
                     self.query.clear();
                     self.result_focus = None;
                     self.search_focused = true;
@@ -428,21 +432,22 @@ impl Launcher {
             });
 
         let input_hint = self.search_focused && !self.query.trim().is_empty();
-        let search = search.style(move |theme: &Theme, status| {
-            let mut style = text_input::default(theme, status);
-            style.background = Background::Color(TILE);
-            style.border = Border {
-                color: if input_hint {
-                    ACCENT
-                } else {
-                    Color::from_rgba(0.55, 0.72, 0.95, 0.23)
-                },
-                width: 1.0,
-                radius: 14.0.into(),
-            };
-            style
-        })
-        .width(Length::Fill);
+        let search = search
+            .style(move |theme: &Theme, status| {
+                let mut style = text_input::default(theme, status);
+                style.background = Background::Color(TILE);
+                style.border = Border {
+                    color: if input_hint {
+                        ACCENT
+                    } else {
+                        Color::from_rgba(0.55, 0.72, 0.95, 0.23)
+                    },
+                    width: 1.0,
+                    radius: 14.0.into(),
+                };
+                style
+            })
+            .width(Length::Fill);
         let close_button = iced::widget::tooltip(
             button(
                 container(text("×").size(24).color(TEXT))
@@ -451,23 +456,23 @@ impl Launcher {
                     .center_x(Length::Fill)
                     .center_y(Length::Fill),
             )
-                .width(Length::Fixed(48.0))
-                .height(Length::Fixed(48.0))
-                .padding(0)
-                .on_press(Message::CloseLauncher)
-                .style(|_theme: &Theme, status| button::Style {
-                    background: Some(Background::Color(match status {
-                        button::Status::Hovered | button::Status::Pressed => TILE_HOVER,
-                        _ => TILE,
-                    })),
-                    text_color: TEXT,
-                    border: Border {
-                        color: Color::from_rgba(0.55, 0.72, 0.95, 0.23),
-                        width: 1.0,
-                        radius: 14.0.into(),
-                    },
-                    ..Default::default()
-                }),
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(48.0))
+            .padding(0)
+            .on_press(Message::CloseLauncher)
+            .style(|_theme: &Theme, status| button::Style {
+                background: Some(Background::Color(match status {
+                    button::Status::Hovered | button::Status::Pressed => TILE_HOVER,
+                    _ => TILE,
+                })),
+                text_color: TEXT,
+                border: Border {
+                    color: Color::from_rgba(0.55, 0.72, 0.95, 0.23),
+                    width: 1.0,
+                    radius: 14.0.into(),
+                },
+                ..Default::default()
+            }),
             "Close launcher",
             iced::widget::tooltip::Position::Bottom,
         );
@@ -484,11 +489,12 @@ impl Launcher {
                 row![search, close_button]
                     .spacing(10)
                     .align_y(iced::Alignment::Center),
-                scrollable(cards).height(Length::Fill),
+                scrollable(container(cards).width(Length::Fill).padding(right(16)))
+                    .height(Length::Fill),
                 footer
             ]
-                .spacing(20)
-                .padding(26),
+            .spacing(20)
+            .padding(26),
         )
         .width(Length::Fill)
         .height(Length::Fill)
