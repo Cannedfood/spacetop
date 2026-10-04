@@ -487,6 +487,9 @@ pub fn run(
         physical_device,
         config.background.image.clone(),
     )?);
+    let mut background_exposure = 0.0_f32;
+    let mut background_exposure_target = 0.0_f32;
+    scene.set_background_exposure(background_exposure, &config)?;
     let mut queued_skybox_image = None;
     let view_configuration = instance.enumerate_view_configuration_views(system, VIEW_TYPE)?;
     ensure!(
@@ -697,10 +700,17 @@ pub fn run(
                 Ok(Ok(loaded)) if pending.image == config.background.image => {
                     scene.update_skybox_diffuse(loaded.diffuse_irradiance(), &config)?;
                     skybox = Some(loaded);
+                    background_exposure_target = 1.0;
                 }
                 Ok(Ok(_)) => {}
-                Ok(Err(error)) => eprintln!("skybox load failed: {error:#}"),
-                Err(_) => eprintln!("skybox loading thread panicked"),
+                Ok(Err(error)) => {
+                    eprintln!("skybox load failed: {error:#}");
+                    background_exposure_target = 1.0;
+                }
+                Err(_) => {
+                    eprintln!("skybox loading thread panicked");
+                    background_exposure_target = 1.0;
+                }
             }
             if let Some(image) = queued_skybox_image.take() {
                 pending_skybox = Some(PendingSkybox::new(
@@ -709,6 +719,7 @@ pub fn run(
                     physical_device,
                     image,
                 )?);
+                background_exposure_target = 0.0;
             }
         }
         if last_config_check.elapsed() >= Duration::from_millis(250) {
@@ -728,6 +739,7 @@ pub fn run(
                                 if let Some(image) = next_skybox_image {
                                     if pending_skybox.is_some() {
                                         queued_skybox_image = Some(image);
+                                        background_exposure_target = 0.0;
                                     } else {
                                         match PendingSkybox::new(
                                             &scene,
@@ -735,9 +747,13 @@ pub fn run(
                                             physical_device,
                                             image,
                                         ) {
-                                            Ok(pending) => pending_skybox = Some(pending),
+                                            Ok(pending) => {
+                                                pending_skybox = Some(pending);
+                                                background_exposure_target = 0.0;
+                                            }
                                             Err(error) => {
                                                 eprintln!("skybox load could not start: {error:#}");
+                                                background_exposure_target = 1.0;
                                             }
                                         }
                                     }
@@ -1406,6 +1422,10 @@ pub fn run(
             1.0 - (-std::f32::consts::LN_2 * delta_seconds / config.window.animation_half_time_s)
                 .exp()
         };
+        background_exposure += (background_exposure_target - background_exposure) * smoothing;
+        if (background_exposure_target - background_exposure).abs() < 0.0001 {
+            background_exposure = background_exposure_target;
+        }
         for (panel_id, panel) in &mut panel_frames {
             if Some(*panel_id) == active_fullscreen_panel {
                 if let Some(anchor) = panel.fullscreen_anchor_pose {
@@ -1491,6 +1511,7 @@ pub fn run(
             timings.measure("gpu/previous-render-wait", period, || {
                 device.wait_for_fences(&[fence], true, u64::MAX)
             })?;
+            scene.set_background_exposure(background_exposure, &config)?;
             scene.prepare_frame(&scene_frame)?;
             device.reset_fences(&[fence])?;
             device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())?;

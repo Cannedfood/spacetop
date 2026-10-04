@@ -67,7 +67,9 @@ settings or an unreadable replacement background leave the current settings acti
 the default window distance applies to windows opened after the reload.
 The background image can be `"random"` to select an EXR from
 `~/.config/spacetop/backgrounds/`, or a path to a specific image (including
-`~/` paths). The floor height is used when OpenXR does not provide a STAGE floor.
+`~/` paths). Skyboxes load asynchronously, use RGBA16F textures, and fade out
+while a replacement loads. Invalid HDR channels are repaired or clamped before
+upload. The floor height is used when OpenXR does not provide a STAGE floor.
 
 ```toml
 config_version = 1
