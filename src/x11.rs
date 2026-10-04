@@ -22,7 +22,11 @@ use smithay::{
     },
 };
 
-use crate::{Compositor, ToplevelPanel, bridge::PanelUpdate, panel::PanelPose};
+use crate::{
+    Compositor, ToplevelPanel,
+    bridge::{PanelMode, PanelUpdate},
+    panel::PanelPose,
+};
 
 pub struct X11Popup {
     pub window: X11Surface,
@@ -330,8 +334,13 @@ impl Compositor {
             return;
         }
         self.output.enter(&surface);
-        let is_fullscreen = window.is_fullscreen();
-        let is_maximized = window.is_maximized();
+        let mode = if window.is_fullscreen() {
+            PanelMode::FullScreen
+        } else if window.is_maximized() {
+            PanelMode::Maximized
+        } else {
+            PanelMode::Regular
+        };
         let pose = (0..=self.panels.len())
             .map(|slot| {
                 PanelPose::for_slot_at_distance(
@@ -349,8 +358,7 @@ impl Compositor {
             },
             pose,
             geometry: None,
-            is_fullscreen,
-            is_maximized,
+            mode,
             maximize_restore_size: None,
             pose_is_explicit: false,
             resize_anchor: None,
@@ -500,7 +508,7 @@ impl XwmHandler for Compositor {
             )
         });
         if let Some(index) = index
-            && self.panels[index].is_maximized
+            && self.panels[index].mode.is_maximized()
             && let Err(error) = self.request_panel_maximized(index, false)
         {
             eprintln!("failed to restore maximized X11 window before fullscreen: {error:#}");

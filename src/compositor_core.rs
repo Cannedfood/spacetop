@@ -149,8 +149,8 @@ impl Compositor {
             }
             XrInput::ToggleMaximize { panel_id } => {
                 if let Some(index) = self.panels.iter().position(|panel| panel.id == panel_id) {
-                    let result =
-                        self.request_panel_maximized(index, !self.panels[index].is_maximized);
+                    let result = self
+                        .request_panel_maximized(index, !self.panels[index].mode.is_maximized());
                     if let Err(error) = result {
                         self.fatal_error = Some(error);
                     }
@@ -238,9 +238,10 @@ impl Compositor {
             .set_maximized(maximized, size)
             .context("failed to set window maximize state")?;
         self.panels[index].maximize_restore_size = if maximized { restore_size } else { None };
-        self.panels[index].is_maximized = maximized;
         if maximized {
-            self.panels[index].is_fullscreen = false;
+            self.panels[index].mode = PanelMode::Maximized;
+        } else if self.panels[index].mode.is_maximized() {
+            self.panels[index].mode = PanelMode::Regular;
         }
         self.invalidate_panel(index);
         Ok(())
@@ -421,19 +422,24 @@ impl Compositor {
             .flatten();
 
         let was_mapped = self.panels[index].geometry.is_some();
-        self.panels[index].is_fullscreen = match &self.panels[index].surface {
-            PanelSurface::Wayland(surface) => surface.current_state().states.contains(
-                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
-            ),
-            PanelSurface::X11 { window, .. } => window.is_fullscreen(),
-            PanelSurface::Popup(_) => false,
-        };
-        self.panels[index].is_maximized = match &self.panels[index].surface {
-            PanelSurface::Wayland(surface) => surface.current_state().states.contains(
-                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
-            ),
-            PanelSurface::X11 { window, .. } => window.is_maximized(),
-            PanelSurface::Popup(_) => false,
+        self.panels[index].mode = match &self.panels[index].surface {
+            PanelSurface::Wayland(surface) => {
+                let states = &surface.current_state().states;
+                if states.contains(
+                    smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
+                ) {
+                    PanelMode::FullScreen
+                } else if states.contains(
+                    smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
+                ) {
+                    PanelMode::Maximized
+                } else {
+                    PanelMode::Regular
+                }
+            }
+            PanelSurface::X11 { window, .. } if window.is_fullscreen() => PanelMode::FullScreen,
+            PanelSurface::X11 { window, .. } if window.is_maximized() => PanelMode::Maximized,
+            PanelSurface::X11 { .. } | PanelSurface::Popup(_) => PanelMode::Regular,
         };
         if logical_size.is_none() && was_mapped {
             self.frame_sender.publish(PanelUpdate::Removed {
@@ -614,8 +620,7 @@ impl Compositor {
             panel_id,
             dmabuf,
             geometry,
-            is_fullscreen: self.panels[index].is_fullscreen,
-            is_maximized: self.panels[index].is_maximized,
+            mode: self.panels[index].mode,
         });
         for (surface, _) in surfaces {
             self.complete_frame_callbacks(&surface);
@@ -654,7 +659,7 @@ impl Compositor {
         let fullscreen_panel = self
             .panels
             .iter()
-            .find(|panel| panel.is_fullscreen)
+            .find(|panel| panel.mode.is_fullscreen())
             .map(|panel| panel.id);
         let hit = self
             .panels
@@ -780,7 +785,7 @@ impl Compositor {
         let fullscreen_panel = self
             .panels
             .iter()
-            .find(|panel| panel.is_fullscreen)
+            .find(|panel| panel.mode.is_fullscreen())
             .map(|panel| panel.id);
         let nearest = self
             .panels

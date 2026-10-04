@@ -21,7 +21,7 @@ pub use runtime::{DisplayNames, RuntimeCallbacks, run, run_with_callbacks, run_w
 #[cfg(test)]
 use smithay::reexports::wayland_server::Display;
 
-use bridge::{PanelUpdate, XrInput};
+use bridge::{PanelMode, PanelUpdate, XrInput};
 use panel::{PanelGeometry, PanelPose, Ray3};
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
@@ -95,8 +95,7 @@ struct ToplevelPanel {
     surface: PanelSurface,
     pose: PanelPose,
     geometry: Option<PanelGeometry>,
-    is_fullscreen: bool,
-    is_maximized: bool,
+    mode: PanelMode,
     maximize_restore_size: Option<(i32, i32)>,
     pose_is_explicit: bool,
     resize_anchor: Option<(PanelGeometry, [bool; 4])>,
@@ -229,12 +228,17 @@ impl XdgShellHandler for Compositor {
             surface: PanelSurface::Wayland(surface.clone()),
             pose,
             geometry: None,
-            is_fullscreen: surface.current_state().states.contains(
+            mode: if surface.current_state().states.contains(
                 smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
-            ),
-            is_maximized: surface.current_state().states.contains(
+            ) {
+                PanelMode::FullScreen
+            } else if surface.current_state().states.contains(
                 smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
-            ),
+            ) {
+                PanelMode::Maximized
+            } else {
+                PanelMode::Regular
+            },
             maximize_restore_size: None,
             pose_is_explicit: false,
             resize_anchor: None,
@@ -258,7 +262,7 @@ impl XdgShellHandler for Compositor {
             .panels
             .iter()
             .position(|panel| panel.surface.wl_surface() == surface.wl_surface())
-            && self.panels[index].is_maximized
+            && self.panels[index].mode.is_maximized()
             && let Err(error) = self.request_panel_maximized(index, false)
         {
             eprintln!("failed to restore maximized Wayland window before fullscreen: {error:#}");

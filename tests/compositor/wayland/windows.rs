@@ -24,7 +24,10 @@ fn has_toplevel_state(states: &[u8], expected_state: u32) -> bool {
 #[test]
 fn fullscreen_requests_toggle_compositor_panel_state() {
     let mut app = super::fixture::WaylandApp::new(None);
-    assert!(!app.compositor.panels[0].is_fullscreen);
+    assert_eq!(
+        app.compositor.panels[0].mode,
+        crate::bridge::PanelMode::Regular
+    );
 
     app.toplevel.set_fullscreen(None);
     pump(
@@ -42,7 +45,10 @@ fn fullscreen_requests_toggle_compositor_panel_state() {
         &mut app.client,
         &app.connection,
     );
-    assert!(app.compositor.panels[0].is_fullscreen);
+    assert_eq!(
+        app.compositor.panels[0].mode,
+        crate::bridge::PanelMode::FullScreen
+    );
 
     app.toplevel.unset_fullscreen();
     pump(
@@ -60,13 +66,19 @@ fn fullscreen_requests_toggle_compositor_panel_state() {
         &mut app.client,
         &app.connection,
     );
-    assert!(!app.compositor.panels[0].is_fullscreen);
+    assert_eq!(
+        app.compositor.panels[0].mode,
+        crate::bridge::PanelMode::Regular
+    );
 }
 
 #[test]
 fn xdg_maximize_requests_update_client_state_and_surface_size() {
     let mut app = super::fixture::WaylandApp::new(None);
-    assert!(!app.compositor.panels[0].is_maximized);
+    assert_eq!(
+        app.compositor.panels[0].mode,
+        crate::bridge::PanelMode::Regular
+    );
     let original_size = app.compositor.panels[0].geometry.unwrap().logical_size;
 
     app.toplevel.set_maximized();
@@ -85,8 +97,10 @@ fn xdg_maximize_requests_update_client_state_and_surface_size() {
         &mut app.client,
         &app.connection,
     );
-    assert!(app.compositor.panels[0].is_maximized);
-    assert!(!app.compositor.panels[0].is_fullscreen);
+    assert_eq!(
+        app.compositor.panels[0].mode,
+        crate::bridge::PanelMode::Maximized
+    );
     assert!(has_maximized_state(
         app.client.toplevel_states.last().unwrap()
     ));
@@ -108,7 +122,10 @@ fn xdg_maximize_requests_update_client_state_and_surface_size() {
         &mut app.client,
         &app.connection,
     );
-    assert!(!app.compositor.panels[0].is_maximized);
+    assert_eq!(
+        app.compositor.panels[0].mode,
+        crate::bridge::PanelMode::Regular
+    );
     assert!(!has_maximized_state(
         app.client.toplevel_states.last().unwrap()
     ));
@@ -126,7 +143,10 @@ fn xr_maximize_notifies_client_and_restores_surface_size() {
 
     app.compositor
         .handle_xr_input(crate::XrInput::ToggleMaximize { panel_id });
-    assert!(app.compositor.panels[0].is_maximized);
+    assert_eq!(
+        app.compositor.panels[0].mode,
+        crate::bridge::PanelMode::Maximized
+    );
     pump(
         &mut app.display,
         &mut app.compositor,
@@ -147,7 +167,10 @@ fn xr_maximize_notifies_client_and_restores_surface_size() {
 
     app.compositor
         .handle_xr_input(crate::XrInput::ToggleMaximize { panel_id });
-    assert!(!app.compositor.panels[0].is_maximized);
+    assert_eq!(
+        app.compositor.panels[0].mode,
+        crate::bridge::PanelMode::Regular
+    );
     pump(
         &mut app.display,
         &mut app.compositor,
@@ -187,7 +210,10 @@ fn maximizing_fullscreen_window_exits_fullscreen() {
         &mut app.client,
         &app.connection,
     );
-    assert!(app.compositor.panels[0].is_fullscreen);
+    assert_eq!(
+        app.compositor.panels[0].mode,
+        crate::bridge::PanelMode::FullScreen
+    );
 
     let panel_id = app.compositor.panels[0].id;
     app.compositor
@@ -199,8 +225,10 @@ fn maximizing_fullscreen_window_exits_fullscreen() {
         &mut app.client,
         &app.connection,
     );
-    assert!(app.compositor.panels[0].is_maximized);
-    assert!(!app.compositor.panels[0].is_fullscreen);
+    assert_eq!(
+        app.compositor.panels[0].mode,
+        crate::bridge::PanelMode::Maximized
+    );
     let states = app.client.toplevel_states.last().unwrap();
     assert!(has_maximized_state(states));
     assert!(!has_fullscreen_state(states));
@@ -411,8 +439,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
                 panel_id,
                 dmabuf,
                 geometry,
-                is_fullscreen,
-                is_maximized,
+                mode,
             } = receiver.try_recv().unwrap()
             else {
                 panic!("mapped window must publish its own GPU image");
@@ -420,8 +447,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
             assert_eq!(panel_id, second_id);
             assert_eq!(geometry.pose, second_pose);
             assert_eq!(geometry.logical_size, expected_size.into());
-            assert!(!is_fullscreen);
-            assert!(!is_maximized);
+            assert_eq!(mode, crate::bridge::PanelMode::Regular);
             let shared = crate::gpu::SharedImage::import(
                 &vulkan.instance,
                 &vulkan.device,

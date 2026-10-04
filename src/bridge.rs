@@ -117,14 +117,30 @@ impl InputSender {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelMode {
+    Regular,
+    Maximized,
+    FullScreen,
+}
+
+impl PanelMode {
+    pub fn is_fullscreen(self) -> bool {
+        self == Self::FullScreen
+    }
+
+    pub fn is_maximized(self) -> bool {
+        self == Self::Maximized
+    }
+}
+
 #[derive(Debug)]
 pub enum PanelUpdate {
     GpuFrame {
         panel_id: u64,
         dmabuf: Dmabuf,
         geometry: PanelGeometry,
-        is_fullscreen: bool,
-        is_maximized: bool,
+        mode: PanelMode,
     },
     Removed {
         panel_id: u64,

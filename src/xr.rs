@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::bridge::{CursorState, PanelReceiver, PanelUpdate, XrInput};
+use crate::bridge::{CursorState, PanelMode, PanelReceiver, PanelUpdate, XrInput};
 use crate::config::{AppConfig, ConfigWatcher};
 use crate::gpu::{self, SharedImage};
 use crate::panel::{PanelGeometry, PanelLimits, PanelPose, Ray3, dodge_windows};
@@ -26,9 +26,8 @@ struct XrPanel {
     saved_pose: PanelPose,
     temporary_pose: PanelPose,
     resize_pending: bool,
-    is_fullscreen: bool,
+    mode: PanelMode,
     fullscreen_anchor_pose: Option<PanelPose>,
-    is_maximized: bool,
     maximize_restore_width: Option<f32>,
 }
 
@@ -128,13 +127,13 @@ fn update_dodge_targets(
     player: glam::Vec3,
     margin_m: f32,
 ) {
-    if panels.values().any(|panel| panel.is_fullscreen) {
+    if panels.values().any(|panel| panel.mode.is_fullscreen()) {
         return;
     }
     let geometries: Vec<_> = panels
         .iter()
         .map(|(id, panel)| {
-            let pose = if fixed_windows.contains(id) || panel.is_maximized {
+            let pose = if fixed_windows.contains(id) || panel.mode.is_maximized() {
                 panel.geometry.pose
             } else {
                 panel.saved_pose
@@ -179,7 +178,7 @@ fn save_dodge_targets_except(
     input: &crate::bridge::InputSender,
     excluded_panel: Option<u64>,
 ) -> Result<()> {
-    if panels.values().any(|panel| panel.is_fullscreen) {
+    if panels.values().any(|panel| panel.mode.is_fullscreen()) {
         return Ok(());
     }
     for (panel_id, panel) in panels {
@@ -187,7 +186,7 @@ fn save_dodge_targets_except(
             continue;
         }
         panel.resize_pending = false;
-        panel.saved_pose = if panel.is_maximized {
+        panel.saved_pose = if panel.mode.is_maximized() {
             PanelPose {
                 width_m: panel
                     .maximize_restore_width
@@ -890,7 +889,7 @@ pub fn run(
             if let PanelUpdate::Removed { panel_id } = update {
                 maximize_layout_dirty |= panel_frames
                     .get(panel_id)
-                    .is_some_and(|panel| panel.is_maximized);
+                    .is_some_and(|panel| panel.mode.is_maximized());
                 timings.measure("mixed/panel-retire", Duration::ZERO, || {
                     panel_frames.remove(panel_id);
                 });
@@ -902,7 +901,7 @@ pub fn run(
                     active_fullscreen_panel = panel_frames
                         .iter()
                         .rev()
-                        .find(|(_, panel)| panel.is_fullscreen)
+                        .find(|(_, panel)| panel.mode.is_fullscreen())
                         .map(|(id, _)| *id);
                     if active_fullscreen_panel.is_none() {
                         for panel in panel_frames.values_mut() {
@@ -919,8 +918,7 @@ pub fn run(
                     panel_id,
                     dmabuf,
                     geometry,
-                    is_fullscreen,
-                    is_maximized,
+                    mode,
                 } => {
                     let shared = timings
                         .measure("gpu/dmabuf-import", Duration::ZERO, || {
@@ -940,9 +938,11 @@ pub fn run(
                     })?;
                     timings.measure("gpu/panel-replace", Duration::ZERO, || {
                         if let Some(panel) = panel_frames.get_mut(&panel_id) {
-                            let fullscreen_changed = panel.is_fullscreen != is_fullscreen;
-                            let maximized_changed = panel.is_maximized != is_maximized;
-                            if maximized_changed && is_maximized {
+                            let fullscreen_changed =
+                                panel.mode.is_fullscreen() != mode.is_fullscreen();
+                            let maximized_changed =
+                                panel.mode.is_maximized() != mode.is_maximized();
+                            if maximized_changed && mode.is_maximized() {
                                 panel.maximize_restore_width = Some(panel.saved_pose.width_m);
                             }
                             reconcile_panel_geometry(
@@ -950,15 +950,15 @@ pub fn run(
                                 &mut panel.saved_pose,
                                 &mut panel.temporary_pose,
                                 geometry,
-                                panel.resize_pending && panel.is_fullscreen == is_fullscreen,
-                                panel.is_maximized || is_maximized,
+                                panel.resize_pending
+                                    && panel.mode.is_fullscreen() == mode.is_fullscreen(),
+                                panel.mode.is_maximized() || mode.is_maximized(),
                             );
                             panel.texture = texture;
-                            panel.is_fullscreen = is_fullscreen;
-                            panel.is_maximized = is_maximized;
+                            panel.mode = mode;
                             if maximized_changed {
                                 maximize_layout_dirty = true;
-                                if is_maximized {
+                                if mode.is_maximized() {
                                     resizing_panel = None;
                                     resize_geometry = None;
                                     resize_requested_size = None;
@@ -978,13 +978,13 @@ pub fn run(
                             }
                             if fullscreen_changed {
                                 panel.fullscreen_anchor_pose = None;
-                                if is_fullscreen {
+                                if mode.is_fullscreen() {
                                     active_fullscreen_panel = Some(panel_id);
                                 } else if active_fullscreen_panel == Some(panel_id) {
                                     active_fullscreen_panel = panel_frames
                                         .iter()
                                         .rev()
-                                        .find(|(_, candidate)| candidate.is_fullscreen)
+                                        .find(|(_, candidate)| candidate.mode.is_fullscreen())
                                         .map(|(id, _)| *id);
                                     if active_fullscreen_panel.is_none() {
                                         for panel in panel_frames.values_mut() {
@@ -993,7 +993,7 @@ pub fn run(
                                         }
                                     }
                                 }
-                                if is_fullscreen {
+                                if mode.is_fullscreen() {
                                     grabbed_panel = None;
                                     resizing_panel = None;
                                     resize_geometry = None;
@@ -1009,18 +1009,18 @@ pub fn run(
                                     saved_pose: geometry.pose,
                                     temporary_pose: geometry.pose,
                                     resize_pending: false,
-                                    is_fullscreen,
+                                    mode,
                                     fullscreen_anchor_pose: None,
-                                    is_maximized,
-                                    maximize_restore_width: is_maximized
+                                    maximize_restore_width: mode
+                                        .is_maximized()
                                         .then_some(geometry.pose.width_m),
                                 },
                             );
-                            if is_fullscreen {
+                            if mode.is_fullscreen() {
                                 active_fullscreen_panel = Some(panel_id);
                             }
                             pending_spawn.insert(panel_id);
-                            if is_maximized {
+                            if mode.is_maximized() {
                                 maximize_layout_dirty = true;
                             }
                         }
@@ -1120,7 +1120,10 @@ pub fn run(
                     save_dodge_targets(&mut panel_frames, &input)?;
                 }
             }
-            for panel in panel_frames.values_mut().filter(|panel| panel.is_maximized) {
+            for panel in panel_frames
+                .values_mut()
+                .filter(|panel| panel.mode.is_maximized())
+            {
                 let distance = panel.geometry.pose.center.distance(grab_player_position);
                 panel.geometry.pose = PanelGeometry::fit_pose_to_angular_bounds(
                     panel.geometry.pose,
@@ -1577,7 +1580,7 @@ pub fn run(
                 panel.geometry.pose =
                     smooth_pose(panel.geometry.pose, panel.temporary_pose, smoothing);
             }
-            if panel.is_maximized && Some(*panel_id) != active_fullscreen_panel {
+            if panel.mode.is_maximized() && Some(*panel_id) != active_fullscreen_panel {
                 let distance = panel.geometry.pose.center.distance(grab_player_position);
                 panel.geometry.pose = PanelGeometry::fit_pose_to_angular_bounds(
                     panel.geometry.pose,
