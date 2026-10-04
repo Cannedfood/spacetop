@@ -26,6 +26,8 @@ struct XrPanel {
     saved_pose: PanelPose,
     temporary_pose: PanelPose,
     resize_pending: bool,
+    is_fullscreen: bool,
+    fullscreen_anchor_pose: Option<PanelPose>,
 }
 
 struct XrEye {
@@ -121,6 +123,9 @@ fn update_dodge_targets(
     player: glam::Vec3,
     margin_m: f32,
 ) {
+    if panels.values().any(|panel| panel.is_fullscreen) {
+        return;
+    }
     let geometries: Vec<_> = panels
         .iter()
         .map(|(id, panel)| {
@@ -155,6 +160,9 @@ fn save_dodge_targets_except(
     input: &crate::bridge::InputSender,
     excluded_panel: Option<u64>,
 ) -> Result<()> {
+    if panels.values().any(|panel| panel.is_fullscreen) {
+        return Ok(());
+    }
     for (panel_id, panel) in panels {
         if Some(*panel_id) == excluded_panel {
             continue;
@@ -652,6 +660,7 @@ pub fn run(
     let mut running = false;
     let mut exit = false;
     let mut panel_frames = PanelImages::new();
+    let mut active_fullscreen_panel = None;
     let mut pending_spawn = std::collections::BTreeSet::new();
     let mut cursor_ray: Option<Ray3> = None;
     let mut cursor_sphere_radius = config.window.default_distance_m;
@@ -829,6 +838,19 @@ pub fn run(
                 if grabbed_panel == Some(*panel_id) {
                     grabbed_panel = None;
                 }
+                if active_fullscreen_panel == Some(*panel_id) {
+                    active_fullscreen_panel = panel_frames
+                        .iter()
+                        .rev()
+                        .find(|(_, panel)| panel.is_fullscreen)
+                        .map(|(id, _)| *id);
+                    if active_fullscreen_panel.is_none() {
+                        for panel in panel_frames.values_mut() {
+                            panel.geometry.pose = panel.saved_pose;
+                            panel.temporary_pose = panel.saved_pose;
+                        }
+                    }
+                }
             }
         }
         for command in updates {
@@ -837,6 +859,7 @@ pub fn run(
                     panel_id,
                     dmabuf,
                     geometry,
+                    is_fullscreen,
                 } => {
                     let shared = timings
                         .measure("gpu/dmabuf-import", Duration::ZERO, || {
@@ -856,14 +879,40 @@ pub fn run(
                     })?;
                     timings.measure("gpu/panel-replace", Duration::ZERO, || {
                         if let Some(panel) = panel_frames.get_mut(&panel_id) {
+                            let fullscreen_changed = panel.is_fullscreen != is_fullscreen;
                             reconcile_panel_geometry(
                                 &mut panel.geometry,
                                 &mut panel.saved_pose,
                                 &mut panel.temporary_pose,
                                 geometry,
-                                panel.resize_pending,
+                                panel.resize_pending && panel.is_fullscreen == is_fullscreen,
                             );
                             panel.texture = texture;
+                            panel.is_fullscreen = is_fullscreen;
+                            if fullscreen_changed {
+                                panel.fullscreen_anchor_pose = None;
+                                if is_fullscreen {
+                                    active_fullscreen_panel = Some(panel_id);
+                                } else if active_fullscreen_panel == Some(panel_id) {
+                                    active_fullscreen_panel = panel_frames
+                                        .iter()
+                                        .rev()
+                                        .find(|(_, candidate)| candidate.is_fullscreen)
+                                        .map(|(id, _)| *id);
+                                    if active_fullscreen_panel.is_none() {
+                                        for panel in panel_frames.values_mut() {
+                                            panel.geometry.pose = panel.saved_pose;
+                                            panel.temporary_pose = panel.saved_pose;
+                                        }
+                                    }
+                                }
+                                if is_fullscreen {
+                                    grabbed_panel = None;
+                                    resizing_panel = None;
+                                    resize_geometry = None;
+                                    resize_requested_size = None;
+                                }
+                            }
                         } else {
                             panel_frames.insert(
                                 panel_id,
@@ -873,8 +922,13 @@ pub fn run(
                                     saved_pose: geometry.pose,
                                     temporary_pose: geometry.pose,
                                     resize_pending: false,
+                                    is_fullscreen,
+                                    fullscreen_anchor_pose: None,
                                 },
                             );
+                            if is_fullscreen {
+                                active_fullscreen_panel = Some(panel_id);
+                            }
                             pending_spawn.insert(panel_id);
                         }
                     });
@@ -941,7 +995,9 @@ pub fn run(
             let orientation =
                 glam::Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w);
             let look_direction = orientation * glam::Vec3::NEG_Z;
+            let mut fullscreen_look_direction = None;
             if view_state.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+                fullscreen_look_direction = Some(look_direction);
                 gaze_ray = Some(Ray3 {
                     origin: grab_player_position,
                     direction: look_direction,
@@ -970,6 +1026,17 @@ pub fn run(
                     );
                     save_dodge_targets(&mut panel_frames, &input)?;
                 }
+            }
+            if let (Some(panel_id), Some(look_direction)) =
+                (active_fullscreen_panel, fullscreen_look_direction)
+                && let Some(panel) = panel_frames.get_mut(&panel_id)
+                && panel.fullscreen_anchor_pose.is_none()
+            {
+                panel.fullscreen_anchor_pose = Some(PanelPose::looking_from_to(
+                    grab_player_position
+                        + look_direction.normalize_or_zero() * config.window.default_distance_m,
+                    grab_player_position,
+                ));
             }
         }
         // Update the action set and forward the right controller's aim ray.
@@ -1013,6 +1080,9 @@ pub fn run(
                 let nearest_proximity = cursor_ray.and_then(|ray| {
                     panel_frames
                         .iter()
+                        .filter(|(id, _)| {
+                            active_fullscreen_panel.is_none_or(|fullscreen| **id == fullscreen)
+                        })
                         .filter_map(|(id, panel)| {
                             let hit = panel.geometry.intersect_unbounded(ray)?;
                             let width = panel.geometry.logical_size.w as f32;
@@ -1059,6 +1129,10 @@ pub fn run(
                         grabbed_panel = cursor_ray.and_then(|ray| {
                             panel_frames
                                 .iter()
+                                .filter(|(id, _)| {
+                                    active_fullscreen_panel
+                                        .is_none_or(|fullscreen| **id == fullscreen)
+                                })
                                 .filter_map(|(id, panel)| {
                                     panel
                                         .geometry
@@ -1104,6 +1178,7 @@ pub fn run(
                     && trigger.current_state
                     && grabbed_panel.is_none()
                     && let Some(panel_id) = hovered_panel
+                    && active_fullscreen_panel.is_none_or(|fullscreen| fullscreen == panel_id)
                     && let Some(panel) = panel_frames.get(&panel_id)
                     && let Some(ray) = cursor_ray
                     && let Some(hit) = panel
@@ -1309,7 +1384,9 @@ pub fn run(
             let _ = input.try_send(XrInput::GazeRay { ray });
         }
         let active_panel = grabbed_panel.or(resizing_panel);
-        if let Some(panel_id) = active_panel {
+        if let Some(panel_id) = active_panel
+            && active_fullscreen_panel.is_none_or(|fullscreen| fullscreen == panel_id)
+        {
             update_dodge_targets(
                 &mut panel_frames,
                 &[panel_id],
@@ -1327,7 +1404,18 @@ pub fn run(
                 .exp()
         };
         for (panel_id, panel) in &mut panel_frames {
-            if Some(*panel_id) == active_panel {
+            if Some(*panel_id) == active_fullscreen_panel {
+                if let Some(anchor) = panel.fullscreen_anchor_pose {
+                    let distance = anchor.center.distance(grab_player_position);
+                    panel.geometry.pose = PanelGeometry::fit_pose_to_angular_bounds(
+                        anchor,
+                        panel.geometry.logical_size,
+                        distance,
+                        config.window.fullscreen_max_width_degrees,
+                        config.window.fullscreen_max_height_degrees,
+                    );
+                }
+            } else if Some(*panel_id) == active_panel {
                 panel.geometry.pose = panel.temporary_pose;
             } else {
                 panel.geometry.pose =
@@ -1362,14 +1450,20 @@ pub fn run(
                 cursor_pose(
                     ray,
                     grab_player_position,
-                    panel_frames.values().map(|panel| panel.geometry),
+                    panel_frames
+                        .iter()
+                        .filter(|(id, _)| {
+                            active_fullscreen_panel.is_none_or(|fullscreen| **id == fullscreen)
+                        })
+                        .map(|(_, panel)| panel.geometry),
                     &mut cursor_sphere_radius,
                 )
             }),
         };
         let panel_draws = panel_frames
-            .values()
-            .map(|panel| (&panel.texture, panel.geometry))
+            .iter()
+            .filter(|(id, _)| active_fullscreen_panel.is_none_or(|fullscreen| **id == fullscreen))
+            .map(|(_, panel)| (&panel.texture, panel.geometry))
             .collect::<Vec<_>>();
         let scene_frame = SceneFrame {
             skybox: Some(skybox),
@@ -1382,6 +1476,11 @@ pub fn run(
             }),
             grabbed_panel: grabbed_panel
                 .and_then(|id| panel_frames.get(&id).map(|panel| panel.geometry)),
+            environment_dim: if active_fullscreen_panel.is_some() {
+                config.window.fullscreen_environment_dim
+            } else {
+                0.0
+            },
             floor_y,
             texture_sample_phase: rendered_frame_index & 1,
         };

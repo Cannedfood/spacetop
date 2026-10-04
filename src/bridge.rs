@@ -139,6 +139,7 @@ pub enum PanelUpdate {
         panel_id: u64,
         dmabuf: Dmabuf,
         geometry: PanelGeometry,
+        is_fullscreen: bool,
     },
     Removed {
         panel_id: u64,

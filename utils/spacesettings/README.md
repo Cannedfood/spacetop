@@ -5,6 +5,9 @@ Space Settings provides a small desktop editor for Spacetop's
 as the compositor, and saves changes atomically so a running instance can
 hot-reload them.
 
+Fullscreen controls configure the maximum window width and height in degrees
+and how much the environment is dimmed while a window is fullscreen.
+
 Run from the workspace root:
 
 ```sh

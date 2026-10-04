@@ -286,6 +286,23 @@ impl PanelGeometry {
         ]
     }
 
+    pub fn fit_pose_to_angular_bounds(
+        pose: PanelPose,
+        logical_size: Size<i32, smithay::utils::Logical>,
+        distance: f32,
+        max_width_degrees: f32,
+        max_height_degrees: f32,
+    ) -> PanelPose {
+        let distance = distance.max(f32::EPSILON);
+        let aspect = logical_size.w.max(1) as f32 / logical_size.h.max(1) as f32;
+        let max_width = 2.0 * distance * (0.5 * max_width_degrees.to_radians()).tan();
+        let max_height = 2.0 * distance * (0.5 * max_height_degrees.to_radians()).tan();
+        PanelPose {
+            width_m: max_width.min(max_height * aspect),
+            ..pose
+        }
+    }
+
     pub fn resized_pose_from_edges(
         self,
         new_size: Size<i32, smithay::utils::Logical>,
