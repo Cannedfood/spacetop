@@ -287,11 +287,11 @@ fn downsample_skybox_mip(
     output
 }
 
-fn integrate_skybox_diffuse(width: u32, height: u32, pixels: &[Vec4]) -> [f32; 3] {
+fn integrate_skybox_diffuse(width: u32, height: u32, pixels: &[Vec4]) -> Vec3 {
     let width = width as usize;
     let longitude_step = 2.0 * std::f32::consts::PI / width as f32;
     let upper_half_end = height as f32 * 0.5;
-    let irradiance = (0..height.div_ceil(2) as usize)
+    let irradiance: Vec3 = (0..height.div_ceil(2) as usize)
         .into_par_iter()
         .map(|y| {
             let theta_start = std::f32::consts::PI * y as f32 / height as f32;
@@ -306,14 +306,14 @@ fn integrate_skybox_diffuse(width: u32, height: u32, pixels: &[Vec4]) -> [f32; 3
                 .sum();
             row_sum * weight
         })
-        .reduce(|| Vec3::ZERO, |total, row| total + row);
-    (irradiance / std::f32::consts::PI).to_array()
+        .sum();
+    irradiance / std::f32::consts::PI
 }
 
 pub(crate) struct SkyboxTexture {
     device: ash::Device,
     mips: Vec<SkyboxMip>,
-    diffuse_irradiance: [f32; 3],
+    diffuse_irradiance: Vec3,
     image: vk::Image,
     memory: vk::DeviceMemory,
     view: vk::ImageView,
@@ -487,7 +487,7 @@ impl SkyboxTexture {
         self.staging.is_some()
     }
 
-    pub fn diffuse_irradiance(&self) -> [f32; 3] {
+    pub fn diffuse_irradiance(&self) -> Vec3 {
         self.diffuse_irradiance
     }
 
@@ -863,7 +863,7 @@ pub(crate) struct SceneRenderer {
     environment_descriptor_capacity: u32,
     environment_panel_ids: Vec<u64>,
     environment_skybox_view: vk::ImageView,
-    skybox_diffuse_irradiance: [f32; 3],
+    skybox_diffuse_irradiance: Vec3,
     max_environment_windows: u32,
     sampler: vk::Sampler,
     sky_sampler: vk::Sampler,
@@ -917,7 +917,7 @@ struct WindowBufferHeader {
 }
 
 impl FloorUniform {
-    fn from_config(config: &AppConfig, skybox_diffuse_irradiance: [f32; 3]) -> Self {
+    fn from_config(config: &AppConfig, skybox_diffuse_irradiance: Vec3) -> Self {
         let exposure = 2.0_f32.powf(config.background.brightness_stops);
         Self {
             albedo: config.floor.albedo,
@@ -949,9 +949,9 @@ impl FloorUniform {
             ],
             grabbed_border_color: config.window.grabbed_border_color,
             diffuse_irradiance: [
-                skybox_diffuse_irradiance[0] * exposure,
-                skybox_diffuse_irradiance[1] * exposure,
-                skybox_diffuse_irradiance[2] * exposure,
+                skybox_diffuse_irradiance.x * exposure,
+                skybox_diffuse_irradiance.y * exposure,
+                skybox_diffuse_irradiance.z * exposure,
                 0.0,
             ],
         }
@@ -987,7 +987,7 @@ impl SceneRenderer {
             environment_descriptor_capacity: 0,
             environment_panel_ids: Vec::new(),
             environment_skybox_view: vk::ImageView::null(),
-            skybox_diffuse_irradiance: [1.0; 3],
+            skybox_diffuse_irradiance: Vec3::ONE,
             max_environment_windows: 0,
             sampler: vk::Sampler::null(),
             sky_sampler: vk::Sampler::null(),
@@ -1258,7 +1258,7 @@ impl SceneRenderer {
 
     pub fn update_skybox_diffuse(
         &mut self,
-        diffuse_irradiance: [f32; 3],
+        diffuse_irradiance: Vec3,
         config: &AppConfig,
     ) -> Result<()> {
         self.skybox_diffuse_irradiance = diffuse_irradiance;
