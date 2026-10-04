@@ -1,0 +1,69 @@
+# Maintainer: Spacetop contributors
+pkgname=spacetop
+pkgver=0.1.0.r1.g0000000
+pkgrel=1
+pkgdesc='VR Wayland compositor and spatial desktop applications'
+arch=('x86_64' 'aarch64')
+url='https://github.com/Cannedfood/spacetop'
+license=('unknown')
+depends=(
+  'gcc-libs'
+  'glibc'
+  'libdrm'
+  'libxkbcommon'
+  'mesa'
+  'openxr'
+  'systemd-libs'
+  'vulkan-icd-loader'
+  'wayland'
+)
+makedepends=(
+  'cargo'
+  'pkgconf'
+)
+optdepends=(
+  'xorg-xwayland: run X11 applications in Spacetop'
+  'monado: OpenXR runtime implementation'
+)
+source=("$pkgname::git+https://github.com/Cannedfood/spacetop.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/$pkgname"
+  printf '0.1.0.r%s.g%s' \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "$srcdir/$pkgname"
+  cargo fetch --locked
+}
+
+build() {
+  cd "$srcdir/$pkgname"
+  cargo build --release --locked --offline --workspace
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+
+  install -Dm755 target/release/spacetop \
+    "$pkgdir/usr/bin/spacetop"
+  install -Dm755 target/release/spacelauncher \
+    "$pkgdir/usr/bin/spacelauncher"
+  install -Dm755 target/release/spacesettings \
+    "$pkgdir/usr/bin/spacesettings"
+
+  install -Dm644 packaging/archlinux/applications/com.spacetop.SpaceTop.desktop \
+    "$pkgdir/usr/share/applications/com.spacetop.SpaceTop.desktop"
+  install -Dm644 utils/spacelauncher/data/applications/com.spacetop.SpaceLauncher.desktop \
+    "$pkgdir/usr/share/applications/com.spacetop.SpaceLauncher.desktop"
+  install -Dm644 utils/spacesettings/data/applications/com.spacetop.SpaceSettings.desktop \
+    "$pkgdir/usr/share/applications/com.spacetop.SpaceSettings.desktop"
+
+  install -Dm644 README.md \
+    "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 packaging/archlinux/README.md \
+    "$pkgdir/usr/share/doc/$pkgname/archlinux.md"
+}

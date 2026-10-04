@@ -102,19 +102,22 @@ fn expanded_bounds_preserve_root_placement_and_pixel_scale() {
 }
 
 #[test]
-fn capture_uses_native_size_hidpi_and_aspect_preserving_limits() {
+fn capture_uses_display_scale_and_aspect_preserving_limits() {
     let limits = PanelLimits {
         max_width: 1600,
         max_height: 1000,
         max_layers: 4,
     };
-    for (logical, buffer_scale, expected) in [
-        ((800, 400), 1, (800, 400)),
-        ((800, 400), 2, (1600, 800)),
-        ((3200, 1600), 1, (1600, 800)),
-        ((600, 3000), 2, (200, 1000)),
+    for (logical, buffer_scale, display_scale, expected) in [
+        ((800, 400), 1, 1.0, (800, 400)),
+        ((800, 400), 2, 1.0, (1600, 800)),
+        ((800, 400), 1, 0.5, (400, 200)),
+        ((800, 400), 1, 1.5, (1200, 600)),
+        ((800, 400), 2, 1.5, (1600, 800)),
+        ((3200, 1600), 1, 1.0, (1600, 800)),
+        ((600, 3000), 2, 1.0, (200, 1000)),
     ] {
-        let (size, _) = limits.capture_size(logical.into(), buffer_scale);
+        let (size, _) = limits.capture_size(logical.into(), buffer_scale, display_scale);
         assert_eq!((size.w, size.h), expected);
     }
 }

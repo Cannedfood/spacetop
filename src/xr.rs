@@ -557,19 +557,38 @@ pub fn run(
     let aim_action =
         action_set.create_action::<xr::Posef>("aim_pose", "Aim pose", &[right_hand])?;
     let trigger_action = action_set.create_action::<bool>("trigger", "Trigger", &[right_hand])?;
-    let secondary_action = action_set.create_action::<bool>(
-        "secondary",
-        "Secondary click",
-        &[right_hand, left_hand],
+    let secondary_action =
+        action_set.create_action::<bool>("secondary", "Secondary click", &[left_hand])?;
+    let launcher_action =
+        action_set.create_action::<bool>("launcher", "Launcher toggle", &[right_hand])?;
+    let face_click_action = action_set.create_action::<bool>(
+        "face_click",
+        "Face button click",
+        &[left_hand, right_hand],
     )?;
+    let stick_click_action =
+        action_set.create_action::<bool>("stick_click", "Thumbstick click", &[right_hand])?;
     let grip_action = action_set.create_action::<bool>("grip", "Grip", &[right_hand])?;
     let stick_action =
         action_set.create_action::<xr::Vector2f>("stick", "Thumbstick", &[right_hand])?;
     let aim_path = instance.string_to_path("/user/hand/right/input/aim/pose")?;
-    for (profile, button, right_secondary, left_secondary, grip, stick) in [
+    for (
+        profile,
+        button,
+        launcher,
+        left_face,
+        right_face,
+        left_secondary,
+        grip,
+        stick,
+        stick_click,
+    ) in [
         (
             "/interaction_profiles/khr/simple_controller",
             "select/click",
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -579,33 +598,45 @@ pub fn run(
             "/interaction_profiles/oculus/touch_controller",
             "trigger/value",
             Some("b/click"),
+            Some("x/click"),
+            Some("a/click"),
             Some("y/click"),
             Some("squeeze/value"),
             Some("thumbstick"),
+            Some("thumbstick/click"),
         ),
         (
             "/interaction_profiles/valve/index_controller",
             "trigger/click",
             Some("b/click"),
+            Some("a/click"),
+            Some("a/click"),
             Some("y/click"),
             Some("squeeze/value"),
             Some("thumbstick"),
+            Some("thumbstick/click"),
         ),
         (
             "/interaction_profiles/htc/vive_controller",
             "trigger/click",
             Some("trackpad/click"),
+            None,
+            None,
             Some("trackpad/click"),
             Some("squeeze/click"),
             Some("trackpad"),
+            None,
         ),
         (
             "/interaction_profiles/microsoft/motion_controller",
             "trigger/value",
             Some("trackpad/click"),
+            None,
+            None,
             Some("trackpad/click"),
             Some("squeeze/click"),
             Some("thumbstick"),
+            Some("thumbstick/click"),
         ),
     ] {
         let mut bindings = vec![
@@ -615,10 +646,22 @@ pub fn run(
                 instance.string_to_path(&format!("/user/hand/right/input/{button}"))?,
             ),
         ];
-        if let Some(secondary) = right_secondary {
+        if let Some(launcher) = launcher {
             bindings.push(xr::Binding::new(
-                &secondary_action,
-                instance.string_to_path(&format!("/user/hand/right/input/{secondary}"))?,
+                &launcher_action,
+                instance.string_to_path(&format!("/user/hand/right/input/{launcher}"))?,
+            ));
+        }
+        if let Some(left_face) = left_face {
+            bindings.push(xr::Binding::new(
+                &face_click_action,
+                instance.string_to_path(&format!("/user/hand/left/input/{left_face}"))?,
+            ));
+        }
+        if let Some(right_face) = right_face {
+            bindings.push(xr::Binding::new(
+                &face_click_action,
+                instance.string_to_path(&format!("/user/hand/right/input/{right_face}"))?,
             ));
         }
         if let Some(secondary) = left_secondary {
@@ -639,6 +682,12 @@ pub fn run(
                 instance.string_to_path(&format!("/user/hand/right/input/{stick}"))?,
             ));
         }
+        if let Some(stick_click) = stick_click {
+            bindings.push(xr::Binding::new(
+                &stick_click_action,
+                instance.string_to_path(&format!("/user/hand/right/input/{stick_click}"))?,
+            ));
+        }
         instance
             .suggest_interaction_profile_bindings(instance.string_to_path(profile)?, &bindings)?;
     }
@@ -653,8 +702,10 @@ pub fn run(
     let mut cursor_ray: Option<Ray3> = None;
     let mut cursor_sphere_radius = config.window.default_distance_m;
     let mut pointer_tracked = false;
-    let mut trigger_pressed = false;
-    let mut secondary_pressed = false;
+    let mut left_click_pressed = false;
+    let mut middle_click_pressed = false;
+    let mut stick_click_consumed = false;
+    let mut launcher_pressed = false;
     let mut maximize_right_chord_pressed = false;
     let mut grabbed_panel: Option<u64> = None;
     let mut grab_radius = config.window.default_distance_m;
@@ -743,7 +794,9 @@ pub fn run(
                                     || next_config.window.default_vertical_angle_degrees
                                         != config.window.default_vertical_angle_degrees
                                     || next_config.window.pixels_per_degree
-                                        != config.window.pixels_per_degree;
+                                        != config.window.pixels_per_degree
+                                    || next_config.window.display_scale
+                                        != config.window.display_scale;
                                 if window_config_changed
                                     && let Err(error) = input.send(XrInput::ConfigReloaded {
                                         default_window_distance: next_config
@@ -755,6 +808,7 @@ pub fn run(
                                         window_pixels_per_degree: next_config
                                             .window
                                             .pixels_per_degree,
+                                        window_display_scale: next_config.window.display_scale,
                                     })
                                 {
                                     eprintln!(
@@ -792,8 +846,10 @@ pub fn run(
                         xr::SessionState::STOPPING => {
                             input.send(XrInput::PointerLost { time_ms: 0 })?;
                             pointer_tracked = false;
-                            trigger_pressed = false;
-                            secondary_pressed = false;
+                            left_click_pressed = false;
+                            middle_click_pressed = false;
+                            stick_click_consumed = false;
+                            launcher_pressed = false;
                             maximize_right_chord_pressed = false;
                             running = false;
                             timings.measure(
@@ -1158,6 +1214,9 @@ pub fn run(
                 let trigger = timings.measure("openxr/action-state", Duration::ZERO, || {
                     trigger_action.state(&session, right_hand)
                 })?;
+                let launcher = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    launcher_action.state(&session, right_hand)
+                })?;
                 let grip = timings.measure("openxr/action-state", Duration::ZERO, || {
                     grip_action.state(&session, right_hand)
                 })?;
@@ -1323,8 +1382,8 @@ pub fn run(
                         });
                     }
                 }
-                let secondary = timings.measure("openxr/action-state", Duration::ZERO, || {
-                    secondary_action.state(&session, right_hand)
+                let left_face = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    face_click_action.state(&session, left_hand)
                 })?;
                 let left_secondary =
                     timings.measure("openxr/action-state", Duration::ZERO, || {
@@ -1333,8 +1392,8 @@ pub fn run(
                 let right_chord_down = grip.is_active
                     && grip.current_state
                     && grabbed_panel.is_some()
-                    && secondary.is_active
-                    && secondary.current_state;
+                    && launcher.is_active
+                    && launcher.current_state;
                 let right_chord_was_down = maximize_right_chord_pressed;
                 if right_chord_down && !right_chord_was_down {
                     input.send(XrInput::ToggleMaximize {
@@ -1351,26 +1410,45 @@ pub fn run(
                         panel_id: grabbed_panel.expect("maximize chord requires a grabbed panel"),
                     })?;
                 }
+                let right_face = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    face_click_action.state(&session, right_hand)
+                })?;
+                let stick_click = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    stick_click_action.state(&session, right_hand)
+                })?;
+                let stick_click_down = stick_click.is_active && stick_click.current_state;
+                if !stick_click_down {
+                    stick_click_consumed = false;
+                } else if grabbed_panel.is_some() {
+                    stick_click_consumed = true;
+                }
+                if stick_click.changed_since_last_sync
+                    && stick_click_down
+                    && let Some(panel_id) = grabbed_panel.take()
+                {
+                    input.send(XrInput::ClosePanel { panel_id })?;
+                    save_dodge_targets_except(&mut panel_frames, &input, Some(panel_id))?;
+                }
+                let left_click_down =
+                    (trigger.is_active && trigger.current_state && resizing_panel.is_none())
+                        || (left_face.is_active && left_face.current_state)
+                        || (right_face.is_active && right_face.current_state);
+                let middle_click_down =
+                    stick_click_down && grabbed_panel.is_none() && !stick_click_consumed;
+                if launcher.is_active
+                    && launcher.current_state
+                    && !launcher_pressed
+                    && !right_chord_down
+                    && !right_chord_was_down
+                {
+                    input.send(XrInput::LauncherToggle)?;
+                }
+                launcher_pressed = launcher.is_active && launcher.current_state;
                 for (button, down, previous) in [
-                    (
-                        0x110,
-                        trigger.is_active && trigger.current_state && resizing_panel.is_none(),
-                        &mut trigger_pressed,
-                    ),
-                    (
-                        0x111,
-                        secondary.is_active && secondary.current_state,
-                        &mut secondary_pressed,
-                    ),
+                    (0x110, left_click_down, &mut left_click_pressed),
+                    (0x112, middle_click_down, &mut middle_click_pressed),
                 ] {
                     if down != *previous {
-                        if button == 0x111 && (right_chord_down || right_chord_was_down) {
-                            *previous = down;
-                            continue;
-                        }
-                        if button == 0x111 && down {
-                            input.send(XrInput::LauncherToggle)?;
-                        }
                         input.send(XrInput::Ray {
                             ray: cursor_ray.expect("tracked ray assigned"),
                             gaze_ray,
@@ -1420,8 +1498,10 @@ pub fn run(
             resize_requested_size = None;
             if pointer_tracked {
                 input.send(XrInput::PointerLost { time_ms })?;
-                trigger_pressed = false;
-                secondary_pressed = false;
+                left_click_pressed = false;
+                middle_click_pressed = false;
+                stick_click_consumed = false;
+                launcher_pressed = false;
                 maximize_right_chord_pressed = false;
             }
         }

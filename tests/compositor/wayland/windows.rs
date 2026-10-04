@@ -243,6 +243,24 @@ fn resize_panel_uses_wayland_window_geometry_size() {
     }
 }
 
+#[test]
+fn close_panel_sends_a_close_request_to_the_wayland_window() {
+    let mut app = super::fixture::WaylandApp::new(None);
+    let panel_id = app.compositor.panels[0].id;
+
+    app.compositor
+        .handle_xr_input(crate::XrInput::ClosePanel { panel_id });
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+
+    assert_eq!(app.client.toplevel_closes, 1);
+}
+
 pub(super) fn exercise(app: &mut WaylandApp) {
     let WaylandApp {
         display,

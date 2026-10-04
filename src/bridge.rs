@@ -45,6 +45,9 @@ pub enum XrInput {
     ToggleMaximize {
         panel_id: u64,
     },
+    ClosePanel {
+        panel_id: u64,
+    },
     ResizePanel {
         panel_id: u64,
         width: i32,
@@ -59,6 +62,7 @@ pub enum XrInput {
         default_window_distance: f32,
         default_vertical_angle_degrees: f32,
         window_pixels_per_degree: f32,
+        window_display_scale: f32,
     },
     FatalError {
         message: String,
