@@ -255,7 +255,7 @@ fn cursor_pose(
     }
     Some(PanelPose {
         width_m: 0.021,
-        ..PanelPose::facing_player(ray.origin + direction * distance, player)
+        ..PanelPose::looking_from_to(ray.origin + direction * distance, player)
     })
 }
 
@@ -717,6 +717,8 @@ pub fn run(
                                 }
                                 let window_config_changed = next_config.window.default_distance_m
                                     != config.window.default_distance_m
+                                    || next_config.window.default_vertical_angle_degrees
+                                        != config.window.default_vertical_angle_degrees
                                     || next_config.window.pixels_per_degree
                                         != config.window.pixels_per_degree;
                                 if window_config_changed
@@ -724,6 +726,9 @@ pub fn run(
                                         default_window_distance: next_config
                                             .window
                                             .default_distance_m,
+                                        default_vertical_angle_degrees: next_config
+                                            .window
+                                            .default_vertical_angle_degrees,
                                         window_pixels_per_degree: next_config
                                             .window
                                             .pixels_per_degree,
@@ -917,8 +922,13 @@ pub fn run(
             }
             for panel_id in std::mem::take(&mut pending_spawn) {
                 if let Some(panel) = panel_frames.get_mut(&panel_id) {
-                    let mut pose = PanelPose::facing_player(
-                        grab_player_position + look_direction * config.window.default_distance_m,
+                    let mut pose = PanelPose::on_sphere_from_aim(
+                        look_direction,
+                        glam::Vec2::new(
+                            0.0,
+                            config.window.default_vertical_angle_degrees.to_radians(),
+                        ),
+                        config.window.default_distance_m,
                         grab_player_position,
                     );
                     pose.width_m = panel.saved_pose.width_m;

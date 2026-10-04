@@ -34,17 +34,19 @@ fn readiness_callback_errors_are_returned() {
 }
 
 #[test]
-fn config_reload_updates_default_window_distance() {
+fn config_reload_updates_default_window_settings() {
     let display = Display::<Compositor>::new().unwrap();
     let (sender, _receiver) = bridge::panel_channel();
     let mut compositor = Compositor::new(display.handle(), sender);
 
     compositor.handle_xr_input(crate::XrInput::ConfigReloaded {
         default_window_distance: 2.4,
+        default_vertical_angle_degrees: 12.0,
         window_pixels_per_degree: 25.0,
     });
 
     assert_eq!(compositor.default_window_distance, 2.4);
+    assert_eq!(compositor.default_vertical_angle_degrees, 12.0);
     assert!(compositor.fatal_error.is_none());
 }
 

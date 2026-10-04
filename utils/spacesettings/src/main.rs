@@ -55,6 +55,7 @@ enum Message {
     RayCountChanged(u32),
     TransparentReflectionsChanged(bool),
     WindowDistanceChanged(String),
+    WindowVerticalAngleChanged(String),
     WindowPixelsPerDegreeChanged(String),
     WindowTextureAaChanged(WindowTextureAa),
     WindowPaddingChanged(f32),
@@ -87,6 +88,7 @@ enum ResetTarget {
     FloorReflectionGrainSize,
     FloorSection,
     WindowDistance,
+    WindowVerticalAngle,
     WindowPixelsPerDegree,
     WindowAnimationHalfTime,
     WindowCollisionMargin,
@@ -117,6 +119,7 @@ struct SettingsApp {
     show_grabbed_border_picker: bool,
     floor_height: String,
     window_distance: String,
+    window_vertical_angle: String,
     window_pixels_per_degree: String,
     status: String,
     status_is_error: bool,
@@ -138,6 +141,7 @@ impl SettingsApp {
         let backgrounds = background_files();
         let floor_height = format!("{}", config.floor.height_m);
         let window_distance = format!("{}", config.window.default_distance_m);
+        let window_vertical_angle = format!("{}", config.window.default_vertical_angle_degrees);
         let window_pixels_per_degree = format!("{}", config.window.pixels_per_degree);
         let mut app = Self {
             config,
@@ -151,6 +155,7 @@ impl SettingsApp {
             show_grabbed_border_picker: false,
             floor_height,
             window_distance,
+            window_vertical_angle,
             window_pixels_per_degree,
             status,
             status_is_error,
@@ -177,6 +182,7 @@ impl SettingsApp {
                 | Message::RayCountChanged(_)
                 | Message::TransparentReflectionsChanged(_)
                 | Message::WindowDistanceChanged(_)
+                | Message::WindowVerticalAngleChanged(_)
                 | Message::WindowPixelsPerDegreeChanged(_)
                 | Message::WindowTextureAaChanged(_)
                 | Message::WindowPaddingChanged(_)
@@ -270,6 +276,7 @@ impl SettingsApp {
                 self.config.floor.trace_through_transparent_windows = value;
             }
             Message::WindowDistanceChanged(value) => self.window_distance = value,
+            Message::WindowVerticalAngleChanged(value) => self.window_vertical_angle = value,
             Message::WindowPixelsPerDegreeChanged(value) => self.window_pixels_per_degree = value,
             Message::WindowTextureAaChanged(value) => self.config.window.texture_aa = value,
             Message::WindowPaddingChanged(value) => self.config.window.padding_px = value,
@@ -365,6 +372,12 @@ impl SettingsApp {
                 self.config.window.default_distance_m = defaults.window.default_distance_m;
                 self.window_distance = defaults.window.default_distance_m.to_string();
             }
+            ResetTarget::WindowVerticalAngle => {
+                self.config.window.default_vertical_angle_degrees =
+                    defaults.window.default_vertical_angle_degrees;
+                self.window_vertical_angle =
+                    defaults.window.default_vertical_angle_degrees.to_string();
+            }
             ResetTarget::WindowPixelsPerDegree => {
                 self.config.window.pixels_per_degree = defaults.window.pixels_per_degree;
                 self.window_pixels_per_degree = defaults.window.pixels_per_degree.to_string();
@@ -412,9 +425,13 @@ impl SettingsApp {
             }
             ResetTarget::WindowPlacementSection => {
                 self.config.window.default_distance_m = defaults.window.default_distance_m;
+                self.config.window.default_vertical_angle_degrees =
+                    defaults.window.default_vertical_angle_degrees;
                 self.config.window.animation_half_time_s = defaults.window.animation_half_time_s;
                 self.config.window.collision_margin_m = defaults.window.collision_margin_m;
                 self.window_distance = defaults.window.default_distance_m.to_string();
+                self.window_vertical_angle =
+                    defaults.window.default_vertical_angle_degrees.to_string();
             }
             ResetTarget::WindowResolutionSection => {
                 self.config.window.pixels_per_degree = defaults.window.pixels_per_degree;
@@ -548,6 +565,8 @@ impl SettingsApp {
         config.floor.height_m = parse_number("Fallback floor height", &self.floor_height)?;
         config.window.default_distance_m =
             parse_number("Default window distance", &self.window_distance)?;
+        config.window.default_vertical_angle_degrees =
+            parse_number("Default window vertical angle", &self.window_vertical_angle)?;
         config.window.pixels_per_degree =
             parse_number("Window pixels per degree", &self.window_pixels_per_degree)?;
         config
@@ -920,6 +939,17 @@ impl SettingsApp {
                     number_is_default(&self.window_distance, defaults.window.default_distance_m),
                     ResetTarget::WindowDistance,
                 ),
+                labeled_input(
+                    "DEFAULT VERTICAL ANGLE (DEG)",
+                    &self.window_vertical_angle,
+                    "0",
+                    Message::WindowVerticalAngleChanged,
+                    number_is_default(
+                        &self.window_vertical_angle,
+                        defaults.window.default_vertical_angle_degrees,
+                    ),
+                    ResetTarget::WindowVerticalAngle,
+                ),
                 slider_row(
                     "DODGE HALF-TIME (S)",
                     self.config.window.animation_half_time_s,
@@ -944,6 +974,10 @@ impl SettingsApp {
             ]
             .spacing(10),
             number_is_default(&self.window_distance, defaults.window.default_distance_m)
+                && number_is_default(
+                    &self.window_vertical_angle,
+                    defaults.window.default_vertical_angle_degrees,
+                )
                 && self.config.window.animation_half_time_s
                     == defaults.window.animation_half_time_s
                 && self.config.window.collision_margin_m == defaults.window.collision_margin_m,
@@ -1488,6 +1522,7 @@ mod tests {
         config.floor.height_m = -2.0;
         config.floor.roughness = 0.8;
         config.window.default_distance_m = 2.0;
+        config.window.default_vertical_angle_degrees = 10.0;
         config.window.pixels_per_degree = 40.0;
         config.window.border_width_px = 5.0;
 
@@ -1504,6 +1539,10 @@ mod tests {
         assert_eq!(
             app.window_distance,
             defaults.window.default_distance_m.to_string()
+        );
+        assert_eq!(
+            app.window_vertical_angle,
+            defaults.window.default_vertical_angle_degrees.to_string()
         );
         assert_eq!(
             app.window_pixels_per_degree,

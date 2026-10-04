@@ -54,6 +54,7 @@ pub enum XrInput {
     },
     ConfigReloaded {
         default_window_distance: f32,
+        default_vertical_angle_degrees: f32,
         window_pixels_per_degree: f32,
     },
     FatalError {

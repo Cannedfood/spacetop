@@ -99,6 +99,8 @@ mod tests {
         .unwrap();
 
         let config = AppConfig::load_from(&path).unwrap();
+        let custom_angle: AppConfig =
+            toml::from_str("[window]\ndefault_vertical_angle_degrees = 12.0\n").unwrap();
 
         assert_eq!(config.background.image, "~/sky.exr");
         assert_eq!(config.background.brightness_stops, 1.5);
@@ -110,6 +112,7 @@ mod tests {
         assert_eq!(config.floor.ray_count, 12);
         assert_eq!(config.floor.reflection_grain_size_m, 0.01);
         assert_eq!(config.window.default_distance_m, 2.1);
+        assert_eq!(custom_angle.window.default_vertical_angle_degrees, 12.0);
         assert_eq!(config.window.pixels_per_degree, 40.0);
         assert!(!toml::to_string(&config).unwrap().contains("[cursor]"));
     }

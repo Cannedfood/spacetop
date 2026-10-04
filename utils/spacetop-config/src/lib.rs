@@ -74,6 +74,7 @@ impl Default for FloorConfigFields {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct WindowConfig {
     pub default_distance_m: f32,
+    pub default_vertical_angle_degrees: f32,
     pub pixels_per_degree: f32,
     pub texture_aa: WindowTextureAa,
     pub padding_px: f32,
@@ -167,6 +168,7 @@ impl std::fmt::Display for WindowTextureAa {
 #[serde(default)]
 struct WindowConfigFields {
     default_distance_m: f32,
+    default_vertical_angle_degrees: f32,
     pixels_per_degree: f32,
     texture_aa: Option<WindowTextureAa>,
     texture_samples: Option<u32>,
@@ -190,6 +192,7 @@ impl Default for WindowConfigFields {
         let window = WindowConfig::default();
         Self {
             default_distance_m: window.default_distance_m,
+            default_vertical_angle_degrees: window.default_vertical_angle_degrees,
             pixels_per_degree: window.pixels_per_degree,
             texture_aa: None,
             texture_samples: None,
@@ -239,6 +242,7 @@ impl<'de> Deserialize<'de> for WindowConfig {
 
         Ok(Self {
             default_distance_m: fields.default_distance_m,
+            default_vertical_angle_degrees: fields.default_vertical_angle_degrees,
             pixels_per_degree: fields.pixels_per_degree,
             texture_aa,
             padding_px: fields.padding_px,
@@ -354,9 +358,10 @@ impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             default_distance_m: 1.6,
-            pixels_per_degree: 25.0,
+            default_vertical_angle_degrees: -10.0,
+            pixels_per_degree: 30.0,
             texture_aa: WindowTextureAa::default(),
-            padding_px: 0.0,
+            padding_px: 42.0,
             margin_px: 4.0,
             animation_half_time_s: 0.2,
             collision_margin_m: 0.04,
@@ -462,6 +467,11 @@ impl AppConfig {
             self.window.default_distance_m.is_finite()
                 && (0.1..=100.0).contains(&self.window.default_distance_m),
             "window.default_distance_m must be between 0.1 and 100 meters"
+        );
+        ensure!(
+            self.window.default_vertical_angle_degrees.is_finite()
+                && (-90.0..=90.0).contains(&self.window.default_vertical_angle_degrees),
+            "window.default_vertical_angle_degrees must be between -90 and 90 degrees"
         );
         ensure!(
             self.window.pixels_per_degree.is_finite()
@@ -580,6 +590,7 @@ mod tests {
         assert_eq!(config.floor.reflection_grain_size_m, 0.001);
         assert!(config.floor.trace_through_transparent_windows);
         assert_eq!(config.window.default_distance_m, 1.6);
+        assert_eq!(config.window.default_vertical_angle_degrees, 0.0);
         assert_eq!(config.window.pixels_per_degree, 32.0);
         assert_eq!(config.window.texture_aa, WindowTextureAa::SS2x2);
         assert_eq!(config.window.padding_px, 0.0);
@@ -703,6 +714,28 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.window.pixels_per_degree = f32::NAN;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_window_default_vertical_angle() {
+        let mut config = AppConfig::default();
+        config.window.default_vertical_angle_degrees = -90.0;
+        assert!(config.validate().is_ok());
+
+        config.window.default_vertical_angle_degrees = 30.0;
+        assert!(config.validate().is_ok());
+
+        config.window.default_vertical_angle_degrees = 90.0;
+        assert!(config.validate().is_ok());
+
+        config.window.default_vertical_angle_degrees = -90.1;
+        assert!(config.validate().is_err());
+
+        config.window.default_vertical_angle_degrees = 90.1;
+        assert!(config.validate().is_err());
+
+        config.window.default_vertical_angle_degrees = f32::NAN;
         assert!(config.validate().is_err());
     }
 

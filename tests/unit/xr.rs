@@ -7,7 +7,7 @@ fn resize_release_reliably_sends_the_final_size_when_motion_queue_is_full() {
         input.try_send(XrInput::PointerLost { time_ms }).unwrap();
     }
     let geometry = PanelGeometry {
-        pose: PanelPose::facing_origin(glam::Vec3::new(0.0, 0.0, -1.6)),
+        pose: PanelPose::looking_from_to(glam::Vec3::new(0.0, 0.0, -1.6), glam::Vec3::ZERO),
         logical_size: (100, 50).into(),
     };
     let edges = [false, true, false, true];
@@ -47,7 +47,7 @@ fn resize_release_reliably_sends_the_final_size_when_motion_queue_is_full() {
 #[test]
 fn resize_snapshot_uses_committed_pose_without_animation() {
     let mut current = PanelGeometry {
-        pose: PanelPose::facing_origin(glam::Vec3::new(0.0, 0.0, -1.6)),
+        pose: PanelPose::looking_from_to(glam::Vec3::new(0.0, 0.0, -1.6), glam::Vec3::ZERO),
         logical_size: (100, 50).into(),
     };
     let mut saved = current.pose;
@@ -93,7 +93,7 @@ fn cursor_uses_nearest_window_hit_and_orientation() {
         logical_size: (1000, 800).into(),
     };
     let far = PanelGeometry {
-        pose: PanelPose::facing_origin(glam::Vec3::new(0.0, 0.0, -2.5)),
+        pose: PanelPose::looking_from_to(glam::Vec3::new(0.0, 0.0, -2.5), glam::Vec3::ZERO),
         ..near
     };
     let mut sphere_radius = 1.6;

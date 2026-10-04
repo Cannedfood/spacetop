@@ -62,26 +62,31 @@ pub struct PanelPose {
 impl PanelPose {
     #[cfg(test)]
     pub fn for_slot(slot: usize) -> Self {
+        let window = crate::config::AppConfig::default().window;
         Self::for_slot_at_distance(
             slot,
-            crate::config::AppConfig::default()
-                .window
-                .default_distance_m,
+            window.default_distance_m,
+            window.default_vertical_angle_degrees,
         )
     }
 
-    pub fn for_slot_at_distance(slot: usize, distance: f32) -> Self {
+    pub fn for_slot_at_distance(slot: usize, distance: f32, vertical_angle_degrees: f32) -> Self {
         let column = slot.div_ceil(2) as f32 * if slot.is_multiple_of(2) { -1.0 } else { 1.0 };
-        Self::facing_origin(Vec3::new(column * 1.1, 0.0, -distance))
-    }
-
-    /// Place a panel at `center` and orient its front toward the local-space origin.
-    pub fn facing_origin(center: Vec3) -> Self {
-        Self::facing_player(center, Vec3::ZERO)
+        let base_x = column * 1.1;
+        let base_distance = base_x.hypot(distance);
+        let (sin_angle, cos_angle) = vertical_angle_degrees.to_radians().sin_cos();
+        Self::looking_from_to(
+            Vec3::new(
+                base_x * cos_angle,
+                base_distance * sin_angle,
+                -distance * cos_angle,
+            ),
+            Vec3::ZERO,
+        )
     }
 
     /// Place a panel center relative to a player position, facing back toward that player.
-    pub fn facing_player(center: Vec3, player: Vec3) -> Self {
+    pub fn looking_from_to(center: Vec3, player: Vec3) -> Self {
         let toward_player = player - center;
         let radius = toward_player.length().max(f32::EPSILON);
         let yaw = toward_player.x.atan2(toward_player.z);
@@ -106,7 +111,7 @@ impl PanelPose {
         let pitch = (aim.y + angular_offset.y)
             .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
         let direction = Self::direction_from_angles(yaw, pitch);
-        Self::facing_player(player + direction * radius, player)
+        Self::looking_from_to(player + direction * radius, player)
     }
 
     /// Yaw and pitch in the local reference space, with yaw measured from -Z.
@@ -238,7 +243,7 @@ pub fn dodge_windows(
             .copied()
             .unwrap_or(original.center.x);
         let angles = Vec2::new(reference_yaw + target, original.center.y);
-        let target_pose = PanelPose::facing_player(
+        let target_pose = PanelPose::looking_from_to(
             player + PanelPose::direction_from_angles(angles.x, angles.y) * distance,
             player,
         );

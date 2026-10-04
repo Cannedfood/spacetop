@@ -48,6 +48,7 @@ pub fn run(
         display_handle.clone(),
         frame_sender,
         config.window.default_distance_m,
+        config.window.default_vertical_angle_degrees,
         config.window.pixels_per_degree,
     );
     input::start(&event_loop.handle())?;

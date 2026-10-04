@@ -122,12 +122,42 @@ fn capture_uses_native_size_hidpi_and_aspect_preserving_limits() {
 #[test]
 fn placement_slots_are_unique_and_nonoverlapping() {
     assert_eq!(PanelPose::for_slot(0).center, Vec3::new(0.0, 0.0, -1.6));
+    for angle in [-90.0, -45.0, 0.0, 45.0, 90.0] {
+        for slot in 0..4 {
+            let pose = PanelPose::for_slot_at_distance(slot, 2.0, angle);
+            let actual_angle = PanelPose::spherical_angles(pose.center).y.to_degrees();
+            assert!((actual_angle - angle).abs() < 1.0e-4);
+            assert!(pose.center.is_finite());
+        }
+    }
     for first in 0..32 {
         for second in first + 1..32 {
             let first_pose = PanelPose::for_slot(first);
             let second_pose = PanelPose::for_slot(second);
             assert!((first_pose.center.x - second_pose.center.x).abs() > first_pose.width_m);
         }
+    }
+}
+
+#[test]
+fn new_window_vertical_angle_offsets_the_aim_direction() {
+    let aim_pitch = 10.0_f32.to_radians();
+    let aim = Vec3::new(0.0, aim_pitch.sin(), -aim_pitch.cos());
+    for (offset, expected) in [
+        (-90.0_f32, -80.0),
+        (-45.0, -35.0),
+        (0.0, 10.0),
+        (45.0, 55.0),
+        (90.0, 90.0),
+    ] {
+        let pose = PanelPose::on_sphere_from_aim(
+            aim,
+            Vec2::new(0.0, offset.to_radians()),
+            2.0,
+            Vec3::ZERO,
+        );
+        let actual = PanelPose::spherical_angles(pose.center).y.to_degrees();
+        assert!((actual - expected).abs() < 1.0e-4);
     }
 }
 
@@ -180,7 +210,7 @@ fn dodge_windows_separates_multiple_panels_with_margin() {
 fn grabbed_panel_stays_on_player_sphere_and_faces_player() {
     let player = Vec3::new(0.0, 1.6, 0.0);
     let center = Vec3::new(0.2, 0.4, -2.0);
-    let pose = PanelPose::facing_player(center, player);
+    let pose = PanelPose::looking_from_to(center, player);
     assert!((pose.center.distance(player) - center.distance(player)).abs() < 1.0e-5);
     let normal = pose.orientation() * Vec3::Z;
     assert!(normal.dot((player - pose.center).normalize()) > 0.99999);
@@ -191,7 +221,7 @@ fn grabbed_panel_stays_on_player_sphere_and_faces_player() {
 
 #[test]
 fn center_stays_put_when_grab_starts_and_tracks_aim_on_sphere() {
-    let initial = PanelPose::facing_origin(Vec3::new(0.7, 0.3, -1.8));
+    let initial = PanelPose::looking_from_to(Vec3::new(0.7, 0.3, -1.8), Vec3::ZERO);
     let aim_direction = Vec3::new(0.2, 0.1, -1.0).normalize();
     let aim_angles = PanelPose::spherical_angles(aim_direction);
     let center_angles = PanelPose::spherical_angles(initial.center);

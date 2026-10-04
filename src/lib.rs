@@ -120,6 +120,7 @@ struct Compositor {
     frame_sender: bridge::PanelSender,
     panel_limits: panel::PanelLimits,
     default_window_distance: f32,
+    default_vertical_angle_degrees: f32,
     window_pixels_per_degree: f32,
     active_panel: Option<u64>,
     fatal_error: Option<anyhow::Error>,
@@ -299,9 +300,11 @@ impl Compositor {
             }
             XrInput::ConfigReloaded {
                 default_window_distance,
+                default_vertical_angle_degrees,
                 window_pixels_per_degree,
             } => {
                 if self.default_window_distance != default_window_distance
+                    || self.default_vertical_angle_degrees != default_vertical_angle_degrees
                     || self.window_pixels_per_degree != window_pixels_per_degree
                 {
                     for panel in &mut self.panels {
@@ -309,6 +312,7 @@ impl Compositor {
                     }
                 }
                 self.default_window_distance = default_window_distance;
+                self.default_vertical_angle_degrees = default_vertical_angle_degrees;
                 self.window_pixels_per_degree = window_pixels_per_degree;
                 self.refresh_panels();
                 Ok(())
@@ -333,6 +337,7 @@ impl Compositor {
             display_handle,
             frame_sender,
             defaults.window.default_distance_m,
+            defaults.window.default_vertical_angle_degrees,
             defaults.window.pixels_per_degree,
         )
     }
@@ -341,6 +346,7 @@ impl Compositor {
         display_handle: DisplayHandle,
         frame_sender: bridge::PanelSender,
         default_window_distance: f32,
+        default_vertical_angle_degrees: f32,
         window_pixels_per_degree: f32,
     ) -> Self {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
@@ -393,6 +399,7 @@ impl Compositor {
             frame_sender,
             panel_limits: panel::PanelLimits::default(),
             default_window_distance,
+            default_vertical_angle_degrees,
             window_pixels_per_degree,
             active_panel: None,
             fatal_error: None,
@@ -840,7 +847,7 @@ impl Compositor {
         }
         Some(PanelPose {
             width_m: 0.021,
-            ..PanelPose::facing_player(
+            ..PanelPose::looking_from_to(
                 ray.origin + ray.direction * self.default_window_distance,
                 ray.origin,
             )
@@ -1054,7 +1061,13 @@ impl XdgShellHandler for Compositor {
         self.output.enter(surface.wl_surface());
         let panel_id = self.next_panel_id;
         let pose = (0..=self.panels.len())
-            .map(|slot| PanelPose::for_slot_at_distance(slot, self.default_window_distance))
+            .map(|slot| {
+                PanelPose::for_slot_at_distance(
+                    slot,
+                    self.default_window_distance,
+                    self.default_vertical_angle_degrees,
+                )
+            })
             .find(|pose| self.panels.iter().all(|panel| panel.pose != *pose))
             .expect("an unused panel placement exists");
         self.panels.push(ToplevelPanel {
