@@ -78,6 +78,9 @@ feathering_m = 0.0
 [window]
 default_distance_m = 1.6
 reflection_atlas_size = 256
+fullscreen_max_width_degrees = 100.0
+fullscreen_max_height_degrees = 75.0
+fullscreen_environment_dim = 0.5
 
 [cursor]
 default_distance_m = 1.6
@@ -124,6 +127,14 @@ cargo run -p spacesettings
 
 Saving replaces the file atomically; a running Spacetop instance picks up the
 new settings automatically.
+
+Wayland and X11 windows can request fullscreen. The fullscreen window is placed
+in front of the user in LOCAL space, fitted within the configured maximum
+angular width and height, while the other windows are hidden and the
+environment is dimmed. The fullscreen width and height settings accept
+`1`–`170` degrees; environment dimming accepts `0` (off) to `1` (fully dimmed).
+Space Settings exposes these controls in its Fullscreen section. When the
+window leaves fullscreen, the previous window layout is restored.
 
 ## Keyboard And Pointer Input
 

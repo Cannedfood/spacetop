@@ -18,6 +18,9 @@ struct SkyVertex {
 fn skybox_exposure() -> f32 {
     return exp2(floor_material.controls.y);
 }
+fn dim_environment(color: vec3<f32>) -> vec3<f32> {
+    return color * (1.0 - floor_material.ground_radius.z);
+}
 fn skybox_uv(direction: vec3<f32>) -> vec2<f32> {
     let longitude = atan2(direction.z, direction.x) + floor_material.sampling.y;
     return vec2(
@@ -243,11 +246,11 @@ fn window_blocked_diffuse_irradiance(origin: vec3<f32>) -> vec3<f32> {
     let eye = transform.eye_position.xyz;
     let incident = normalize(input.direction);
     if incident.y >= 0.0 {
-        return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+        return vec4(dim_environment(sample_environment_skybox(incident, 0.0)), 1.0);
     }
     let floor_distance = (transform.emitter_up.w - eye.y) / incident.y;
     if floor_distance <= 0.0 {
-        return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+        return vec4(dim_environment(sample_environment_skybox(incident, 0.0)), 1.0);
     }
     let world = eye + incident * floor_distance;
     let ground_distance_from_origin = length(world.xz);
@@ -256,7 +259,7 @@ fn window_blocked_diffuse_irradiance(origin: vec3<f32>) -> vec3<f32> {
         atan2(ground_distance_from_origin, height_from_origin) * (180.0 / PI);
     let radius_degrees = floor_material.ground_radius.x;
     if ground_angle_degrees >= radius_degrees {
-        return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+        return vec4(dim_environment(sample_environment_skybox(incident, 0.0)), 1.0);
     }
     var ground_coverage = 1.0;
     if radius_degrees < 90.0 && floor_material.ground_radius.y > 0.0 {
@@ -264,7 +267,7 @@ fn window_blocked_diffuse_irradiance(origin: vec3<f32>) -> vec3<f32> {
         let floor_radius_m = height_from_origin * sin(radius_radians)
             / max(cos(radius_radians), 0.000001);
         if ground_distance_from_origin >= floor_radius_m {
-            return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+            return vec4(dim_environment(sample_environment_skybox(incident, 0.0)), 1.0);
         }
         let feather_start_m = max(0.0, floor_radius_m - floor_material.ground_radius.y);
         ground_coverage = 1.0 - smoothstep(
@@ -319,5 +322,5 @@ fn window_blocked_diffuse_irradiance(origin: vec3<f32>) -> vec3<f32> {
     }
     let sky = sample_environment_skybox(incident, 0.0);
     let floor = ground + sum * opacity / f32(ray_count);
-    return vec4(mix(sky, floor, ground_coverage), 1.0);
+    return vec4(dim_environment(mix(sky, floor, ground_coverage)), 1.0);
 }

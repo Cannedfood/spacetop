@@ -1031,6 +1031,7 @@ pub(crate) struct SceneRenderer {
     environment_descriptor_capacity: u32,
     environment_skybox_view: vk::ImageView,
     skybox_diffuse_irradiance: Vec3,
+    environment_dim: f32,
     max_environment_windows: u32,
     atlas: Option<ReflectionAtlas>,
     atlas_rects: Vec<vk::Rect2D>,
@@ -1055,6 +1056,7 @@ pub(crate) struct SceneFrame<'a> {
     pub cursor: Option<PanelPose>,
     pub cursor_close_panel: Option<(PanelGeometry, Vec2)>,
     pub grabbed_panel: Option<PanelGeometry>,
+    pub environment_dim: f32,
     pub floor_y: f32,
     pub texture_sample_phase: u32,
 }
@@ -1167,6 +1169,7 @@ impl SceneRenderer {
             environment_descriptor_capacity: 0,
             environment_skybox_view: vk::ImageView::null(),
             skybox_diffuse_irradiance: Vec3::ONE,
+            environment_dim: 0.0,
             max_environment_windows: 0,
             atlas: None,
             atlas_rects: Vec::new(),
@@ -1470,6 +1473,7 @@ impl SceneRenderer {
         self.ambient_occlusion = config.floor.ambient_occlusion;
         self.window_padding_px = config.window.effective_padding_px();
         self.max_border_width_px = config.window.max_border_width_px();
+        self.environment_dim = 0.0;
         let uniform = FloorUniform::from_config(config, self.skybox_diffuse_irradiance);
         unsafe {
             let mapped = self.device.map_memory(
@@ -1499,6 +1503,25 @@ impl SceneRenderer {
 
     pub fn prepare_frame(&mut self, frame: &SceneFrame<'_>) -> Result<()> {
         let skybox = frame.skybox.context("environment pass requires a skybox")?;
+        if self.environment_dim != frame.environment_dim {
+            let byte_offset =
+                std::mem::offset_of!(FloorUniform, ground_radius) + 2 * std::mem::size_of::<f32>();
+            unsafe {
+                let mapped = self.device.map_memory(
+                    self.floor_memory,
+                    0,
+                    std::mem::size_of::<FloorUniform>() as u64,
+                    vk::MemoryMapFlags::empty(),
+                )?;
+                std::ptr::copy_nonoverlapping(
+                    (&frame.environment_dim as *const f32).cast::<u8>(),
+                    (mapped.cast::<u8>()).add(byte_offset),
+                    std::mem::size_of::<f32>(),
+                );
+                self.device.unmap_memory(self.floor_memory);
+            }
+            self.environment_dim = frame.environment_dim;
+        }
         let window_count =
             u32::try_from(frame.panels.len()).context("too many windows for Vulkan reflections")?;
         ensure!(

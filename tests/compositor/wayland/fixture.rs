@@ -5,7 +5,7 @@ use wayland_client::{
     Connection, EventQueue, QueueHandle,
     protocol::{wl_shm, wl_surface},
 };
-use wayland_protocols::xdg::shell::client::xdg_surface;
+use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel};
 
 pub(super) struct WaylandApp {
     pub(super) display: Display<Compositor>,
@@ -17,6 +17,7 @@ pub(super) struct WaylandApp {
     pub(super) client: TestClient,
     pub(super) surface: wl_surface::WlSurface,
     pub(super) xdg_surface: xdg_surface::XdgSurface,
+    pub(super) toplevel: xdg_toplevel::XdgToplevel,
     pub(super) vulkan: Option<crate::gpu::test_support::Vulkan>,
 }
 
@@ -48,7 +49,7 @@ impl WaylandApp {
             .as_ref()
             .unwrap()
             .get_xdg_surface(&surface, &qh, ());
-        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
         surface.commit();
         pump(
             &mut display,
@@ -96,6 +97,7 @@ impl WaylandApp {
             client,
             surface,
             xdg_surface,
+            toplevel,
             vulkan,
         }
     }

@@ -269,6 +269,7 @@ impl Compositor {
             return;
         }
         self.output.enter(&surface);
+        let is_fullscreen = window.is_fullscreen();
         let pose = (0..=self.panels.len())
             .map(|slot| {
                 PanelPose::for_slot_at_distance(
@@ -286,6 +287,7 @@ impl Compositor {
             },
             pose,
             geometry: None,
+            is_fullscreen,
             pose_is_explicit: false,
             resize_anchor: None,
             id: self.next_panel_id,
@@ -417,6 +419,30 @@ impl XwmHandler for Compositor {
         _geometry: Rectangle<i32, Logical>,
         _above: Option<u32>,
     ) {
+        if let Some(surface) = window.wl_surface() {
+            let root = self.root_surface(&surface);
+            if let Some(index) = self.update_panel_from_commit(&root) {
+                self.invalidate_panel(index);
+            }
+        }
+    }
+    fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Err(error) = window.set_fullscreen(true) {
+            eprintln!("failed to mark X11 window fullscreen: {error}");
+            return;
+        }
+        if let Some(surface) = window.wl_surface() {
+            let root = self.root_surface(&surface);
+            if let Some(index) = self.update_panel_from_commit(&root) {
+                self.invalidate_panel(index);
+            }
+        }
+    }
+    fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Err(error) = window.set_fullscreen(false) {
+            eprintln!("failed to clear X11 fullscreen state: {error}");
+            return;
+        }
         if let Some(surface) = window.wl_surface() {
             let root = self.root_surface(&surface);
             if let Some(index) = self.update_panel_from_commit(&root) {
