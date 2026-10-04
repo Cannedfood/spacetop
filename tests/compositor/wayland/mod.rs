@@ -33,8 +33,9 @@ fn gpu_capture_preserves_moved_and_resized_panel_size() {
     assert_eq!(app.compositor.panels[0].geometry.unwrap().pose, pose);
 
     let geometry = app.compositor.panels[0].geometry.unwrap();
+    assert_eq!(geometry.logical_size, (80, 40).into());
     let pose = geometry.resized_pose_from_edges(
-        (120, 70).into(),
+        (100, 60).into(),
         [false, true, false, true],
         app.compositor.window_pixels_per_degree,
     );
@@ -52,7 +53,7 @@ fn gpu_capture_preserves_moved_and_resized_panel_size() {
         &mut app.client,
         &app.connection,
     );
-    assert_eq!(app.client.toplevel_configures.last(), Some(&(100, 60)));
+    assert_eq!(app.client.toplevel_configures.last(), Some(&(120, 70)));
     let mut pixels = tempfile::tempfile().unwrap();
     pixels
         .write_all(&[0, 255, 0, 255].repeat(140 * 90))
@@ -77,7 +78,7 @@ fn gpu_capture_preserves_moved_and_resized_panel_size() {
     );
     assert_eq!(
         app.compositor.panels[0].geometry.unwrap().logical_size,
-        (120, 70).into()
+        (100, 60).into()
     );
     assert_eq!(app.compositor.panels[0].geometry.unwrap().pose, pose);
 
@@ -111,7 +112,7 @@ fn gpu_capture_preserves_moved_and_resized_panel_size() {
             &app.connection,
         );
         let actual = app.compositor.panels[0].geometry.unwrap();
-        assert_eq!(actual.logical_size, (width, height).into());
+        assert_eq!(actual.logical_size, (width - 20, height - 10).into());
         assert_eq!(
             actual.pose,
             geometry.resized_pose_from_edges(

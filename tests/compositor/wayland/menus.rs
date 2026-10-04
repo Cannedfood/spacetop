@@ -127,7 +127,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
         1,
         "menus must not use another XR layer"
     );
-    assert_eq!(compositor.panels[0].bounds.size, (125, 50).into());
+    assert_eq!(compositor.panels[0].bounds.size, (120, 40).into());
     assert!(compositor.seat.get_keyboard().unwrap().is_grabbed());
     assert!(compositor.dispatch_ray(
         Ray3 {
@@ -153,7 +153,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
         .unwrap();
         let pixels = vulkan.readback(&shared, None).unwrap();
         assert_eq!(
-            &pixels[(20 * 125 + 90) * 4..(20 * 125 + 90) * 4 + 4],
+            &pixels[(20 * 130 + 90) * 4..(20 * 130 + 90) * 4 + 4],
             &[255, 255, 0, 255]
         );
         assert_eq!(&pixels[..4], &[255, 0, 0, 255]);
@@ -175,7 +175,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
     child_surface.attach(Some(&child_buffer), 0, 0);
     child_surface.commit();
     pump(display, compositor, queue, client, connection);
-    assert_eq!(compositor.panels[0].bounds.size, (135, 50).into());
+    assert_eq!(compositor.panels[0].bounds.size, (130, 40).into());
     assert!(compositor.dispatch_ray(
         Ray3 {
             origin: Vec3::new(0.75, 0.0, 0.0),
@@ -202,7 +202,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
     pump(display, compositor, queue, client, connection);
     assert_eq!(
         compositor.panels[0].bounds,
-        smithay::utils::Rectangle::from_size((100, 50).into())
+        smithay::utils::Rectangle::new((5, 5).into(), (90, 40).into())
     );
     assert!(!compositor.dispatch_ray(
         Ray3 {
@@ -215,7 +215,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
     compositor.dispatch_button(false, 22);
     pump(display, compositor, queue, client, connection);
     assert!(client.popup_done >= 1);
-    assert_eq!(compositor.panels[0].bounds.size, (100, 50).into());
+    assert_eq!(compositor.panels[0].bounds.size, (90, 40).into());
     menu.destroy();
     menu_xdg.destroy();
     menu_surface.destroy();

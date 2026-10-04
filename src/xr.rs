@@ -1025,14 +1025,7 @@ pub fn run(
                         .geometry
                         .intersect_with_margin_px(ray, resize_reach_px)
                 {
-                    let width = panel.geometry.logical_size.w as f32;
-                    let height = panel.geometry.logical_size.h as f32;
-                    resize_edges = [
-                        hit.surface_px.x <= resize_reach_px,
-                        hit.surface_px.x >= width - resize_reach_px,
-                        hit.surface_px.y <= resize_reach_px,
-                        hit.surface_px.y >= height - resize_reach_px,
-                    ];
+                    resize_edges = panel.geometry.resize_edges_from_hit(hit);
                     if resize_edges.into_iter().any(|edge| edge) {
                         resizing_panel = Some(panel_id);
                         resize_geometry = Some(panel.geometry);

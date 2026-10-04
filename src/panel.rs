@@ -270,6 +270,17 @@ struct PixelMargin {
 }
 
 impl PanelGeometry {
+    pub(crate) fn resize_edges_from_hit(self, hit: PanelHit) -> [bool; 4] {
+        let width = self.logical_size.w as f32;
+        let height = self.logical_size.h as f32;
+        [
+            hit.surface_px.x <= 0.0,
+            hit.surface_px.x >= width,
+            hit.surface_px.y <= 0.0,
+            hit.surface_px.y >= height,
+        ]
+    }
+
     pub fn resized_pose_from_edges(
         self,
         new_size: Size<i32, smithay::utils::Logical>,

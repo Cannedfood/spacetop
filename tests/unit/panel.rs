@@ -48,6 +48,29 @@ fn pixel_grab_margin_accepts_hits_just_outside_panel_bounds() {
 }
 
 #[test]
+fn resize_handles_are_outside_the_panel_not_inside_its_edges() {
+    let geometry = panel();
+    let inside_edge_ray = Ray3 {
+        origin: Vec3::new(-0.499, 0.0, -2.0),
+        direction: Vec3::NEG_Z,
+    };
+    let inside_hit = geometry.intersect_unbounded(inside_edge_ray).unwrap();
+    assert_eq!(geometry.resize_edges_from_hit(inside_hit), [false; 4]);
+
+    let outside_edge_ray = Ray3 {
+        origin: Vec3::new(-0.505, 0.0, -2.0),
+        direction: Vec3::NEG_Z,
+    };
+    let outside_hit = geometry
+        .intersect_with_margin_px(outside_edge_ray, 6.0)
+        .unwrap();
+    assert_eq!(
+        geometry.resize_edges_from_hit(outside_hit),
+        [true, false, false, false]
+    );
+}
+
+#[test]
 fn pixel_intersection_margins_are_uniform_across_rectangular_axes() {
     let geometry = panel();
     for origin in [Vec3::new(-0.505, 0.0, -2.0), Vec3::new(0.0, 0.2525, -2.0)] {
