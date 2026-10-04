@@ -630,6 +630,7 @@ pub fn run(
     let mut cursor_close_panel = None;
     let mut timings = crate::timing::Timings::new();
     let mut last_config_check = Instant::now();
+    let mut rendered_frame_index = 0_u32;
 
     while !exit {
         if last_config_check.elapsed() >= Duration::from_millis(250) {
@@ -1257,6 +1258,7 @@ pub fn run(
             grabbed_panel: grabbed_panel
                 .and_then(|id| panel_frames.get(&id).map(|panel| panel.geometry)),
             floor_y,
+            texture_sample_phase: rendered_frame_index & 1,
         };
         unsafe {
             timings.measure("gpu/previous-render-wait", period, || {
@@ -1353,6 +1355,7 @@ pub fn run(
                 &[&projection],
             )
         })?;
+        rendered_frame_index = rendered_frame_index.wrapping_add(1);
     }
 
     unsafe {

@@ -14,7 +14,7 @@ use iced::{
     },
 };
 use iced_aw::helpers::color_picker;
-use spacetop_config::AppConfig;
+use spacetop_config::{AppConfig, WindowTextureAa};
 
 const RANDOM_BACKGROUND: &str = "Random";
 const BACKGROUND_DOWNLOAD_URL: &str = "https://polyhaven.com/hdris";
@@ -55,6 +55,7 @@ enum Message {
     TransparentReflectionsChanged(bool),
     WindowDistanceChanged(String),
     WindowPixelsPerDegreeChanged(String),
+    WindowTextureAaChanged(WindowTextureAa),
     WindowPaddingChanged(f32),
     WindowMarginChanged(f32),
     WindowAnimationHalfTimeChanged(f32),
@@ -140,6 +141,7 @@ impl SettingsApp {
                 | Message::TransparentReflectionsChanged(_)
                 | Message::WindowDistanceChanged(_)
                 | Message::WindowPixelsPerDegreeChanged(_)
+                | Message::WindowTextureAaChanged(_)
                 | Message::WindowPaddingChanged(_)
                 | Message::WindowMarginChanged(_)
                 | Message::WindowAnimationHalfTimeChanged(_)
@@ -230,6 +232,7 @@ impl SettingsApp {
             }
             Message::WindowDistanceChanged(value) => self.window_distance = value,
             Message::WindowPixelsPerDegreeChanged(value) => self.window_pixels_per_degree = value,
+            Message::WindowTextureAaChanged(value) => self.config.window.texture_aa = value,
             Message::WindowPaddingChanged(value) => self.config.window.padding_px = value,
             Message::WindowMarginChanged(value) => self.config.window.margin_px = value,
             Message::WindowAnimationHalfTimeChanged(value) => {
@@ -625,13 +628,27 @@ impl SettingsApp {
         );
 
         let window_scale = section(
-            "RESOLUTION",
-            labeled_input(
-                "PIXELS PER DEGREE",
-                &self.window_pixels_per_degree,
-                "32",
-                Message::WindowPixelsPerDegreeChanged,
-            ),
+            "WINDOW RESOLUTION & AA",
+            column![
+                labeled_input(
+                    "PIXELS PER DEGREE",
+                    &self.window_pixels_per_degree,
+                    "32",
+                    Message::WindowPixelsPerDegreeChanged,
+                ),
+                row![
+                    text("TEXTURE AA MODE").size(11).color(MUTED),
+                    pick_list(
+                        WindowTextureAa::OPTIONS,
+                        Some(self.config.window.texture_aa),
+                        Message::WindowTextureAaChanged,
+                    )
+                    .width(Length::Fill),
+                ]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(14),
         );
 
         let placement = section(

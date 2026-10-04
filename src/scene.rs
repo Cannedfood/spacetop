@@ -122,7 +122,7 @@ fn model(geometry: PanelGeometry) -> Mat4 {
 
 fn expanded_window_model(geometry: PanelGeometry, padding_px: f32, border_width_px: f32) -> Mat4 {
     let pixels_per_meter = geometry.logical_size.w as f32 / geometry.pose.width_m;
-    let expansion_px = padding_px * 2.0 + border_width_px;
+    let expansion_px = padding_px * 2.0 + border_width_px + 2.0;
     let width_m = (geometry.logical_size.w as f32 + expansion_px) / pixels_per_meter;
     let height_m = (geometry.logical_size.h as f32 + expansion_px) / pixels_per_meter;
     Mat4::from_scale_rotation_translation(
@@ -716,6 +716,7 @@ pub(crate) struct SceneFrame<'a> {
     pub cursor_close_panel: Option<(PanelGeometry, Vec2)>,
     pub grabbed_panel: Option<PanelGeometry>,
     pub floor_y: f32,
+    pub texture_sample_phase: u32,
 }
 
 #[repr(C, align(16))]
@@ -759,7 +760,7 @@ impl From<&AppConfig> for FloorUniform {
             sampling: [
                 config.floor.reflection_grain_size_m,
                 config.background.rotation_degrees.to_radians(),
-                0.0,
+                config.window.texture_aa.shader_mode() as f32,
                 0.0,
             ],
             window_style: [
@@ -1525,7 +1526,7 @@ impl SceneRenderer {
                 let close_hit = frame
                     .cursor_close_panel
                     .filter(|(close_geometry, _)| *close_geometry == geometry);
-                let cursor_position = close_hit.map_or([0.0; 4], |(_, position)| {
+                let mut cursor_position = close_hit.map_or([0.0; 4], |(_, position)| {
                     [
                         position.x + self.window_padding_px,
                         position.y + self.window_padding_px,
@@ -1533,6 +1534,7 @@ impl SceneRenderer {
                         0.0,
                     ]
                 });
+                cursor_position[2] = frame.texture_sample_phase as f32;
                 let cursor_position_bytes =
                     std::slice::from_raw_parts(cursor_position.as_ptr().cast::<u8>(), 16);
                 self.device.cmd_push_constants(
@@ -1544,10 +1546,12 @@ impl SceneRenderer {
                 );
                 eye[0] = geometry.logical_size.w as f32
                     + self.window_padding_px * 2.0
-                    + self.max_border_width_px;
+                    + self.max_border_width_px
+                    + 2.0;
                 eye[1] = geometry.logical_size.h as f32
                     + self.window_padding_px * 2.0
-                    + self.max_border_width_px;
+                    + self.max_border_width_px
+                    + 2.0;
                 eye[2] = if frame.grabbed_panel == Some(geometry) {
                     1.0
                 } else {
@@ -1790,6 +1794,6 @@ mod tests {
         assert!(
             (geometry.pose.center.x - left.x - (right.x - geometry.pose.center.x)).abs() < 1.0e-5
         );
-        assert!((right.x - left.x - 2.24).abs() < 1.0e-5);
+        assert!((right.x - left.x - 2.26).abs() < 1.0e-5);
     }
 }

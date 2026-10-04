@@ -282,6 +282,7 @@ impl Vulkan {
                     cursor_close_panel: None,
                     grabbed_panel: None,
                     floor_y: scene.floor_y,
+                    texture_sample_phase: 0,
                 };
                 scene.renderer.prepare_frame(&frame)?;
                 scene.renderer.draw(command, &target, scene.view, &frame);

@@ -110,6 +110,16 @@ Each eye uses the runtime's recommended dimensions, predicted pose and asymmetri
 FOV. The scene uses depth testing, back-to-front premultiplied-alpha blending,
 and transparent-fragment rejection; the cursor has a minimum screen-space stroke.
 WGSL shaders are compiled to SPIR-V with Naga.
+Window texture minification uses a configurable `window.texture_aa` pattern:
+`1`, `2x2`, `4`, `4x2`, `8`, `8x2`, or `16`. The 4-, 8-, and 16-point patterns
+are hardcoded patterns. The 8-point pattern uses alternating cells of a 4x4
+grid; the `4x2` mode alternates even and odd pattern indices on successive
+rendered frames. The `2x2` and `8x2` modes similarly alternate halves of the
+4- and 16-point patterns, using 2, 4, or 8 texture samples per frame
+respectively. Both eyes use the same phase. Rounded window and border edges use
+derivative-filtered signed-distance coverage. The rendered window quad includes
+a one-source-pixel fringe so the analytic edge coverage also applies to the
+outer silhouette.
 
 The floor occupies a 60-meter square and uses the configured albedo and
 transparency, with sky and window reflections rendered in one full-screen
