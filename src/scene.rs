@@ -16,7 +16,13 @@ use crate::{
     panel::{PanelGeometry, PanelPose},
 };
 
-const SHADER: &str = include_str!("scene.wgsl");
+const SHADER_PARTS: [&str; 5] = [
+    include_str!("shaders/shared.wgsl"),
+    include_str!("shaders/panel.wgsl"),
+    include_str!("shaders/tone_mapping.wgsl"),
+    include_str!("shaders/lighting.wgsl"),
+    include_str!("shaders/environment.wgsl"),
+];
 static NEXT_PANEL_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn shader(
@@ -24,7 +30,7 @@ fn shader(
     stage: naga::ShaderStage,
     trace_through_transparent_windows: bool,
 ) -> Result<Vec<u32>> {
-    let shader_source = SHADER.replace(
+    let shader_source = SHADER_PARTS.join("\n").replace(
         "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = false;",
         &format!(
             "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = {};",
