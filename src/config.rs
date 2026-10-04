@@ -118,23 +118,6 @@ mod tests {
     }
 
     #[test]
-    fn migrates_legacy_transparency_into_albedo_alpha() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        fs::write(
-            &path,
-            "[floor]\nalbedo = [0.2, 0.3, 0.4]\ntransparency = 0.1\n",
-        )
-        .unwrap();
-
-        let config = AppConfig::load_from(&path).unwrap();
-        let saved = toml::to_string(&config).unwrap();
-
-        assert_eq!(config.floor.albedo, [0.2, 0.3, 0.4, 0.9]);
-        assert!(!saved.contains("transparency"));
-    }
-
-    #[test]
     fn rejects_invalid_floor_parameters() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");

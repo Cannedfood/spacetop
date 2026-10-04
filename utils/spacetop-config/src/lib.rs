@@ -5,14 +5,14 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct AppConfig {
-    pub application: ApplicationConfig,
     pub background: BackgroundConfig,
+    pub application: ApplicationConfig,
     pub floor: FloorConfig,
     pub window: WindowConfig,
 }
@@ -31,63 +31,39 @@ pub struct BackgroundConfig {
     pub rotation_degrees: f32,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
 pub struct FloorConfig {
     pub height_m: f32,
     pub albedo: [f32; 4],
     pub roughness: f32,
     pub reflectance: f32,
     pub ray_count: u32,
-    pub reflection_grain_size_m: f32,
     pub trace_through_transparent_windows: bool,
+    pub reflection_grain_size_m: f32,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
-struct FloorConfigFields {
-    height_m: f32,
-    albedo: Option<Vec<f32>>,
-    roughness: f32,
-    reflectance: f32,
-    transparency: Option<f32>,
-    ray_count: u32,
-    reflection_grain_size_m: f32,
-    trace_through_transparent_windows: bool,
-}
-
-impl Default for FloorConfigFields {
-    fn default() -> Self {
-        let floor = FloorConfig::default();
-        Self {
-            height_m: floor.height_m,
-            albedo: None,
-            roughness: floor.roughness,
-            reflectance: floor.reflectance,
-            transparency: None,
-            ray_count: floor.ray_count,
-            reflection_grain_size_m: floor.reflection_grain_size_m,
-            trace_through_transparent_windows: floor.trace_through_transparent_windows,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct WindowConfig {
-    pub default_distance_m: f32,
-    pub default_vertical_angle_degrees: f32,
     pub pixels_per_degree: f32,
     pub texture_aa: WindowTextureAa,
-    pub padding_px: f32,
-    pub margin_px: f32,
+
+    pub default_distance_m: f32,
+    pub default_vertical_angle_degrees: f32,
     pub animation_half_time_s: f32,
     pub collision_margin_m: f32,
-    pub border_width_px: f32,
-    pub border_color: [f32; 4],
+
     pub cursor_proximity_radius_px: f32,
-    pub cursor_close_border_width_px: f32,
-    pub cursor_close_border_color: [f32; 4],
+    pub padding_px: f32,
+    pub margin_px: f32,
     pub border_radius_px: f32,
+    pub border_width_px: f32,
+    pub cursor_close_border_width_px: f32,
     pub grabbed_border_width_px: f32,
+
+    pub border_color: [f32; 4],
+    pub cursor_close_border_color: [f32; 4],
     pub grabbed_border_color: [f32; 4],
 }
 
@@ -96,56 +72,59 @@ pub struct WindowConfig {
 pub enum WindowTextureAa {
     Nearest,
     #[default]
-    SS2x2,
-    SS4,
-    SS4x2,
-    SS8,
-    SS8x2,
-    SS16,
+    SuperSample2x2,
+    SuperSample4,
+    SuperSample4x2,
+    SuperSample8,
+    SuperSample8x2,
+    SuperSample16,
 }
 
 impl WindowTextureAa {
     pub const OPTIONS: [Self; 7] = [
         Self::Nearest,
-        Self::SS2x2,
-        Self::SS4,
-        Self::SS4x2,
-        Self::SS8,
-        Self::SS8x2,
-        Self::SS16,
+        Self::SuperSample2x2,
+        Self::SuperSample4,
+        Self::SuperSample4x2,
+        Self::SuperSample8,
+        Self::SuperSample8x2,
+        Self::SuperSample16,
     ];
 
     pub fn samples_per_frame(self) -> u32 {
         match self {
             Self::Nearest => 1,
-            Self::SS2x2 | Self::SS4 => 2,
-            Self::SS4x2 | Self::SS8 => 4,
-            Self::SS8x2 | Self::SS16 => 8,
+            Self::SuperSample2x2 | Self::SuperSample4 => 2,
+            Self::SuperSample4x2 | Self::SuperSample8 => 4,
+            Self::SuperSample8x2 | Self::SuperSample16 => 8,
         }
     }
 
     pub fn pattern_samples(self) -> u32 {
         match self {
             Self::Nearest => 1,
-            Self::SS2x2 | Self::SS4 => 4,
-            Self::SS4x2 | Self::SS8 => 8,
-            Self::SS8x2 | Self::SS16 => 16,
+            Self::SuperSample2x2 | Self::SuperSample4 => 4,
+            Self::SuperSample4x2 | Self::SuperSample8 => 8,
+            Self::SuperSample8x2 | Self::SuperSample16 => 16,
         }
     }
 
     pub fn is_temporal(self) -> bool {
-        matches!(self, Self::SS2x2 | Self::SS4x2 | Self::SS8x2)
+        matches!(
+            self,
+            Self::SuperSample2x2 | Self::SuperSample4x2 | Self::SuperSample8x2
+        )
     }
 
     pub fn shader_mode(self) -> u32 {
         match self {
             Self::Nearest => 0,
-            Self::SS2x2 => 1,
-            Self::SS4 => 2,
-            Self::SS4x2 => 3,
-            Self::SS8 => 4,
-            Self::SS8x2 => 5,
-            Self::SS16 => 6,
+            Self::SuperSample2x2 => 1,
+            Self::SuperSample4 => 2,
+            Self::SuperSample4x2 => 3,
+            Self::SuperSample8 => 4,
+            Self::SuperSample8x2 => 5,
+            Self::SuperSample16 => 6,
         }
     }
 }
@@ -154,109 +133,12 @@ impl std::fmt::Display for WindowTextureAa {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Nearest => "1",
-            Self::SS2x2 => "2x2",
-            Self::SS4 => "4",
-            Self::SS4x2 => "4x2",
-            Self::SS8 => "8",
-            Self::SS8x2 => "8x2",
-            Self::SS16 => "16",
-        })
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(default)]
-struct WindowConfigFields {
-    default_distance_m: f32,
-    default_vertical_angle_degrees: f32,
-    pixels_per_degree: f32,
-    texture_aa: Option<WindowTextureAa>,
-    texture_samples: Option<u32>,
-    temporal_texture_aa: Option<bool>,
-    padding_px: f32,
-    margin_px: f32,
-    animation_half_time_s: f32,
-    collision_margin_m: f32,
-    border_width_px: f32,
-    border_color: [f32; 4],
-    cursor_proximity_radius_px: f32,
-    cursor_close_border_width_px: f32,
-    cursor_close_border_color: [f32; 4],
-    border_radius_px: f32,
-    grabbed_border_width_px: f32,
-    grabbed_border_color: [f32; 4],
-}
-
-impl Default for WindowConfigFields {
-    fn default() -> Self {
-        let window = WindowConfig::default();
-        Self {
-            default_distance_m: window.default_distance_m,
-            default_vertical_angle_degrees: window.default_vertical_angle_degrees,
-            pixels_per_degree: window.pixels_per_degree,
-            texture_aa: None,
-            texture_samples: None,
-            temporal_texture_aa: None,
-            padding_px: window.padding_px,
-            margin_px: window.margin_px,
-            animation_half_time_s: window.animation_half_time_s,
-            collision_margin_m: window.collision_margin_m,
-            border_width_px: window.border_width_px,
-            border_color: window.border_color,
-            cursor_proximity_radius_px: window.cursor_proximity_radius_px,
-            cursor_close_border_width_px: window.cursor_close_border_width_px,
-            cursor_close_border_color: window.cursor_close_border_color,
-            border_radius_px: window.border_radius_px,
-            grabbed_border_width_px: window.grabbed_border_width_px,
-            grabbed_border_color: window.grabbed_border_color,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for WindowConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let fields = WindowConfigFields::deserialize(deserializer)?;
-        let texture_aa = if let Some(texture_aa) = fields.texture_aa {
-            texture_aa
-        } else {
-            let samples = fields.texture_samples.unwrap_or(4);
-            let temporal = fields.temporal_texture_aa.unwrap_or(true);
-            match (samples, temporal) {
-                (1, _) => WindowTextureAa::Nearest,
-                (4, true) => WindowTextureAa::SS2x2,
-                (4, false) => WindowTextureAa::SS4,
-                (8, true) => WindowTextureAa::SS4x2,
-                (8, false) => WindowTextureAa::SS8,
-                (16, true) => WindowTextureAa::SS8x2,
-                (16, false) => WindowTextureAa::SS16,
-                (samples, _) => {
-                    return Err(D::Error::custom(format!(
-                        "window.texture_samples must be 1, 4, 8, or 16; got {samples}"
-                    )));
-                }
-            }
-        };
-
-        Ok(Self {
-            default_distance_m: fields.default_distance_m,
-            default_vertical_angle_degrees: fields.default_vertical_angle_degrees,
-            pixels_per_degree: fields.pixels_per_degree,
-            texture_aa,
-            padding_px: fields.padding_px,
-            margin_px: fields.margin_px,
-            animation_half_time_s: fields.animation_half_time_s,
-            collision_margin_m: fields.collision_margin_m,
-            border_width_px: fields.border_width_px,
-            border_color: fields.border_color,
-            cursor_proximity_radius_px: fields.cursor_proximity_radius_px,
-            cursor_close_border_width_px: fields.cursor_close_border_width_px,
-            cursor_close_border_color: fields.cursor_close_border_color,
-            border_radius_px: fields.border_radius_px,
-            grabbed_border_width_px: fields.grabbed_border_width_px,
-            grabbed_border_color: fields.grabbed_border_color,
+            Self::SuperSample2x2 => "2x2",
+            Self::SuperSample4 => "4",
+            Self::SuperSample4x2 => "4x2",
+            Self::SuperSample8 => "8",
+            Self::SuperSample8x2 => "8x2",
+            Self::SuperSample16 => "16",
         })
     }
 }
@@ -307,71 +189,33 @@ impl Default for FloorConfig {
             roughness: 0.06,
             reflectance: 0.15,
             ray_count: 1,
-            reflection_grain_size_m: 0.001,
             trace_through_transparent_windows: true,
+            reflection_grain_size_m: 0.001,
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for FloorConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let fields = FloorConfigFields::deserialize(deserializer)?;
-        let defaults = Self::default();
-        let legacy_alpha = || {
-            fields
-                .transparency
-                .map_or(defaults.albedo[3], |transparency| 1.0 - transparency)
-        };
-        let albedo = match fields.albedo {
-            Some(channels) => match channels.as_slice() {
-                [red, green, blue] => [*red, *green, *blue, legacy_alpha()],
-                [red, green, blue, alpha] => [*red, *green, *blue, *alpha],
-                _ => {
-                    return Err(D::Error::custom(
-                        "floor.albedo must contain three legacy or four RGBA channels",
-                    ));
-                }
-            },
-            None => {
-                let mut albedo = defaults.albedo;
-                albedo[3] = legacy_alpha();
-                albedo
-            }
-        };
-
-        Ok(Self {
-            height_m: fields.height_m,
-            albedo,
-            roughness: fields.roughness,
-            reflectance: fields.reflectance,
-            ray_count: fields.ray_count,
-            reflection_grain_size_m: fields.reflection_grain_size_m,
-            trace_through_transparent_windows: fields.trace_through_transparent_windows,
-        })
     }
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
-            default_distance_m: 1.6,
-            default_vertical_angle_degrees: -10.0,
             pixels_per_degree: 30.0,
             texture_aa: WindowTextureAa::default(),
-            padding_px: 42.0,
-            margin_px: 4.0,
+
+            default_distance_m: 1.6,
+            default_vertical_angle_degrees: -10.0,
             animation_half_time_s: 0.2,
             collision_margin_m: 0.04,
-            border_width_px: 0.0,
-            border_color: [0.9911504, 0.9911504, 0.9911504, 0.0],
+
             cursor_proximity_radius_px: 301.0,
-            cursor_close_border_width_px: 2.0,
-            cursor_close_border_color: [0.2485206, 0.9534924, 0.8007485, 0.5680294],
+            padding_px: 42.0,
+            margin_px: 4.0,
             border_radius_px: 42.0,
+            border_width_px: 0.0,
+            cursor_close_border_width_px: 2.0,
             grabbed_border_width_px: 1.0,
+
+            border_color: [0.9911504, 0.9911504, 0.9911504, 0.0],
+            cursor_close_border_color: [0.2485206, 0.9534924, 0.8007485, 0.5680294],
             grabbed_border_color: [0.34, 0.82, 0.72, 1.0],
         }
     }
@@ -592,7 +436,7 @@ mod tests {
         assert_eq!(config.window.default_distance_m, 1.6);
         assert_eq!(config.window.default_vertical_angle_degrees, 0.0);
         assert_eq!(config.window.pixels_per_degree, 32.0);
-        assert_eq!(config.window.texture_aa, WindowTextureAa::SS2x2);
+        assert_eq!(config.window.texture_aa, WindowTextureAa::SuperSample2x2);
         assert_eq!(config.window.padding_px, 0.0);
         assert_eq!(config.window.margin_px, 4.0);
         assert_eq!(config.window.animation_half_time_s, 0.2);
@@ -754,50 +598,18 @@ mod tests {
             assert!(mode.samples_per_frame() <= mode.pattern_samples());
         }
 
-        assert_eq!(WindowTextureAa::SS2x2.samples_per_frame(), 2);
-        assert!(WindowTextureAa::SS2x2.is_temporal());
-        assert_eq!(WindowTextureAa::SS4.pattern_samples(), 4);
-        assert!(!WindowTextureAa::SS4.is_temporal());
-        assert_eq!(WindowTextureAa::SS4x2.samples_per_frame(), 4);
-        assert!(WindowTextureAa::SS4x2.is_temporal());
-        assert_eq!(WindowTextureAa::SS8.pattern_samples(), 8);
-        assert!(!WindowTextureAa::SS8.is_temporal());
-        assert_eq!(WindowTextureAa::SS8x2.samples_per_frame(), 8);
-        assert!(WindowTextureAa::SS8x2.is_temporal());
-        assert_eq!(WindowTextureAa::SS16.pattern_samples(), 16);
-        assert!(!WindowTextureAa::SS16.is_temporal());
-    }
-
-    #[test]
-    fn legacy_window_aa_settings_migrate_to_unified_modes() {
-        for (samples, temporal, expected) in [
-            (1, true, WindowTextureAa::Nearest),
-            (4, true, WindowTextureAa::SS2x2),
-            (4, false, WindowTextureAa::SS4),
-            (8, true, WindowTextureAa::SS4x2),
-            (8, false, WindowTextureAa::SS8),
-            (16, true, WindowTextureAa::SS8x2),
-            (16, false, WindowTextureAa::SS16),
-        ] {
-            let config: AppConfig = toml::from_str(&format!(
-                "[window]\ntexture_samples = {samples}\ntemporal_texture_aa = {temporal}\n"
-            ))
-            .unwrap();
-            assert_eq!(config.window.texture_aa, expected);
-        }
-
-        let config: AppConfig = toml::from_str("[window]\ntexture_aa = \"four_by_two\"\n").unwrap();
-        assert_eq!(config.window.texture_aa, WindowTextureAa::SS4x2);
-        assert!(
-            !toml::to_string(&config)
-                .unwrap()
-                .contains("texture_samples")
-        );
-        assert!(
-            !toml::to_string(&config)
-                .unwrap()
-                .contains("temporal_texture_aa")
-        );
+        assert_eq!(WindowTextureAa::SuperSample2x2.samples_per_frame(), 2);
+        assert!(WindowTextureAa::SuperSample2x2.is_temporal());
+        assert_eq!(WindowTextureAa::SuperSample4.pattern_samples(), 4);
+        assert!(!WindowTextureAa::SuperSample4.is_temporal());
+        assert_eq!(WindowTextureAa::SuperSample4x2.samples_per_frame(), 4);
+        assert!(WindowTextureAa::SuperSample4x2.is_temporal());
+        assert_eq!(WindowTextureAa::SuperSample8.pattern_samples(), 8);
+        assert!(!WindowTextureAa::SuperSample8.is_temporal());
+        assert_eq!(WindowTextureAa::SuperSample8x2.samples_per_frame(), 8);
+        assert!(WindowTextureAa::SuperSample8x2.is_temporal());
+        assert_eq!(WindowTextureAa::SuperSample16.pattern_samples(), 16);
+        assert!(!WindowTextureAa::SuperSample16.is_temporal());
     }
 
     #[test]
