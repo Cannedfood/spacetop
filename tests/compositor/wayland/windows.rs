@@ -85,9 +85,7 @@ fn panel_bounds_use_wayland_window_geometry() {
     assert_eq!(panel.bounds.loc, (10, 5).into());
 
     let ray = Ray3 {
-        origin: geometry.pose.center
-            + geometry.pose.orientation()
-                * Vec3::new(0.0, 0.0, 1.0),
+        origin: geometry.pose.center + geometry.pose.orientation() * Vec3::new(0.0, 0.0, 1.0),
         direction: geometry.pose.orientation() * Vec3::NEG_Z,
     };
     assert!(app.compositor.dispatch_ray(ray, 1));
