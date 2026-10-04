@@ -45,10 +45,15 @@ pub struct Vulkan {
     pub physical_device: vk::PhysicalDevice,
     pub render_node: PathBuf,
     queue_family: u32,
+    reflection_arrays: bool,
 }
 
 impl Vulkan {
     pub fn new() -> Result<Self> {
+        Self::with_reflection_arrays(true)
+    }
+
+    fn with_reflection_arrays(enable: bool) -> Result<Self> {
         let entry = unsafe { ash::Entry::load() }?;
         let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_2);
         let instance = unsafe {
@@ -72,12 +77,8 @@ impl Vulkan {
                     instance
                         .get_physical_device_features2(physical_device, &mut supported_features);
                 }
-                if supported_indexing.runtime_descriptor_array == 0
-                    || supported_indexing.shader_sampled_image_array_non_uniform_indexing == 0
-                    || supported_indexing.descriptor_binding_variable_descriptor_count == 0
-                {
-                    continue;
-                }
+                let reflection_arrays =
+                    enable && crate::scene::supports_reflection_arrays(&supported_indexing);
                 let Some(render_node) = render_node(&instance, physical_device) else {
                     continue;
                 };
@@ -98,20 +99,26 @@ impl Vulkan {
                     .queue_priorities(&priorities)];
                 let extensions = SHARING_EXTENSIONS.map(|name| name.as_ptr());
                 let mut enabled_indexing = vk::PhysicalDeviceVulkan12Features::default()
-                    .runtime_descriptor_array(true)
-                    .shader_sampled_image_array_non_uniform_indexing(true)
-                    .descriptor_binding_variable_descriptor_count(true);
+                    .runtime_descriptor_array(reflection_arrays)
+                    .shader_sampled_image_array_non_uniform_indexing(reflection_arrays)
+                    .descriptor_binding_variable_descriptor_count(reflection_arrays);
                 let info = vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queues)
                     .enabled_extension_names(&extensions)
                     .push_next(&mut enabled_indexing);
                 let device = unsafe { instance.create_device(physical_device, &info, None) }?;
-                return Ok((physical_device, render_node, queue_family, device));
+                return Ok((
+                    physical_device,
+                    render_node,
+                    queue_family,
+                    device,
+                    reflection_arrays,
+                ));
             }
             anyhow::bail!("no Vulkan GPU supports DMA-BUF sharing");
         })();
         match selection {
-            Ok((physical_device, render_node, queue_family, device)) => {
+            Ok((physical_device, render_node, queue_family, device, reflection_arrays)) => {
                 eprintln!("Testing GPU sharing on {}", render_node.display());
                 Ok(Self {
                     _entry: entry,
@@ -120,6 +127,7 @@ impl Vulkan {
                     physical_device,
                     render_node,
                     queue_family,
+                    reflection_arrays,
                 })
             }
             Err(error) => {
@@ -285,6 +293,7 @@ impl Vulkan {
                     texture_sample_phase: 0,
                 };
                 scene.renderer.prepare_frame(&frame)?;
+                scene.renderer.copy_reflection_textures(command, &frame);
                 scene.renderer.draw(command, &target, scene.view, &frame);
                 for (texture, _) in scene.panels {
                     texture.ownership(command, self.queue_family, false);
@@ -391,6 +400,177 @@ impl Drop for Vulkan {
 
 #[test]
 #[ignore = "requires a Vulkan/GLES GPU with DMA-BUF sharing"]
+fn vulkan_reflection_atlas_matches_direct_sampling() -> Result<()> {
+    compare_reflection_atlas(true)
+}
+
+#[test]
+#[ignore = "requires a Vulkan/GLES GPU with DMA-BUF sharing"]
+fn vulkan_reflection_atlas_without_descriptor_indexing() -> Result<()> {
+    compare_reflection_atlas(false)
+}
+
+fn compare_reflection_atlas(enable_arrays: bool) -> Result<()> {
+    let vulkan = Vulkan::with_reflection_arrays(enable_arrays)?;
+    let mut config = crate::config::AppConfig::default();
+    config.floor.albedo = [0.0, 0.0, 0.0, 1.0];
+    config.window.padding_px = 0.0;
+    config.window.border_radius_px = 0.0;
+    config.window.border_width_px = 0.0;
+    config.window.cursor_close_border_width_px = 0.0;
+    config.window.grabbed_border_width_px = 0.0;
+    let mut direct = SceneRenderer::new(
+        &vulkan.device,
+        &vulkan.instance,
+        vulkan.physical_device,
+        vk::Format::R8G8B8A8_SRGB,
+        &config,
+        vulkan.reflection_arrays,
+    )?;
+    let mut atlas = SceneRenderer::new(
+        &vulkan.device,
+        &vulkan.instance,
+        vulkan.physical_device,
+        vk::Format::R8G8B8A8_SRGB,
+        &config,
+        false,
+    )?;
+    let directory = tempfile::tempdir()?;
+    let skybox_path = directory.path().join("black.exr");
+    image::Rgb32FImage::from_pixel(8, 4, image::Rgb([0.0, 0.0, 0.0])).save(&skybox_path)?;
+    let mut skybox = SkyboxTexture::new(
+        &direct,
+        &vulkan.instance,
+        vulkan.physical_device,
+        skybox_path.to_str().unwrap(),
+    )?;
+    let mut producer = GpuRenderer::new(&vulkan.render_node)?;
+    let mut make_texture = |size: u32, color: [f32; 4]| -> Result<PanelTexture> {
+        let buffer =
+            producer
+                .allocator
+                .create_buffer(size, size, Fourcc::Abgr8888, &[Modifier::Linear])?;
+        let mut dmabuf = buffer.export()?;
+        {
+            let mut target = producer.renderer.bind(&mut dmabuf)?;
+            let size = (size as i32, size as i32).into();
+            let mut frame = producer
+                .renderer
+                .render(&mut target, size, Transform::Normal)?;
+            frame.clear(color.into(), &[smithay::utils::Rectangle::from_size(size)])?;
+            if size.w <= 64 {
+                frame.clear(
+                    [0.0, 0.0, 0.25, 0.5].into(),
+                    &[smithay::utils::Rectangle::from_size(
+                        (size.w / 2, size.h / 2).into(),
+                    )],
+                )?;
+            }
+            frame.finish()?.wait()?;
+        }
+        PanelTexture::new(
+            &direct,
+            SharedImage::import(
+                &vulkan.instance,
+                &vulkan.device,
+                vulkan.physical_device,
+                dmabuf,
+            )?,
+        )
+    };
+    let red = make_texture(32, [0.5, 0.0, 0.0, 0.5])?;
+    let white = make_texture(64, [1.0, 1.0, 1.0, 1.0])?;
+    let green = make_texture(16, [0.0, 0.75, 0.0, 1.0])?;
+    let oversized = make_texture(2048, [1.0, 1.0, 1.0, 1.0])?;
+    let geometry = PanelGeometry {
+        pose: PanelPose {
+            center: glam::Vec3::new(0.0, 0.0, -3.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            width_m: 1.0,
+        },
+        logical_size: (32, 32).into(),
+    };
+    let farther = PanelGeometry {
+        pose: PanelPose {
+            center: glam::Vec3::new(0.0, 0.0, -4.0),
+            width_m: 4.0 / 3.0,
+            ..geometry.pose
+        },
+        ..geometry
+    };
+    let view = openxr::View {
+        pose: openxr::Posef::IDENTITY,
+        fov: openxr::Fovf {
+            angle_left: -std::f32::consts::FRAC_PI_4,
+            angle_right: std::f32::consts::FRAC_PI_4,
+            angle_up: std::f32::consts::FRAC_PI_4,
+            angle_down: -std::f32::consts::FRAC_PI_4,
+        },
+    };
+    for transparent in [false, true] {
+        config.floor.trace_through_transparent_windows = transparent;
+        config.window.reflection_atlas_size = if transparent {
+            spacetop_config::ReflectionAtlasSize::Size256
+        } else {
+            spacetop_config::ReflectionAtlasSize::Size1024
+        };
+        direct.update_config(&config)?;
+        atlas.update_config(&config)?;
+        for panels in [
+            vec![],
+            vec![(&red, geometry)],
+            vec![(&red, geometry), (&white, farther)],
+            vec![(&white, farther), (&red, geometry), (&green, farther)],
+            vec![(&green, geometry)],
+            vec![(&oversized, geometry)],
+            vec![],
+        ] {
+            let mut render = |scene: &mut SceneRenderer| {
+                vulkan.readback_image(
+                    None,
+                    (512, 512).into(),
+                    None,
+                    Some(SceneReadback {
+                        renderer: scene,
+                        view: &view,
+                        skybox: Some(&mut skybox),
+                        panels: &panels,
+                        cursor: None,
+                        floor_y: config.floor.height_m,
+                    }),
+                )
+            };
+            let expected = render(&mut direct)?;
+            let actual = render(&mut atlas)?;
+            let difference = expected
+                .iter()
+                .zip(&actual)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(
+                difference <= 1,
+                "atlas differs from direct sampling by {difference} with transparency={transparent}, windows={}",
+                panels.len()
+            );
+            if !panels.is_empty() {
+                let reflected = (430..512)
+                    .flat_map(|y| (0..512).map(move |x| (y * 512 + x) * 4))
+                    .filter(|&offset| actual[offset..offset + 3].iter().any(|&value| value != 0))
+                    .count();
+                assert!(
+                    reflected > 100,
+                    "atlas must contain actual floor reflections"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a Vulkan/GLES GPU with DMA-BUF sharing"]
 fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
     let vulkan = Vulkan::new()?;
     let mut window_test_config = crate::config::AppConfig::default();
@@ -406,6 +586,7 @@ fn vulkan_scene_renders_sampled_panels_and_cursor() -> Result<()> {
         vulkan.physical_device,
         vk::Format::R8G8B8A8_SRGB,
         &window_test_config,
+        vulkan.reflection_arrays,
     )?;
     let skybox_directory = tempfile::tempdir()?;
     let skybox_path = skybox_directory.path().join("black.exr");
@@ -801,6 +982,7 @@ fn vulkan_scene_renders_equirectangular_skybox() -> Result<()> {
         vulkan.physical_device,
         vk::Format::R8G8B8A8_SRGB,
         &crate::config::AppConfig::default(),
+        vulkan.reflection_arrays,
     )?;
     let mut skybox = SkyboxTexture::new(
         &renderer,
@@ -960,6 +1142,7 @@ fn vulkan_floor_fresnel_dims_albedo_at_grazing_angles() -> Result<()> {
         vulkan.physical_device,
         vk::Format::R8G8B8A8_SRGB,
         &crate::config::AppConfig::default(),
+        vulkan.reflection_arrays,
     )?;
     renderer.update_config(&config)?;
     let skybox_directory = tempfile::tempdir()?;

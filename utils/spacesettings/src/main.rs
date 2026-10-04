@@ -14,7 +14,7 @@ use iced::{
     },
 };
 use iced_aw::helpers::color_picker;
-use spacetop_config::{AppConfig, WindowTextureAa};
+use spacetop_config::{AppConfig, ReflectionAtlasSize, ReflectionTextures, WindowTextureAa};
 
 const RANDOM_BACKGROUND: &str = "Random";
 const BACKGROUND_DOWNLOAD_URL: &str = "https://polyhaven.com/hdris";
@@ -58,6 +58,8 @@ enum Message {
     WindowVerticalAngleChanged(String),
     WindowPixelsPerDegreeChanged(String),
     WindowTextureAaChanged(WindowTextureAa),
+    ReflectionTexturesChanged(ReflectionTextures),
+    ReflectionAtlasSizeChanged(ReflectionAtlasSize),
     WindowPaddingChanged(f32),
     WindowMarginChanged(f32),
     WindowAnimationHalfTimeChanged(f32),
@@ -185,6 +187,8 @@ impl SettingsApp {
                 | Message::WindowVerticalAngleChanged(_)
                 | Message::WindowPixelsPerDegreeChanged(_)
                 | Message::WindowTextureAaChanged(_)
+                | Message::ReflectionTexturesChanged(_)
+                | Message::ReflectionAtlasSizeChanged(_)
                 | Message::WindowPaddingChanged(_)
                 | Message::WindowMarginChanged(_)
                 | Message::WindowAnimationHalfTimeChanged(_)
@@ -279,6 +283,12 @@ impl SettingsApp {
             Message::WindowVerticalAngleChanged(value) => self.window_vertical_angle = value,
             Message::WindowPixelsPerDegreeChanged(value) => self.window_pixels_per_degree = value,
             Message::WindowTextureAaChanged(value) => self.config.window.texture_aa = value,
+            Message::ReflectionTexturesChanged(value) => {
+                self.config.window.reflection_textures = value
+            }
+            Message::ReflectionAtlasSizeChanged(value) => {
+                self.config.window.reflection_atlas_size = value
+            }
             Message::WindowPaddingChanged(value) => self.config.window.padding_px = value,
             Message::WindowMarginChanged(value) => self.config.window.margin_px = value,
             Message::WindowAnimationHalfTimeChanged(value) => {
@@ -317,6 +327,23 @@ impl SettingsApp {
             self.status_is_error = false;
         }
         iced::Task::none()
+    }
+
+    fn atlas_size_picker(&self) -> Option<Element<'_, Message>> {
+        (self.config.window.reflection_textures == ReflectionTextures::Atlas).then(|| {
+            row![
+                text("ATLAS SIZE").size(11).color(MUTED),
+                pick_list(
+                    ReflectionAtlasSize::OPTIONS,
+                    Some(self.config.window.reflection_atlas_size),
+                    Message::ReflectionAtlasSizeChanged,
+                )
+                .width(Length::Fill),
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+            .into()
+        })
     }
 
     fn reset(&mut self, target: ResetTarget) {
@@ -436,6 +463,8 @@ impl SettingsApp {
             ResetTarget::WindowResolutionSection => {
                 self.config.window.pixels_per_degree = defaults.window.pixels_per_degree;
                 self.config.window.texture_aa = defaults.window.texture_aa;
+                self.config.window.reflection_textures = defaults.window.reflection_textures;
+                self.config.window.reflection_atlas_size = defaults.window.reflection_atlas_size;
                 self.window_pixels_per_degree = defaults.window.pixels_per_degree.to_string();
             }
             ResetTarget::WindowBorderSection => {
@@ -919,12 +948,30 @@ impl SettingsApp {
                 ]
                 .spacing(12)
                 .align_y(iced::Alignment::Center),
+                row![
+                    text("REFLECTION TEXTURES").size(11).color(MUTED),
+                    pick_list(
+                        ReflectionTextures::OPTIONS,
+                        Some(self.config.window.reflection_textures),
+                        Message::ReflectionTexturesChanged,
+                    )
+                    .width(Length::Fill),
+                ]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
+                text("Reflection texture mode changes require a Spacetop restart.")
+                    .size(11)
+                    .color(MUTED),
             ]
+            .extend(self.atlas_size_picker())
             .spacing(14),
             number_is_default(
                 &self.window_pixels_per_degree,
                 defaults.window.pixels_per_degree,
-            ) && self.config.window.texture_aa == defaults.window.texture_aa,
+            ) && self.config.window.texture_aa == defaults.window.texture_aa
+                && self.config.window.reflection_textures == defaults.window.reflection_textures
+                && self.config.window.reflection_atlas_size
+                    == defaults.window.reflection_atlas_size,
             ResetTarget::WindowResolutionSection,
         );
 
@@ -1513,6 +1560,25 @@ mod tests {
     }
 
     #[test]
+    fn atlas_size_dropdown_is_only_visible_for_explicit_atlas_mode() {
+        let mut app = SettingsApp::from_config(AppConfig::default(), String::new(), false);
+        for mode in ReflectionTextures::OPTIONS {
+            app.config.window.reflection_textures = mode;
+            assert_eq!(
+                app.atlas_size_picker().is_some(),
+                mode == ReflectionTextures::Atlas
+            );
+        }
+        let _ = app.update(Message::ReflectionAtlasSizeChanged(
+            ReflectionAtlasSize::Size2048,
+        ));
+        assert_eq!(
+            app.config.window.reflection_atlas_size,
+            ReflectionAtlasSize::Size2048
+        );
+    }
+
+    #[test]
     fn section_resets_restore_defaults_and_text_fields() {
         let defaults = AppConfig::default();
         let mut config = defaults.clone();
@@ -1524,6 +1590,8 @@ mod tests {
         config.window.default_distance_m = 2.0;
         config.window.default_vertical_angle_degrees = 10.0;
         config.window.pixels_per_degree = 40.0;
+        config.window.reflection_textures = ReflectionTextures::Atlas;
+        config.window.reflection_atlas_size = ReflectionAtlasSize::Size4096;
         config.window.border_width_px = 5.0;
 
         let mut app = SettingsApp::from_config(config, String::new(), false);

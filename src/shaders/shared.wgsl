@@ -22,6 +22,7 @@ struct Window {
     center_width: vec4<f32>,
     right_height: vec4<f32>,
     up: vec4<f32>,
+    atlas_rect: vec4<f32>,
 }
 struct WindowBuffer {
     count: u32,

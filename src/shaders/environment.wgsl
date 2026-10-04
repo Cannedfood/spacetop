@@ -75,6 +75,9 @@ fn nearest_window_hit(origin: vec3<f32>, ray: vec3<f32>, minimum_distance: f32) 
     }
     return nearest;
 }
+fn sample_reflected_window(index: u32, uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(panel_textures[index], environment_filter, uv, 0.0);
+}
 fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f32) -> vec3<f32> {
     if TRACE_THROUGH_TRANSPARENT_WINDOWS {
         var radiance = vec3(0.0);
@@ -84,7 +87,7 @@ fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f3
             let hit = nearest_window_hit(origin, ray, minimum_distance);
             if !hit.found { break; }
             let color =
-                textureSampleLevel(panel_textures[hit.index], environment_filter, hit.uv, 0.0);
+                sample_reflected_window(hit.index, hit.uv);
             radiance += color.rgb * remaining;
             remaining *= 1.0 - color.a;
             if remaining < 0.001 { return radiance; }
@@ -97,7 +100,7 @@ fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f3
     }
     let hit = nearest_window_hit(origin, ray, 0.00001);
     if hit.found {
-        return textureSampleLevel(panel_textures[hit.index], environment_filter, hit.uv, 0.0).rgb;
+        return sample_reflected_window(hit.index, hit.uv).rgb;
     }
     return sample_environment_skybox(ray, mip_level);
 }

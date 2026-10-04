@@ -331,7 +331,7 @@ pub fn run(
     ensure!(
         loader_version >= vk::API_VERSION_1_2
             && requirements.max_api_version_supported >= xr::Version::new(1, 2, 0),
-        "the OpenXR runtime and Vulkan loader must support Vulkan 1.2 for descriptor indexing"
+        "the OpenXR runtime and Vulkan loader must support Vulkan 1.2"
     );
     vk_api_version = vk_api_version.max(vk::API_VERSION_1_2);
     let vk_app_info = vk::ApplicationInfo::default().api_version(vk_api_version);
@@ -369,11 +369,16 @@ pub fn run(
     unsafe {
         vk_instance.get_physical_device_features2(physical_device, &mut supported_features);
     }
-    ensure!(
-        supported_indexing.runtime_descriptor_array != 0
-            && supported_indexing.shader_sampled_image_array_non_uniform_indexing != 0
-            && supported_indexing.descriptor_binding_variable_descriptor_count != 0,
-        "the Vulkan 1.2 GPU must support runtime descriptor arrays, non-uniform sampled-image indexing, and variable descriptor counts"
+    let reflection_arrays = config.window.reflection_textures.use_descriptor_array(
+        crate::scene::supports_reflection_arrays(&supported_indexing),
+    )?;
+    eprintln!(
+        "Reflection textures: {}",
+        if reflection_arrays {
+            "descriptor array"
+        } else {
+            "texture atlas"
+        }
     );
     let queue_family =
         unsafe { vk_instance.get_physical_device_queue_family_properties(physical_device) }
@@ -390,9 +395,9 @@ pub fn run(
     );
     let sharing_extensions = gpu::SHARING_EXTENSIONS.map(|extension| extension.as_ptr());
     let mut enabled_indexing = vk::PhysicalDeviceVulkan12Features::default()
-        .runtime_descriptor_array(true)
-        .shader_sampled_image_array_non_uniform_indexing(true)
-        .descriptor_binding_variable_descriptor_count(true);
+        .runtime_descriptor_array(reflection_arrays)
+        .shader_sampled_image_array_non_uniform_indexing(reflection_arrays)
+        .descriptor_binding_variable_descriptor_count(reflection_arrays);
     let device_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_info)
         .enabled_extension_names(&sharing_extensions)
@@ -488,7 +493,14 @@ pub fn run(
         .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT),
         "Vulkan GPU lacks D32 depth attachment support"
     );
-    let mut scene = SceneRenderer::new(&device, &vk_instance, physical_device, format, &config)?;
+    let mut scene = SceneRenderer::new(
+        &device,
+        &vk_instance,
+        physical_device,
+        format,
+        &config,
+        reflection_arrays,
+    )?;
     let mut skybox = None;
     let mut pending_skybox = Some(PendingSkybox::new(
         &scene,
@@ -681,6 +693,13 @@ pub fn run(
             if let Some(reload) = config_watcher.reload_if_changed() {
                 match reload {
                     Ok(next_config) => {
+                        if next_config.window.reflection_textures
+                            != config.window.reflection_textures
+                        {
+                            eprintln!(
+                                "Changed window.reflection_textures; restart Spacetop to apply the reflection texture mode"
+                            );
+                        }
                         let result: Result<Option<String>> = (|| {
                             let next_skybox_image = (next_config.background.image
                                 != config.background.image)
@@ -1355,6 +1374,7 @@ pub fn run(
             for panel in panel_frames.values() {
                 panel.texture.ownership(command_buffer, queue_family, true);
             }
+            scene.copy_reflection_textures(command_buffer, &scene_frame);
             for (eye, view) in eyes.iter_mut().zip(&views) {
                 let image_index = timings.measure("openxr/acquire-image", period, || {
                     eye.swapchain.acquire_image()

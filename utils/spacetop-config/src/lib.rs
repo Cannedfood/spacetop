@@ -52,6 +52,8 @@ pub struct FloorConfig {
 pub struct WindowConfig {
     pub pixels_per_degree: f32,
     pub texture_aa: WindowTextureAa,
+    pub reflection_textures: ReflectionTextures,
+    pub reflection_atlas_size: ReflectionAtlasSize,
 
     pub default_distance_m: f32,
     pub default_vertical_angle_degrees: f32,
@@ -69,6 +71,91 @@ pub struct WindowConfig {
     pub border_color: [f32; 4],
     pub cursor_close_border_color: [f32; 4],
     pub grabbed_border_color: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(try_from = "u32", into = "u32")]
+#[repr(u32)]
+pub enum ReflectionAtlasSize {
+    #[default]
+    Size256 = 256,
+    Size512 = 512,
+    Size1024 = 1024,
+    Size2048 = 2048,
+    Size4096 = 4096,
+    Size8192 = 8192,
+}
+
+impl ReflectionAtlasSize {
+    pub const OPTIONS: [Self; 6] = [
+        Self::Size256,
+        Self::Size512,
+        Self::Size1024,
+        Self::Size2048,
+        Self::Size4096,
+        Self::Size8192,
+    ];
+}
+
+impl From<ReflectionAtlasSize> for u32 {
+    fn from(size: ReflectionAtlasSize) -> Self {
+        size as u32
+    }
+}
+
+impl TryFrom<u32> for ReflectionAtlasSize {
+    type Error = anyhow::Error;
+
+    fn try_from(size: u32) -> Result<Self> {
+        Self::OPTIONS
+            .into_iter()
+            .find(|option| u32::from(*option) == size)
+            .context("window.reflection_atlas_size must be 256, 512, 1024, 2048, 4096, or 8192")
+    }
+}
+
+impl std::fmt::Display for ReflectionAtlasSize {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let size = u32::from(*self);
+        write!(formatter, "{size} x {size}")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReflectionTextures {
+    #[default]
+    Auto,
+    Atlas,
+    DescriptorArray,
+}
+
+impl ReflectionTextures {
+    pub const OPTIONS: [Self; 3] = [Self::Auto, Self::Atlas, Self::DescriptorArray];
+
+    pub fn use_descriptor_array(self, supported: bool) -> Result<bool> {
+        match self {
+            Self::Auto => Ok(supported),
+            Self::Atlas => Ok(false),
+            Self::DescriptorArray => {
+                ensure!(
+                    supported,
+                    "window.reflection_textures = \"descriptor_array\" requires runtime descriptor arrays, non-uniform sampled-image indexing, and variable descriptor counts"
+                );
+                Ok(true)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ReflectionTextures {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Auto => "Auto",
+            Self::Atlas => "Texture atlas",
+            Self::DescriptorArray => "Descriptor array",
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -204,6 +291,8 @@ impl Default for WindowConfig {
         Self {
             pixels_per_degree: 30.0,
             texture_aa: WindowTextureAa::default(),
+            reflection_textures: ReflectionTextures::default(),
+            reflection_atlas_size: ReflectionAtlasSize::default(),
 
             default_distance_m: 1.6,
             default_vertical_angle_degrees: -10.0,
@@ -560,6 +649,86 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reflection_atlas_sizes_round_trip_and_default_to_256() {
+        assert_eq!(
+            u32::from(AppConfig::default().window.reflection_atlas_size),
+            256
+        );
+        let legacy: AppConfig =
+            toml::from_str("[window]\nreflection_textures = \"atlas\"\n").unwrap();
+        assert_eq!(
+            legacy.window.reflection_atlas_size,
+            ReflectionAtlasSize::Size256
+        );
+        for size in ReflectionAtlasSize::OPTIONS {
+            let config: AppConfig = toml::from_str(&format!(
+                "[window]\nreflection_atlas_size = {}\n",
+                u32::from(size)
+            ))
+            .unwrap();
+            assert_eq!(config.window.reflection_atlas_size, size);
+            assert_eq!(
+                toml::from_str::<AppConfig>(&toml::to_string(&config).unwrap()).unwrap(),
+                config
+            );
+        }
+        for size in ["0", "1000", "-1", "\"1024\""] {
+            assert!(
+                toml::from_str::<AppConfig>(&format!("[window]\nreflection_atlas_size = {size}\n"))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn reflection_texture_modes_round_trip_and_select_supported_paths() {
+        assert_eq!(
+            AppConfig::default().window.reflection_textures,
+            ReflectionTextures::Auto
+        );
+        for (mode, name) in [
+            (ReflectionTextures::Auto, "auto"),
+            (ReflectionTextures::Atlas, "atlas"),
+            (ReflectionTextures::DescriptorArray, "descriptor_array"),
+        ] {
+            let config: AppConfig =
+                toml::from_str(&format!("[window]\nreflection_textures = \"{name}\"\n")).unwrap();
+            assert_eq!(config.window.reflection_textures, mode);
+            let encoded = toml::to_string(&config).unwrap();
+            assert_eq!(toml::from_str::<AppConfig>(&encoded).unwrap(), config);
+        }
+        assert!(ReflectionTextures::Auto.use_descriptor_array(true).unwrap());
+        assert!(
+            !ReflectionTextures::Auto
+                .use_descriptor_array(false)
+                .unwrap()
+        );
+        assert!(
+            !ReflectionTextures::Atlas
+                .use_descriptor_array(true)
+                .unwrap()
+        );
+        assert!(
+            !ReflectionTextures::Atlas
+                .use_descriptor_array(false)
+                .unwrap()
+        );
+        assert!(
+            ReflectionTextures::DescriptorArray
+                .use_descriptor_array(true)
+                .unwrap()
+        );
+        assert!(
+            ReflectionTextures::DescriptorArray
+                .use_descriptor_array(false)
+                .is_err()
+        );
+        assert!(
+            toml::from_str::<AppConfig>("[window]\nreflection_textures = \"invalid\"\n").is_err()
+        );
+    }
 
     #[test]
     fn creates_default_config_and_round_trips_defaults() {

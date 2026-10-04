@@ -4,6 +4,7 @@ use glam::{Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
 use half::f16;
 use openxr as xr;
 use rayon::prelude::*;
+use smithay::backend::allocator::Buffer;
 use std::{
     fs::{self, File},
     io::Read,
@@ -27,25 +28,54 @@ const SHADER_PARTS: [&str; 5] = [
 ];
 static NEXT_PANEL_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
+pub(crate) fn supports_reflection_arrays(
+    features: &vk::PhysicalDeviceVulkan12Features<'_>,
+) -> bool {
+    features.runtime_descriptor_array != 0
+        && features.shader_sampled_image_array_non_uniform_indexing != 0
+        && features.descriptor_binding_variable_descriptor_count != 0
+}
+
 fn shader(
     entry: &str,
     stage: naga::ShaderStage,
     trace_through_transparent_windows: bool,
+    reflection_arrays: bool,
 ) -> Result<Vec<u32>> {
-    let shader_source = SHADER_PARTS.join("\n").replace(
+    let mut shader_source = SHADER_PARTS.join("\n").replace(
         "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = false;",
         &format!(
             "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = {};",
             trace_through_transparent_windows
         ),
     );
+    if !reflection_arrays {
+        shader_source = shader_source
+            .replace("enable wgpu_binding_array;", "")
+            .replace(
+                "var panel_textures: binding_array<texture_2d<f32>>;",
+                "var panel_atlas: texture_2d<f32>;",
+            )
+            .replace(
+                "return textureSampleLevel(panel_textures[index], environment_filter, uv, 0.0);",
+                "let rect = window_buffer.windows[index].atlas_rect;\n\
+                 let pixel = clamp(rect.xy + uv * rect.zw, rect.xy + vec2(0.5),\n\
+                     rect.xy + rect.zw - vec2(0.5));\n\
+                 return textureSampleLevel(panel_atlas, environment_filter,\n\
+                     pixel / vec2<f32>(textureDimensions(panel_atlas)), 0.0);",
+            );
+    }
     let module = naga::front::wgsl::parse_str(&shader_source)
         .map_err(|error| anyhow::anyhow!(error.emit_to_string(&shader_source)))?;
     let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::IMMEDIATES
-            | naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
-            | naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING,
+            | if reflection_arrays {
+                naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
+                    | naga::valid::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+            } else {
+                naga::valid::Capabilities::empty()
+            },
     )
     .validate(&module)?;
     let options = naga::back::spv::Options {
@@ -842,6 +872,154 @@ impl Drop for RenderTarget {
     }
 }
 
+fn pack_reflection_atlas(
+    sizes: &[vk::Extent2D],
+    edge: u32,
+) -> Result<(vk::Extent2D, Vec<vk::Rect2D>)> {
+    ensure!(
+        edge > 0 && edge <= i32::MAX as u32,
+        "invalid reflection atlas size"
+    );
+    ensure!(
+        sizes.len() as u64 <= u64::from(edge) * u64::from(edge),
+        "too many windows to fit even one texel per window in the {edge}x{edge} reflection atlas"
+    );
+    let mut order = (0..sizes.len()).collect::<Vec<_>>();
+    for size in sizes {
+        ensure!(
+            size.width > 0 && size.height > 0,
+            "window texture dimensions must be nonzero"
+        );
+    }
+    order.sort_by_key(|&index| std::cmp::Reverse(sizes[index].height));
+    let pack = |scale: f64| -> Option<Vec<vk::Rect2D>> {
+        let mut rects = vec![vk::Rect2D::default(); sizes.len()];
+        let (mut x, mut y, mut row_height) = (0, 0, 0);
+        for &index in &order {
+            let size = vk::Extent2D {
+                width: ((f64::from(sizes[index].width) * scale).floor() as u32).max(1),
+                height: ((f64::from(sizes[index].height) * scale).floor() as u32).max(1),
+            };
+            if size.width > edge || size.height > edge {
+                return None;
+            }
+            if x + size.width > edge {
+                y += row_height;
+                x = 0;
+                row_height = 0;
+            }
+            if y + size.height > edge {
+                return None;
+            }
+            rects[index] = vk::Rect2D {
+                offset: vk::Offset2D {
+                    x: x as i32,
+                    y: y as i32,
+                },
+                extent: size,
+            };
+            x += size.width;
+            row_height = row_height.max(size.height);
+        }
+        Some(rects)
+    };
+    let extent = vk::Extent2D {
+        width: edge,
+        height: edge,
+    };
+    if let Some(rects) = pack(1.0) {
+        return Ok((extent, rects));
+    }
+    let mut rects = pack(0.0).context("cannot pack reflection atlas")?;
+    let (mut lower, mut upper) = (0.0, 1.0);
+    // Retain a proven fit: shelf packing can change discontinuously as rows reflow.
+    for _ in 0..32 {
+        let scale = (lower + upper) * 0.5;
+        if let Some(packed) = pack(scale) {
+            rects = packed;
+            lower = scale;
+        } else {
+            upper = scale;
+        }
+    }
+    Ok((extent, rects))
+}
+
+struct ReflectionAtlas {
+    device: ash::Device,
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    view: vk::ImageView,
+    extent: vk::Extent2D,
+    initialized: bool,
+}
+
+impl ReflectionAtlas {
+    fn new(renderer: &SceneRenderer, extent: vk::Extent2D) -> Result<Self> {
+        let device = &renderer.device;
+        let mut atlas = Self {
+            device: device.clone(),
+            image: vk::Image::null(),
+            memory: vk::DeviceMemory::null(),
+            view: vk::ImageView::null(),
+            extent,
+            initialized: false,
+        };
+        unsafe {
+            atlas.image = device
+                .create_image(
+                    &vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(vk::Format::R8G8B8A8_SRGB)
+                        .extent(vk::Extent3D {
+                            width: extent.width,
+                            height: extent.height,
+                            depth: 1,
+                        })
+                        .mip_levels(1)
+                        .array_layers(1)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::OPTIMAL)
+                        .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED),
+                    None,
+                )
+                .context("create reflection atlas image")?;
+            let requirements = device.get_image_memory_requirements(atlas.image);
+            atlas.memory = device
+                .allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(requirements.size)
+                        .memory_type_index(memory_type(
+                            &renderer.instance,
+                            renderer.physical_device,
+                            requirements.memory_type_bits,
+                            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                        )?),
+                    None,
+                )
+                .context("allocate reflection atlas memory")?;
+            device.bind_image_memory(atlas.image, atlas.memory, 0)?;
+            atlas.view = image_view(
+                device,
+                atlas.image,
+                vk::Format::R8G8B8A8_SRGB,
+                vk::ImageAspectFlags::COLOR,
+            )?;
+        }
+        Ok(atlas)
+    }
+}
+
+impl Drop for ReflectionAtlas {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_image_view(self.view, None);
+            self.device.destroy_image(self.image, None);
+            self.device.free_memory(self.memory, None);
+        }
+    }
+}
+
 pub(crate) struct SceneRenderer {
     device: ash::Device,
     instance: ash::Instance,
@@ -865,6 +1043,10 @@ pub(crate) struct SceneRenderer {
     environment_skybox_view: vk::ImageView,
     skybox_diffuse_irradiance: Vec3,
     max_environment_windows: u32,
+    reflection_arrays: bool,
+    atlas: Option<ReflectionAtlas>,
+    atlas_rects: Vec<vk::Rect2D>,
+    atlas_size: u32,
     sampler: vk::Sampler,
     sky_sampler: vk::Sampler,
     layout: vk::PipelineLayout,
@@ -907,6 +1089,7 @@ struct WindowGpuData {
     center_width: [f32; 4],
     right_height: [f32; 4],
     up: [f32; 4],
+    atlas_rect: [f32; 4],
 }
 
 #[repr(C, align(16))]
@@ -965,6 +1148,7 @@ impl SceneRenderer {
         physical_device: vk::PhysicalDevice,
         format: vk::Format,
         config: &AppConfig,
+        reflection_arrays: bool,
     ) -> Result<Self> {
         let mut renderer = Self {
             device: device.clone(),
@@ -989,6 +1173,10 @@ impl SceneRenderer {
             environment_skybox_view: vk::ImageView::null(),
             skybox_diffuse_irradiance: Vec3::ONE,
             max_environment_windows: 0,
+            reflection_arrays,
+            atlas: None,
+            atlas_rects: Vec::new(),
+            atlas_size: config.window.reflection_atlas_size.into(),
             sampler: vk::Sampler::null(),
             sky_sampler: vk::Sampler::null(),
             layout: vk::PipelineLayout::null(),
@@ -1000,6 +1188,7 @@ impl SceneRenderer {
             window_padding_px: config.window.effective_padding_px(),
             max_border_width_px: config.window.max_border_width_px(),
         };
+        renderer.validate_atlas_size(renderer.atlas_size)?;
         let attachments = [
             vk::AttachmentDescription::default()
                 .format(format)
@@ -1079,16 +1268,19 @@ impl SceneRenderer {
             let limits = instance
                 .get_physical_device_properties(physical_device)
                 .limits;
-            renderer.max_environment_windows = limits
-                .max_per_stage_descriptor_sampled_images
-                .min(limits.max_descriptor_set_sampled_images)
-                .saturating_sub(2)
-                .min(
-                    limits
-                        .max_storage_buffer_range
-                        .saturating_sub(std::mem::size_of::<WindowBufferHeader>() as u32)
-                        / std::mem::size_of::<WindowGpuData>() as u32,
-                );
+            let buffer_capacity = limits
+                .max_storage_buffer_range
+                .saturating_sub(std::mem::size_of::<WindowBufferHeader>() as u32)
+                / std::mem::size_of::<WindowGpuData>() as u32;
+            renderer.max_environment_windows = if reflection_arrays {
+                limits
+                    .max_per_stage_descriptor_sampled_images
+                    .min(limits.max_descriptor_set_sampled_images)
+                    .saturating_sub(2)
+                    .min(buffer_capacity)
+            } else {
+                buffer_capacity
+            };
             ensure!(
                 renderer.max_environment_windows > 0,
                 "Vulkan device has no capacity for reflected window descriptors"
@@ -1117,7 +1309,11 @@ impl SceneRenderer {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(4)
                     .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .descriptor_count(renderer.max_environment_windows)
+                    .descriptor_count(if reflection_arrays {
+                        renderer.max_environment_windows
+                    } else {
+                        1
+                    })
                     .stage_flags(vk::ShaderStageFlags::FRAGMENT),
             ];
             let binding_flags = [
@@ -1125,7 +1321,11 @@ impl SceneRenderer {
                 vk::DescriptorBindingFlags::empty(),
                 vk::DescriptorBindingFlags::empty(),
                 vk::DescriptorBindingFlags::empty(),
-                vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT,
+                if reflection_arrays {
+                    vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT
+                } else {
+                    vk::DescriptorBindingFlags::empty()
+                },
             ];
             let mut binding_flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
                 .binding_flags(&binding_flags);
@@ -1234,7 +1434,68 @@ impl SceneRenderer {
         Ok(renderer)
     }
 
+    fn validate_atlas_size(&self, size: u32) -> Result<()> {
+        if self.reflection_arrays {
+            return Ok(());
+        }
+        let limit = unsafe {
+            self.instance
+                .get_physical_device_properties(self.physical_device)
+        }
+        .limits
+        .max_image_dimension2_d;
+        ensure!(
+            size <= limit,
+            "reflection atlas size {size} exceeds this GPU's maximum 2D image dimension {limit}"
+        );
+        let properties = unsafe {
+            self.instance.get_physical_device_format_properties(
+                self.physical_device,
+                vk::Format::R8G8B8A8_SRGB,
+            )
+        };
+        let mut modifiers = vk::DrmFormatModifierPropertiesListEXT::default();
+        unsafe {
+            self.instance.get_physical_device_format_properties2(
+                self.physical_device,
+                vk::Format::R8G8B8A8_SRGB,
+                &mut vk::FormatProperties2::default().push_next(&mut modifiers),
+            );
+        }
+        let mut entries = vec![
+            vk::DrmFormatModifierPropertiesEXT::default();
+            modifiers.drm_format_modifier_count as usize
+        ];
+        modifiers.p_drm_format_modifier_properties = entries.as_mut_ptr();
+        unsafe {
+            self.instance.get_physical_device_format_properties2(
+                self.physical_device,
+                vk::Format::R8G8B8A8_SRGB,
+                &mut vk::FormatProperties2::default().push_next(&mut modifiers),
+            );
+        }
+        let source_features = entries
+            .iter()
+            .find(|modifier| modifier.drm_format_modifier == 0)
+            .context("GPU lacks linear DRM-modifier support for reflection atlas sources")?
+            .drm_format_modifier_tiling_features;
+        ensure!(
+            properties
+                .optimal_tiling_features
+                .contains(vk::FormatFeatureFlags::BLIT_DST | vk::FormatFeatureFlags::SAMPLED_IMAGE)
+                && source_features.contains(
+                    vk::FormatFeatureFlags::BLIT_SRC
+                        | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR
+                ),
+            "GPU does not support linear-filtered sRGB window blits into the reflection atlas"
+        );
+        Ok(())
+    }
+
     pub fn update_config(&mut self, config: &AppConfig) -> Result<()> {
+        let atlas_size = config.window.reflection_atlas_size.into();
+        self.validate_atlas_size(atlas_size)?;
+        self.atlas_size = atlas_size;
         self.trace_through_transparent_windows = config.floor.trace_through_transparent_windows;
         self.window_padding_px = config.window.effective_padding_px();
         self.max_border_width_px = config.window.max_border_width_px();
@@ -1267,14 +1528,42 @@ impl SceneRenderer {
 
     pub fn prepare_frame(&mut self, frame: &SceneFrame<'_>) -> Result<()> {
         let skybox = frame.skybox.context("environment pass requires a skybox")?;
-        let window_count = u32::try_from(frame.panels.len())
-            .context("too many windows for Vulkan descriptor indexing")?;
+        let window_count =
+            u32::try_from(frame.panels.len()).context("too many windows for Vulkan reflections")?;
         ensure!(
             window_count <= self.max_environment_windows,
             "window count {window_count} exceeds this GPU's reflected-window capacity {}",
             self.max_environment_windows
         );
-        let descriptor_count = window_count.max(1);
+        let mut atlas_changed = false;
+        if !self.reflection_arrays {
+            let sizes = frame
+                .panels
+                .iter()
+                .map(|(texture, _)| {
+                    let size = texture.shared.dmabuf.size();
+                    vk::Extent2D {
+                        width: size.w as u32,
+                        height: size.h as u32,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let (extent, rects) = pack_reflection_atlas(&sizes, self.atlas_size)?;
+            if self
+                .atlas
+                .as_ref()
+                .is_none_or(|atlas| atlas.extent != extent)
+            {
+                self.atlas = Some(ReflectionAtlas::new(self, extent)?);
+                atlas_changed = true;
+            }
+            self.atlas_rects = rects;
+        }
+        let descriptor_count = if self.reflection_arrays {
+            window_count.max(1)
+        } else {
+            1
+        };
         let descriptor_changed = descriptor_count > self.environment_descriptor_capacity;
         if descriptor_changed {
             unsafe {
@@ -1307,12 +1596,14 @@ impl SceneRenderer {
                 let mut variable_count =
                     vk::DescriptorSetVariableDescriptorCountAllocateInfo::default()
                         .descriptor_counts(&counts);
-                self.environment_descriptor = self.device.allocate_descriptor_sets(
-                    &vk::DescriptorSetAllocateInfo::default()
-                        .descriptor_pool(self.environment_pool)
-                        .set_layouts(&[self.environment_descriptor_layout])
-                        .push_next(&mut variable_count),
-                )?[0];
+                let layouts = [self.environment_descriptor_layout];
+                let mut allocation = vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.environment_pool)
+                    .set_layouts(&layouts);
+                if self.reflection_arrays {
+                    allocation = allocation.push_next(&mut variable_count);
+                }
+                self.environment_descriptor = self.device.allocate_descriptor_sets(&allocation)?[0];
                 self.environment_descriptor_capacity = descriptor_count;
                 self.environment_panel_ids.clear();
                 self.environment_skybox_view = vk::ImageView::null();
@@ -1377,7 +1668,8 @@ impl SceneRenderer {
         let windows = frame
             .panels
             .iter()
-            .map(|(_, geometry)| {
+            .enumerate()
+            .map(|(index, (_, geometry))| {
                 let pose = geometry.pose;
                 let right = pose.orientation() * Vec3::X;
                 let up = pose.orientation() * Vec3::Y;
@@ -1387,6 +1679,17 @@ impl SceneRenderer {
                     center_width: [pose.center.x, pose.center.y, pose.center.z, pose.width_m],
                     right_height: [right.x, right.y, right.z, height],
                     up: [up.x, up.y, up.z, 0.0],
+                    atlas_rect: if self.reflection_arrays {
+                        [0.0; 4]
+                    } else {
+                        let rect = self.atlas_rects[index];
+                        [
+                            rect.offset.x as f32,
+                            rect.offset.y as f32,
+                            rect.extent.width as f32,
+                            rect.extent.height as f32,
+                        ]
+                    },
                 }
             })
             .collect::<Vec<_>>();
@@ -1468,22 +1771,34 @@ impl SceneRenderer {
                 );
                 self.environment_skybox_view = skybox.view;
             }
-            if descriptor_changed || skybox_changed || panel_ids != self.environment_panel_ids {
-                let window_images = frame
-                    .panels
-                    .iter()
-                    .map(|(texture, _)| {
+            if descriptor_changed
+                || atlas_changed
+                || skybox_changed
+                || panel_ids != self.environment_panel_ids
+            {
+                let window_images = if let Some(atlas) = &self.atlas {
+                    vec![
                         vk::DescriptorImageInfo::default()
-                            .image_view(texture.view)
-                            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    })
-                    .chain(std::iter::repeat_n(
-                        vk::DescriptorImageInfo::default()
-                            .image_view(skybox.view)
+                            .image_view(atlas.view)
                             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-                        self.environment_descriptor_capacity as usize - panel_ids.len(),
-                    ))
-                    .collect::<Vec<_>>();
+                    ]
+                } else {
+                    frame
+                        .panels
+                        .iter()
+                        .map(|(texture, _)| {
+                            vk::DescriptorImageInfo::default()
+                                .image_view(texture.view)
+                                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        })
+                        .chain(std::iter::repeat_n(
+                            vk::DescriptorImageInfo::default()
+                                .image_view(skybox.view)
+                                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                            self.environment_descriptor_capacity as usize - panel_ids.len(),
+                        ))
+                        .collect::<Vec<_>>()
+                };
                 self.device.update_descriptor_sets(
                     &[vk::WriteDescriptorSet::default()
                         .dst_set(self.environment_descriptor)
@@ -1496,6 +1811,156 @@ impl SceneRenderer {
             }
         }
         Ok(())
+    }
+
+    pub unsafe fn copy_reflection_textures(
+        &mut self,
+        command: vk::CommandBuffer,
+        frame: &SceneFrame<'_>,
+    ) {
+        let Some(atlas) = &mut self.atlas else {
+            return;
+        };
+        let range = image_range(vk::ImageAspectFlags::COLOR);
+        let atlas_barrier = vk::ImageMemoryBarrier::default()
+            .image(atlas.image)
+            .subresource_range(range)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                command,
+                if atlas.initialized {
+                    vk::PipelineStageFlags::FRAGMENT_SHADER
+                } else {
+                    vk::PipelineStageFlags::TOP_OF_PIPE
+                },
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[atlas_barrier
+                    .old_layout(if atlas.initialized {
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+                    } else {
+                        vk::ImageLayout::UNDEFINED
+                    })
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_access_mask(if atlas.initialized {
+                        vk::AccessFlags::SHADER_READ
+                    } else {
+                        vk::AccessFlags::empty()
+                    })
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)],
+            );
+            for ((texture, _), rect) in frame.panels.iter().zip(&self.atlas_rects) {
+                let source_barrier = vk::ImageMemoryBarrier::default()
+                    .image(texture.shared.image)
+                    .subresource_range(range)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+                self.device.cmd_pipeline_barrier(
+                    command,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[source_barrier
+                        .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::SHADER_READ)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)],
+                );
+                let layers = vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .layer_count(1);
+                let source_size = texture.shared.dmabuf.size();
+                if source_size.w as u32 == rect.extent.width
+                    && source_size.h as u32 == rect.extent.height
+                {
+                    self.device.cmd_copy_image(
+                        command,
+                        texture.shared.image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        atlas.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[vk::ImageCopy::default()
+                            .src_subresource(layers)
+                            .dst_subresource(layers)
+                            .dst_offset(vk::Offset3D {
+                                x: rect.offset.x,
+                                y: rect.offset.y,
+                                z: 0,
+                            })
+                            .extent(vk::Extent3D {
+                                width: rect.extent.width,
+                                height: rect.extent.height,
+                                depth: 1,
+                            })],
+                    );
+                } else {
+                    self.device.cmd_blit_image(
+                        command,
+                        texture.shared.image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        atlas.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[vk::ImageBlit::default()
+                            .src_subresource(layers)
+                            .src_offsets([
+                                vk::Offset3D::default(),
+                                vk::Offset3D {
+                                    x: source_size.w,
+                                    y: source_size.h,
+                                    z: 1,
+                                },
+                            ])
+                            .dst_subresource(layers)
+                            .dst_offsets([
+                                vk::Offset3D {
+                                    x: rect.offset.x,
+                                    y: rect.offset.y,
+                                    z: 0,
+                                },
+                                vk::Offset3D {
+                                    x: rect.offset.x + rect.extent.width as i32,
+                                    y: rect.offset.y + rect.extent.height as i32,
+                                    z: 1,
+                                },
+                            ])],
+                        vk::Filter::LINEAR,
+                    );
+                }
+                self.device.cmd_pipeline_barrier(
+                    command,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[source_barrier
+                        .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ)],
+                );
+            }
+            self.device.cmd_pipeline_barrier(
+                command,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[atlas_barrier
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)],
+            );
+        }
+        atlas.initialized = true;
     }
 
     fn pipeline(
@@ -1512,11 +1977,13 @@ impl SceneRenderer {
             vertex_name.to_str()?,
             naga::ShaderStage::Vertex,
             trace_through_transparent_windows,
+            self.reflection_arrays,
         )?;
         let fragment_code = shader(
             fragment,
             naga::ShaderStage::Fragment,
             trace_through_transparent_windows,
+            self.reflection_arrays,
         )?;
         let vertex = unsafe {
             self.device.create_shader_module(
@@ -1859,20 +2326,167 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shaders_compile() {
-        for (entry, stage) in [
-            ("sky_vertex", naga::ShaderStage::Vertex),
-            ("vertex", naga::ShaderStage::Vertex),
-            ("window", naga::ShaderStage::Fragment),
-            ("cursor", naga::ShaderStage::Fragment),
-            ("environment", naga::ShaderStage::Fragment),
+    fn reflection_arrays_require_all_optional_features() {
+        let supported = vk::PhysicalDeviceVulkan12Features::default()
+            .runtime_descriptor_array(true)
+            .shader_sampled_image_array_non_uniform_indexing(true)
+            .descriptor_binding_variable_descriptor_count(true);
+        assert!(supports_reflection_arrays(&supported));
+        for unsupported in [
+            supported.runtime_descriptor_array(false),
+            supported.shader_sampled_image_array_non_uniform_indexing(false),
+            supported.descriptor_binding_variable_descriptor_count(false),
         ] {
-            assert_eq!(shader(entry, stage, false).unwrap()[0], 0x0723_0203);
+            assert!(!supports_reflection_arrays(&unsupported));
         }
-        assert_eq!(
-            shader("environment", naga::ShaderStage::Fragment, true).unwrap()[0],
-            0x0723_0203
+    }
+
+    #[test]
+    fn reflection_atlas_packs_native_sizes_without_overlap() {
+        for sizes in [
+            vec![],
+            vec![vk::Extent2D {
+                width: 1,
+                height: 1,
+            }],
+            vec![
+                vk::Extent2D {
+                    width: 5,
+                    height: 2,
+                },
+                vk::Extent2D {
+                    width: 3,
+                    height: 8,
+                },
+                vk::Extent2D {
+                    width: 7,
+                    height: 4,
+                },
+                vk::Extent2D {
+                    width: 1,
+                    height: 1,
+                },
+            ],
+            vec![
+                vk::Extent2D {
+                    width: 8,
+                    height: 8
+                };
+                4
+            ],
+        ] {
+            let (extent, rects) = pack_reflection_atlas(&sizes, 16).unwrap();
+            assert_eq!(extent.width, 16);
+            assert_eq!(extent.height, 16);
+            assert_eq!(rects.len(), sizes.len());
+            let mut occupied = std::collections::HashSet::new();
+            for (size, rect) in sizes.iter().zip(rects) {
+                assert!(size == &rect.extent);
+                for y in rect.offset.y as u32..rect.offset.y as u32 + size.height {
+                    for x in rect.offset.x as u32..rect.offset.x as u32 + size.width {
+                        assert!(x < extent.width && y < extent.height);
+                        assert!(occupied.insert((x, y)));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reflection_atlas_rejects_invalid_sizes_and_capacity_overflow() {
+        for size in [
+            vk::Extent2D {
+                width: 0,
+                height: 1,
+            },
+            vk::Extent2D {
+                width: 1,
+                height: 0,
+            },
+        ] {
+            assert!(pack_reflection_atlas(&[size], 16).is_err());
+        }
+        assert!(
+            pack_reflection_atlas(
+                &[vk::Extent2D {
+                    width: 1,
+                    height: 1
+                }; 257],
+                16
+            )
+            .is_err()
         );
+        assert!(pack_reflection_atlas(&[], 0).is_err());
+    }
+
+    #[test]
+    fn fixed_atlas_downscales_all_windows_proportionally() {
+        let sizes = [vk::Extent2D {
+            width: 1920,
+            height: 1080,
+        }; 3];
+        let (extent, rects) = pack_reflection_atlas(&sizes, 1024).unwrap();
+        assert_eq!(extent.width, 1024);
+        assert_eq!(extent.height, 1024);
+        assert_eq!(rects.len(), 3);
+        let mut occupied = std::collections::HashSet::new();
+        for rect in &rects {
+            assert!(rect.extent.width > 1 && rect.extent.width < 1920);
+            assert!(rect.extent.height > 1 && rect.extent.height < 1080);
+            assert!(
+                (rect.extent.width as f64 / rect.extent.height as f64 - 1920.0 / 1080.0).abs()
+                    < 0.01
+            );
+            assert!(rect.extent == rects[0].extent);
+            for y in rect.offset.y as u32..rect.offset.y as u32 + rect.extent.height {
+                for x in rect.offset.x as u32..rect.offset.x as u32 + rect.extent.width {
+                    assert!(x < 1024 && y < 1024);
+                    assert!(occupied.insert((x, y)));
+                }
+            }
+        }
+        let (_, minimum) = pack_reflection_atlas(
+            &[vk::Extent2D {
+                width: 100,
+                height: 1,
+            }; 16],
+            4,
+        )
+        .unwrap();
+        assert_eq!(minimum.len(), 16);
+        assert!(
+            minimum
+                .iter()
+                .all(|rect| rect.extent.width == 1 && rect.extent.height == 1)
+        );
+    }
+
+    #[test]
+    fn shaders_compile() {
+        for reflection_arrays in [false, true] {
+            for (entry, stage) in [
+                ("sky_vertex", naga::ShaderStage::Vertex),
+                ("vertex", naga::ShaderStage::Vertex),
+                ("window", naga::ShaderStage::Fragment),
+                ("cursor", naga::ShaderStage::Fragment),
+                ("environment", naga::ShaderStage::Fragment),
+            ] {
+                assert_eq!(
+                    shader(entry, stage, false, reflection_arrays).unwrap()[0],
+                    0x0723_0203
+                );
+            }
+            assert_eq!(
+                shader(
+                    "environment",
+                    naga::ShaderStage::Fragment,
+                    true,
+                    reflection_arrays
+                )
+                .unwrap()[0],
+                0x0723_0203
+            );
+        }
     }
 
     #[test]

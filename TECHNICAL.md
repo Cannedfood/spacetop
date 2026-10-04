@@ -116,7 +116,8 @@ implemented.
 GPU sharing is mandatory and uses the OpenXR runtime's Vulkan GPU.
 Smithay composites app buffers using GLES into linear RGBA DMA-BUF images.
 The application's Vulkan renderer imports and samples those images directly,
-without panel copies or CPU readback. It draws textured spatial panels and the
+without CPU readback. Ordinary panel rendering uses the imported images without
+copies; reflections may use the GPU-copy atlas fallback described below. It draws textured spatial panels and the
 targeting cross into two eye-resolution OpenXR swapchains and submits one stereo
 projection layer. OpenXR handles final headset composition, not window quads.
 Each eye uses the runtime's recommended dimensions, predicted pose and asymmetric
@@ -183,11 +184,36 @@ device feedback. Shared-memory client buffers still require an upload to GLES.
 The GLES renderer and Vulkan session use the same DRM render node; the XR
 runtime itself does not need to support GLES.
 
-The renderer requires Vulkan 1.2, including runtime descriptor arrays,
-non-uniform sampled-image-array indexing, and variable descriptor counts. It
-queries and enables those optional Vulkan 1.2 features at startup and fails with
-a clear error when the runtime-selected device lacks them. Reflected window
-count is limited by the selected GPU's sampled-image and storage-buffer limits.
+The renderer requires Vulkan 1.2. It queries runtime descriptor arrays,
+non-uniform sampled-image-array indexing, and variable descriptor counts at
+startup. `window.reflection_textures = "auto"` uses direct descriptor-array
+sampling when all three optional features are supported, otherwise an sRGB
+texture atlas. `"atlas"` forces the fallback; `"descriptor_array"` requires
+those features and reports a clear error if any are missing. SpaceSettings
+exposes this setting; changes require restarting Spacetop.
+
+The atlas has a fixed square extent set by `window.reflection_atlas_size`
+(default 256; choices 256, 512, 1024, 2048, 4096, 8192). SpaceSettings hides its
+dropdown unless `window.reflection_textures` is explicitly `"atlas"`, but the
+configured extent also applies to the automatic fallback. Size changes are
+hot-reloaded; dimensions exceeding the GPU's image limit are rejected.
+
+The atlas packs window images in height-sorted rows. If native-size images do
+not fit, a bounded scale search reduces all images by a common factor, rounding
+dimensions down with a one-texel minimum. Every window retains a rectangle.
+Unscaled images use GPU copies; scaled images use linear-filtered sRGB blits.
+The GPU's linear DRM-modifier source blit/filter support and optimal-tiling
+destination blit support are checked explicitly.
+It populates all current images once per renderable frame after foreign
+ownership acquisition and before either eye is drawn. Transfer barriers restore
+the imported images for direct panel sampling and transition the atlas for
+reflection sampling. Per-window pixel rectangles clamp filtering to texel centers
+to avoid bleeding between neighbors, preserving sRGB decoding and premultiplied
+alpha in both reflection modes. Empty scenes retain the configured atlas extent.
+More windows than atlas texels or an allocation failure are reported explicitly,
+with no dropped windows. Descriptor-array
+window count is limited by sampled-image and storage-buffer limits; atlas window
+count is limited by storage-buffer limits and available atlas space.
 It also requires the external-memory FD,
 DMA-BUF, DRM-format-modifier, physical-device-DRM, image-format-list, and
 foreign-queue-family device extensions. It also needs a driver that supports
