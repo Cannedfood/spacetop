@@ -8,7 +8,6 @@ use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths, get_languages
 use iced::{
     Background, Border, Color, Element, Length, Theme,
     alignment::Horizontal,
-    padding::right,
     widget::{button, column, container, grid, image, row, scrollable, svg, text, text_input},
 };
 
@@ -476,25 +475,19 @@ impl Launcher {
             "Close launcher",
             iced::widget::tooltip::Position::Bottom,
         );
-        let count = format!("{} APPLICATIONS", apps.len());
-        let footer = row![
-            text(count).size(11).color(MUTED),
-            iced::widget::Space::new().width(Length::Fill),
-            text(self.status.as_str()).size(12).color(ACCENT),
-        ]
-        .align_y(iced::Alignment::Center);
 
         container(
             column![
-                row![search, close_button]
-                    .spacing(10)
-                    .align_y(iced::Alignment::Center),
-                scrollable(container(cards).width(Length::Fill).padding(right(16)))
-                    .height(Length::Fill),
-                footer
+                container(
+                    row![search, close_button]
+                        .spacing(10)
+                        .align_y(iced::Alignment::Center),
+                )
+                .padding([18, 20]),
+                scrollable(container(cards).width(Length::Fill).padding([12, 20]))
+                    .height(Length::Fill)
             ]
-            .spacing(20)
-            .padding(26),
+            .spacing(0),
         )
         .width(Length::Fill)
         .height(Length::Fill)

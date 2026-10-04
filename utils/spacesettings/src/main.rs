@@ -700,7 +700,10 @@ impl SettingsApp {
                             Message::BackgroundChanged,
                         )
                         .placeholder("Select an EXR background")
-                        .padding([9, 11])
+                        .menu_height(Length::Fixed(
+                            (self.backgrounds.len().saturating_add(1) as f32 * 38.0).min(280.0),
+                        ))
+                        .padding([9, 20])
                         .width(Length::Fill),
                     ]
                     .spacing(8)
@@ -1231,19 +1234,22 @@ impl SettingsApp {
 
         container(
             column![
-                row![
-                    column![
-                        text("SPACE SETTINGS").size(12).color(ACCENT),
-                        text("Configuration").size(25).color(TEXT),
-                        text("~/.config/spacetop/config.toml").size(12).color(MUTED),
+                container(
+                    row![
+                        column![
+                            text("SPACE SETTINGS").size(12).color(ACCENT),
+                            text("Configuration").size(25).color(TEXT),
+                            text("~/.config/spacetop/config.toml").size(12).color(MUTED),
+                        ]
+                        .spacing(4),
+                        iced::widget::Space::new().width(Length::Fill),
+                        button(text("Open in Text Editor").size(13))
+                            .on_press(Message::OpenConfigFile)
+                            .style(quiet_button),
                     ]
-                    .spacing(4),
-                    iced::widget::Space::new().width(Length::Fill),
-                    button(text("Open in Text Editor").size(13))
-                        .on_press(Message::OpenConfigFile)
-                        .style(quiet_button),
-                ]
-                .align_y(iced::Alignment::Center),
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding([20, 24]),
                 scrollable(
                     column![
                         application,
@@ -1253,13 +1259,13 @@ impl SettingsApp {
                         window_scale,
                         windows
                     ]
-                    .spacing(14),
+                    .spacing(14)
+                    .padding([8, 24]),
                 )
                 .height(Length::Fill),
-                footer,
+                container(footer).padding([16, 24]),
             ]
-            .spacing(18)
-            .padding(24),
+            .spacing(0),
         )
         .width(Length::Fill)
         .height(Length::Fill)
