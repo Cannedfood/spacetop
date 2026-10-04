@@ -790,7 +790,7 @@ pub(super) fn atlas_dirty_indices(
         .collect()
 }
 
-pub(super) struct ReflectionAtlas {
+pub(super) struct ReflectionAtlasImage {
     device: ash::Device,
     pub(super) image: vk::Image,
     memory: vk::DeviceMemory,
@@ -799,7 +799,7 @@ pub(super) struct ReflectionAtlas {
     pub(super) initialized: bool,
 }
 
-impl ReflectionAtlas {
+impl ReflectionAtlasImage {
     pub(super) fn new(renderer: &SceneRenderer, extent: vk::Extent2D) -> Result<Self> {
         let device = &renderer.device;
         let mut atlas = Self {
@@ -855,7 +855,7 @@ impl ReflectionAtlas {
     }
 }
 
-impl Drop for ReflectionAtlas {
+impl Drop for ReflectionAtlasImage {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_image_view(self.view, None);

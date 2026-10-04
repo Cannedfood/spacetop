@@ -3,12 +3,12 @@ use super::*;
 impl SceneRenderer {
     pub fn prepare_frame(&mut self, frame: &SceneFrame<'_>) -> Result<()> {
         let skybox = frame.skybox.context("environment pass requires a skybox")?;
-        if self.environment_dim != frame.environment_dim {
+        if self.environment.dim != frame.environment_dim {
             let byte_offset =
                 std::mem::offset_of!(FloorUniform, ground_radius) + 2 * std::mem::size_of::<f32>();
             unsafe {
                 let mapped = self.device.map_memory(
-                    self.floor_memory,
+                    self.floor.memory,
                     0,
                     std::mem::size_of::<FloorUniform>() as u64,
                     vk::MemoryMapFlags::empty(),
@@ -18,16 +18,16 @@ impl SceneRenderer {
                     (mapped.cast::<u8>()).add(byte_offset),
                     std::mem::size_of::<f32>(),
                 );
-                self.device.unmap_memory(self.floor_memory);
+                self.device.unmap_memory(self.floor.memory);
             }
-            self.environment_dim = frame.environment_dim;
+            self.environment.dim = frame.environment_dim;
         }
         let window_count =
             u32::try_from(frame.panels.len()).context("too many windows for Vulkan reflections")?;
         ensure!(
-            window_count <= self.max_environment_windows,
+            window_count <= self.environment.max_windows,
             "window count {window_count} exceeds this GPU's reflected-window capacity {}",
-            self.max_environment_windows
+            self.environment.max_windows
         );
         let sizes = frame
             .panels
@@ -40,39 +40,40 @@ impl SceneRenderer {
                 }
             })
             .collect::<Vec<_>>();
-        let (extent, rects) = pack_reflection_atlas(&sizes, self.atlas_size)?;
+        let (extent, rects) = pack_reflection_atlas(&sizes, self.atlas.size)?;
         let atlas_changed = self
             .atlas
+            .texture
             .as_ref()
             .is_none_or(|atlas| atlas.extent != extent);
-        let layout_changed = rects != self.atlas_rects;
+        let layout_changed = rects != self.atlas.rects;
         if atlas_changed {
-            self.atlas = Some(ReflectionAtlas::new(self, extent)?);
+            self.atlas.texture = Some(ReflectionAtlasImage::new(self, extent)?);
         }
         let panel_ids = frame
             .panels
             .iter()
             .map(|(texture, _)| texture.id)
             .collect::<Vec<_>>();
-        self.atlas_dirty_indices = atlas_dirty_indices(
-            &self.atlas_panel_ids,
+        self.atlas.dirty_indices = atlas_dirty_indices(
+            &self.atlas.panel_ids,
             &panel_ids,
             layout_changed,
             atlas_changed,
         );
-        self.atlas_rects = rects;
-        self.atlas_panel_ids = panel_ids;
+        self.atlas.rects = rects;
+        self.atlas.panel_ids = panel_ids;
         let descriptor_count = 1;
-        let descriptor_changed = descriptor_count > self.environment_descriptor_capacity;
+        let descriptor_changed = descriptor_count > self.environment.descriptor_capacity;
         if descriptor_changed {
             unsafe {
-                if self.environment_pool != vk::DescriptorPool::null() {
+                if self.environment.pool != vk::DescriptorPool::null() {
                     self.device
-                        .destroy_descriptor_pool(self.environment_pool, None);
-                    self.environment_pool = vk::DescriptorPool::null();
-                    self.environment_descriptor = vk::DescriptorSet::null();
+                        .destroy_descriptor_pool(self.environment.pool, None);
+                    self.environment.pool = vk::DescriptorPool::null();
+                    self.environment.descriptor = vk::DescriptorSet::null();
                 }
-                self.environment_pool = self.device.create_descriptor_pool(
+                self.environment.pool = self.device.create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
                         .max_sets(1)
                         .pool_sizes(&[
@@ -93,18 +94,18 @@ impl SceneRenderer {
                 )?;
                 let layouts = [self.environment_descriptor_layout];
                 let allocation = vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(self.environment_pool)
+                    .descriptor_pool(self.environment.pool)
                     .set_layouts(&layouts);
-                self.environment_descriptor = self.device.allocate_descriptor_sets(&allocation)?[0];
-                self.environment_descriptor_capacity = descriptor_count;
-                self.environment_skybox_view = vk::ImageView::null();
+                self.environment.descriptor = self.device.allocate_descriptor_sets(&allocation)?[0];
+                self.environment.descriptor_capacity = descriptor_count;
+                self.environment.skybox_view = vk::ImageView::null();
             }
         }
 
         let required_buffer_size = std::mem::size_of::<WindowBufferHeader>() as u64
             + frame.panels.len() as u64 * std::mem::size_of::<WindowGpuData>() as u64;
         let mut buffer_changed = false;
-        if required_buffer_size > self.environment_buffer_size {
+        if required_buffer_size > self.environment.buffer_size {
             let (buffer, memory, allocation_size) = unsafe {
                 let buffer = self.device.create_buffer(
                     &vk::BufferCreateInfo::default()
@@ -145,14 +146,14 @@ impl SceneRenderer {
                 (buffer, memory, required_buffer_size)
             };
             unsafe {
-                if self.environment_buffer != vk::Buffer::null() {
-                    self.device.destroy_buffer(self.environment_buffer, None);
-                    self.device.free_memory(self.environment_memory, None);
+                if self.environment.buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(self.environment.buffer, None);
+                    self.device.free_memory(self.environment.memory, None);
                 }
             }
-            self.environment_buffer = buffer;
-            self.environment_memory = memory;
-            self.environment_buffer_size = allocation_size;
+            self.environment.buffer = buffer;
+            self.environment.memory = memory;
+            self.environment.buffer_size = allocation_size;
             buffer_changed = true;
         }
 
@@ -171,7 +172,7 @@ impl SceneRenderer {
                     right_height: [right.x, right.y, right.z, height],
                     up: [up.x, up.y, up.z, 0.0],
                     atlas_rect: {
-                        let rect = self.atlas_rects[index];
+                        let rect = self.atlas.rects[index];
                         [
                             rect.offset.x as f32,
                             rect.offset.y as f32,
@@ -188,12 +189,13 @@ impl SceneRenderer {
         };
         let atlas_view = self
             .atlas
+            .texture
             .as_ref()
             .context("reflection atlas was not initialized")?
             .view;
         unsafe {
             let mapped = self.device.map_memory(
-                self.environment_memory,
+                self.environment.memory,
                 0,
                 required_buffer_size,
                 vk::MemoryMapFlags::empty(),
@@ -210,9 +212,9 @@ impl SceneRenderer {
                     .add(std::mem::size_of::<WindowBufferHeader>()),
                 windows.len() * std::mem::size_of::<WindowGpuData>(),
             );
-            self.device.unmap_memory(self.environment_memory);
+            self.device.unmap_memory(self.environment.memory);
 
-            let skybox_changed = skybox.view != self.environment_skybox_view;
+            let skybox_changed = skybox.view != self.environment.skybox_view;
             if descriptor_changed {
                 let filtering = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
                 let skybox_filtering =
@@ -220,12 +222,12 @@ impl SceneRenderer {
                 self.device.update_descriptor_sets(
                     &[
                         vk::WriteDescriptorSet::default()
-                            .dst_set(self.environment_descriptor)
+                            .dst_set(self.environment.descriptor)
                             .dst_binding(1)
                             .descriptor_type(vk::DescriptorType::SAMPLER)
                             .image_info(&filtering),
                         vk::WriteDescriptorSet::default()
-                            .dst_set(self.environment_descriptor)
+                            .dst_set(self.environment.descriptor)
                             .dst_binding(3)
                             .descriptor_type(vk::DescriptorType::SAMPLER)
                             .image_info(&skybox_filtering),
@@ -235,11 +237,11 @@ impl SceneRenderer {
             }
             if descriptor_changed || buffer_changed {
                 let window_buffer = [vk::DescriptorBufferInfo::default()
-                    .buffer(self.environment_buffer)
+                    .buffer(self.environment.buffer)
                     .range(required_buffer_size)];
                 self.device.update_descriptor_sets(
                     &[vk::WriteDescriptorSet::default()
-                        .dst_set(self.environment_descriptor)
+                        .dst_set(self.environment.descriptor)
                         .dst_binding(0)
                         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                         .buffer_info(&window_buffer)],
@@ -252,13 +254,13 @@ impl SceneRenderer {
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
                 self.device.update_descriptor_sets(
                     &[vk::WriteDescriptorSet::default()
-                        .dst_set(self.environment_descriptor)
+                        .dst_set(self.environment.descriptor)
                         .dst_binding(2)
                         .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                         .image_info(&skybox_image)],
                     &[],
                 );
-                self.environment_skybox_view = skybox.view;
+                self.environment.skybox_view = skybox.view;
             }
             if descriptor_changed || atlas_changed || skybox_changed {
                 let window_images = [vk::DescriptorImageInfo::default()
@@ -266,7 +268,7 @@ impl SceneRenderer {
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
                 self.device.update_descriptor_sets(
                     &[vk::WriteDescriptorSet::default()
-                        .dst_set(self.environment_descriptor)
+                        .dst_set(self.environment.descriptor)
                         .dst_binding(4)
                         .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                         .image_info(&window_images)],
@@ -282,12 +284,17 @@ impl SceneRenderer {
         command: vk::CommandBuffer,
         frame: &SceneFrame<'_>,
     ) {
-        if self.atlas_dirty_indices.is_empty()
-            && self.atlas.as_ref().is_none_or(|atlas| atlas.initialized)
+        let device = &self.context.device;
+        if self.atlas.dirty_indices.is_empty()
+            && self
+                .atlas
+                .texture
+                .as_ref()
+                .is_none_or(|atlas| atlas.initialized)
         {
             return;
         }
-        let Some(atlas) = &mut self.atlas else {
+        let Some(atlas) = &mut self.atlas.texture else {
             return;
         };
         let range = image_range(vk::ImageAspectFlags::COLOR);
@@ -297,7 +304,7 @@ impl SceneRenderer {
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
         unsafe {
-            self.device.cmd_pipeline_barrier(
+            device.cmd_pipeline_barrier(
                 command,
                 if atlas.initialized {
                     vk::PipelineStageFlags::FRAGMENT_SHADER
@@ -322,15 +329,15 @@ impl SceneRenderer {
                     })
                     .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)],
             );
-            for &index in &self.atlas_dirty_indices {
+            for &index in &self.atlas.dirty_indices {
                 let (texture, _) = &frame.panels[index];
-                let rect = &self.atlas_rects[index];
+                let rect = &self.atlas.rects[index];
                 let source_barrier = vk::ImageMemoryBarrier::default()
                     .image(texture.shared.image)
                     .subresource_range(range)
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-                self.device.cmd_pipeline_barrier(
+                device.cmd_pipeline_barrier(
                     command,
                     vk::PipelineStageFlags::FRAGMENT_SHADER,
                     vk::PipelineStageFlags::TRANSFER,
@@ -350,7 +357,7 @@ impl SceneRenderer {
                 if source_size.w as u32 == rect.extent.width
                     && source_size.h as u32 == rect.extent.height
                 {
-                    self.device.cmd_copy_image(
+                    device.cmd_copy_image(
                         command,
                         texture.shared.image,
                         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
@@ -371,7 +378,7 @@ impl SceneRenderer {
                             })],
                     );
                 } else {
-                    self.device.cmd_blit_image(
+                    device.cmd_blit_image(
                         command,
                         texture.shared.image,
                         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
@@ -403,7 +410,7 @@ impl SceneRenderer {
                         vk::Filter::LINEAR,
                     );
                 }
-                self.device.cmd_pipeline_barrier(
+                device.cmd_pipeline_barrier(
                     command,
                     vk::PipelineStageFlags::TRANSFER,
                     vk::PipelineStageFlags::FRAGMENT_SHADER,
@@ -417,7 +424,7 @@ impl SceneRenderer {
                         .dst_access_mask(vk::AccessFlags::SHADER_READ)],
                 );
             }
-            self.device.cmd_pipeline_barrier(
+            device.cmd_pipeline_barrier(
                 command,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
@@ -433,5 +440,4 @@ impl SceneRenderer {
         }
         atlas.initialized = true;
     }
-
 }

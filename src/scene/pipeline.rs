@@ -174,7 +174,7 @@ impl SceneRenderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.layout,
                 1,
-                &[self.floor_descriptor, self.environment_descriptor],
+                &[self.floor.descriptor, self.environment.descriptor],
                 &[],
             );
             let floor_height = [frame.floor_y];
@@ -204,8 +204,8 @@ impl SceneRenderer {
             self.device.cmd_bind_pipeline(
                 command,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.environment_pipelines[usize::from(self.ambient_occlusion) * 2
-                    + usize::from(self.trace_through_transparent_windows)],
+                self.environment_pipelines[usize::from(self.window.ambient_occlusion) * 2
+                    + usize::from(self.window.trace_through_transparent_windows)],
             );
             self.draw_panel(command, sky_matrix(view));
             self.device.cmd_bind_pipeline(
@@ -219,8 +219,8 @@ impl SceneRenderer {
                     .filter(|(close_geometry, _)| *close_geometry == geometry);
                 let mut cursor_position = close_hit.map_or([0.0; 4], |(_, position)| {
                     [
-                        position.x + self.window_padding_px,
-                        position.y + self.window_padding_px,
+                        position.x + self.window.window_padding_px,
+                        position.y + self.window.window_padding_px,
                         0.0,
                         0.0,
                     ]
@@ -236,12 +236,12 @@ impl SceneRenderer {
                     cursor_position_bytes,
                 );
                 eye[0] = geometry.logical_size.w as f32
-                    + self.window_padding_px * 2.0
-                    + self.max_border_width_px
+                    + self.window.window_padding_px * 2.0
+                    + self.window.max_border_width_px
                     + 2.0;
                 eye[1] = geometry.logical_size.h as f32
-                    + self.window_padding_px * 2.0
-                    + self.max_border_width_px
+                    + self.window.window_padding_px * 2.0
+                    + self.window.max_border_width_px
                     + 2.0;
                 eye[2] = if frame.grabbed_panel == Some(geometry) {
                     1.0
@@ -270,8 +270,8 @@ impl SceneRenderer {
                     projection
                         * expanded_window_model(
                             geometry,
-                            self.window_padding_px,
-                            self.max_border_width_px,
+                            self.window.window_padding_px,
+                            self.window.max_border_width_px,
                         ),
                 );
             }

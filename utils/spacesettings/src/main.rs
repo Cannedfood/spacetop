@@ -673,7 +673,6 @@ impl SettingsApp {
             .map_err(|error| format!("Invalid settings: {error}"))?;
         Ok(config)
     }
-
 }
 
 fn background_directory() -> Option<PathBuf> {
@@ -961,6 +960,6 @@ fn main() -> iced::Result {
         .run()
 }
 
-    #[cfg(test)]
-    #[path = "tests.rs"]
-    mod tests;
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

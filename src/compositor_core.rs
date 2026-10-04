@@ -228,7 +228,11 @@ impl Compositor {
         ))
     }
 
-    pub(super) fn request_panel_maximized(&mut self, index: usize, maximized: bool) -> anyhow::Result<()> {
+    pub(super) fn request_panel_maximized(
+        &mut self,
+        index: usize,
+        maximized: bool,
+    ) -> anyhow::Result<()> {
         let restore_size = self.panels[index].maximize_restore_size.or_else(|| {
             self.panels[index]
                 .geometry
@@ -634,7 +638,11 @@ impl Compositor {
         Ok(())
     }
 
-    pub(super) fn set_panel_active(&mut self, panel_id: Option<u64>, serial: smithay::utils::Serial) {
+    pub(super) fn set_panel_active(
+        &mut self,
+        panel_id: Option<u64>,
+        serial: smithay::utils::Serial,
+    ) {
         for panel in &self.panels {
             let should_activate = Some(panel.id) == panel_id;
             let currently_active = self.active_panel == Some(panel.id);
@@ -709,7 +717,12 @@ impl Compositor {
         hit.is_some()
     }
 
-    pub(super) fn dispatch_controller_ray(&mut self, ray: Ray3, gaze_ray: Option<Ray3>, time_ms: u32) {
+    pub(super) fn dispatch_controller_ray(
+        &mut self,
+        ray: Ray3,
+        gaze_ray: Option<Ray3>,
+        time_ms: u32,
+    ) {
         if let Some(gaze_ray) = gaze_ray {
             self.gaze_ray = Some(gaze_ray);
         }
@@ -956,4 +969,3 @@ impl Compositor {
         pointer.frame(self);
     }
 }
-

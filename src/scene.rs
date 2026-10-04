@@ -8,6 +8,7 @@ use smithay::backend::allocator::Buffer;
 use std::{
     fs::{self, File},
     io::Read,
+    ops::{Deref, DerefMut},
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     thread::{self, JoinHandle},
@@ -24,7 +25,7 @@ mod pipeline;
 mod resources;
 
 pub(crate) use resources::{PanelTexture, RenderTarget, SkyboxTexture};
-use resources::{ReflectionAtlas, atlas_dirty_indices, pack_reflection_atlas};
+use resources::{ReflectionAtlasImage, atlas_dirty_indices, pack_reflection_atlas};
 #[cfg(test)]
 use resources::{
     SKYBOX_MAX_CHANNEL, build_skybox_mips, integrate_skybox_diffuse, sanitize_hdr_pixels,
@@ -218,7 +219,7 @@ fn memory_type(
         .context("no compatible Vulkan memory type")
 }
 
-pub(crate) struct SceneRenderer {
+pub(crate) struct RenderContext {
     device: ash::Device,
     instance: ash::Instance,
     physical_device: vk::PhysicalDevice,
@@ -227,36 +228,70 @@ pub(crate) struct SceneRenderer {
     descriptor_layout: vk::DescriptorSetLayout,
     floor_descriptor_layout: vk::DescriptorSetLayout,
     environment_descriptor_layout: vk::DescriptorSetLayout,
-    floor_pool: vk::DescriptorPool,
-    floor_descriptor: vk::DescriptorSet,
-    floor_buffer: vk::Buffer,
-    floor_memory: vk::DeviceMemory,
-    environment_pool: vk::DescriptorPool,
-    environment_descriptor: vk::DescriptorSet,
-    environment_buffer: vk::Buffer,
-    environment_memory: vk::DeviceMemory,
-    environment_buffer_size: u64,
-    environment_descriptor_capacity: u32,
-    environment_skybox_view: vk::ImageView,
-    skybox_diffuse_irradiance: Vec3,
-    background_exposure: f32,
-    environment_dim: f32,
-    max_environment_windows: u32,
-    atlas: Option<ReflectionAtlas>,
-    atlas_rects: Vec<vk::Rect2D>,
-    atlas_panel_ids: Vec<u64>,
-    atlas_dirty_indices: Vec<usize>,
-    atlas_size: u32,
     sampler: vk::Sampler,
     sky_sampler: vk::Sampler,
     layout: vk::PipelineLayout,
     window_pipeline: vk::Pipeline,
     cursor_pipeline: vk::Pipeline,
     environment_pipelines: [vk::Pipeline; 4],
+}
+
+struct FloorRenderer {
+    pool: vk::DescriptorPool,
+    descriptor: vk::DescriptorSet,
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+}
+
+struct EnvironmentRenderer {
+    pool: vk::DescriptorPool,
+    descriptor: vk::DescriptorSet,
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    buffer_size: u64,
+    descriptor_capacity: u32,
+    skybox_view: vk::ImageView,
+    diffuse_irradiance: Vec3,
+    background_exposure: f32,
+    dim: f32,
+    max_windows: u32,
+}
+
+struct ReflectionAtlas {
+    texture: Option<ReflectionAtlasImage>,
+    rects: Vec<vk::Rect2D>,
+    panel_ids: Vec<u64>,
+    dirty_indices: Vec<usize>,
+    size: u32,
+}
+
+struct WindowRenderer {
     trace_through_transparent_windows: bool,
     ambient_occlusion: bool,
     window_padding_px: f32,
     max_border_width_px: f32,
+}
+
+pub(crate) struct SceneRenderer {
+    context: RenderContext,
+    floor: FloorRenderer,
+    environment: EnvironmentRenderer,
+    atlas: ReflectionAtlas,
+    window: WindowRenderer,
+}
+
+impl Deref for SceneRenderer {
+    type Target = RenderContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
+impl DerefMut for SceneRenderer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.context
+    }
 }
 
 pub(crate) struct SceneFrame<'a> {
@@ -362,46 +397,56 @@ impl SceneRenderer {
         config: &AppConfig,
     ) -> Result<Self> {
         let mut renderer = Self {
-            device: device.clone(),
-            instance: instance.clone(),
-            physical_device,
-            format,
-            render_pass: vk::RenderPass::null(),
-            descriptor_layout: vk::DescriptorSetLayout::null(),
-            floor_descriptor_layout: vk::DescriptorSetLayout::null(),
-            environment_descriptor_layout: vk::DescriptorSetLayout::null(),
-            floor_pool: vk::DescriptorPool::null(),
-            floor_descriptor: vk::DescriptorSet::null(),
-            floor_buffer: vk::Buffer::null(),
-            floor_memory: vk::DeviceMemory::null(),
-            environment_pool: vk::DescriptorPool::null(),
-            environment_descriptor: vk::DescriptorSet::null(),
-            environment_buffer: vk::Buffer::null(),
-            environment_memory: vk::DeviceMemory::null(),
-            environment_buffer_size: 0,
-            environment_descriptor_capacity: 0,
-            environment_skybox_view: vk::ImageView::null(),
-            skybox_diffuse_irradiance: Vec3::ONE,
-            background_exposure: 1.0,
-            environment_dim: 0.0,
-            max_environment_windows: 0,
-            atlas: None,
-            atlas_rects: Vec::new(),
-            atlas_panel_ids: Vec::new(),
-            atlas_dirty_indices: Vec::new(),
-            atlas_size: config.window.reflection_atlas_size.into(),
-            sampler: vk::Sampler::null(),
-            sky_sampler: vk::Sampler::null(),
-            layout: vk::PipelineLayout::null(),
-            window_pipeline: vk::Pipeline::null(),
-            cursor_pipeline: vk::Pipeline::null(),
-            environment_pipelines: [vk::Pipeline::null(); 4],
-            trace_through_transparent_windows: config.floor.trace_through_transparent_windows,
-            ambient_occlusion: config.floor.ambient_occlusion,
-            window_padding_px: config.window.effective_padding_px(),
-            max_border_width_px: config.window.max_border_width_px(),
+            context: RenderContext {
+                device: device.clone(),
+                instance: instance.clone(),
+                physical_device,
+                format,
+                render_pass: vk::RenderPass::null(),
+                descriptor_layout: vk::DescriptorSetLayout::null(),
+                floor_descriptor_layout: vk::DescriptorSetLayout::null(),
+                environment_descriptor_layout: vk::DescriptorSetLayout::null(),
+                sampler: vk::Sampler::null(),
+                sky_sampler: vk::Sampler::null(),
+                layout: vk::PipelineLayout::null(),
+                window_pipeline: vk::Pipeline::null(),
+                cursor_pipeline: vk::Pipeline::null(),
+                environment_pipelines: [vk::Pipeline::null(); 4],
+            },
+            floor: FloorRenderer {
+                pool: vk::DescriptorPool::null(),
+                descriptor: vk::DescriptorSet::null(),
+                buffer: vk::Buffer::null(),
+                memory: vk::DeviceMemory::null(),
+            },
+            environment: EnvironmentRenderer {
+                pool: vk::DescriptorPool::null(),
+                descriptor: vk::DescriptorSet::null(),
+                buffer: vk::Buffer::null(),
+                memory: vk::DeviceMemory::null(),
+                buffer_size: 0,
+                descriptor_capacity: 0,
+                skybox_view: vk::ImageView::null(),
+                diffuse_irradiance: Vec3::ONE,
+                background_exposure: 1.0,
+                dim: 0.0,
+                max_windows: 0,
+            },
+            atlas: ReflectionAtlas {
+                texture: None,
+                rects: Vec::new(),
+                panel_ids: Vec::new(),
+                dirty_indices: Vec::new(),
+                size: config.window.reflection_atlas_size.into(),
+            },
+            window: WindowRenderer {
+                trace_through_transparent_windows: config.floor.trace_through_transparent_windows,
+                ambient_occlusion: config.floor.ambient_occlusion,
+                window_padding_px: config.window.effective_padding_px(),
+                max_border_width_px: config.window.max_border_width_px(),
+            },
         };
-        renderer.validate_atlas_size(renderer.atlas_size)?;
+        renderer.validate_atlas_size(renderer.atlas.size)?;
         let attachments = [
             vk::AttachmentDescription::default()
                 .format(format)
@@ -485,9 +530,9 @@ impl SceneRenderer {
                 .max_storage_buffer_range
                 .saturating_sub(std::mem::size_of::<WindowBufferHeader>() as u32)
                 / std::mem::size_of::<WindowGpuData>() as u32;
-            renderer.max_environment_windows = buffer_capacity;
+            renderer.environment.max_windows = buffer_capacity;
             ensure!(
-                renderer.max_environment_windows > 0,
+                renderer.environment.max_windows > 0,
                 "Vulkan device has no capacity for reflected window descriptors"
             );
             let environment_bindings = [
@@ -523,17 +568,17 @@ impl SceneRenderer {
             )?;
             let uniform = FloorUniform::from_config(
                 config,
-                renderer.skybox_diffuse_irradiance,
-                renderer.background_exposure,
+                renderer.environment.diffuse_irradiance,
+                renderer.environment.background_exposure,
             );
-            renderer.floor_buffer = device.create_buffer(
+            renderer.floor.buffer = device.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(std::mem::size_of::<FloorUniform>() as u64)
                     .usage(vk::BufferUsageFlags::UNIFORM_BUFFER),
                 None,
             )?;
-            let requirements = device.get_buffer_memory_requirements(renderer.floor_buffer);
-            renderer.floor_memory = device.allocate_memory(
+            let requirements = device.get_buffer_memory_requirements(renderer.floor.buffer);
+            renderer.floor.memory = device.allocate_memory(
                 &vk::MemoryAllocateInfo::default()
                     .allocation_size(requirements.size)
                     .memory_type_index(memory_type(
@@ -545,9 +590,9 @@ impl SceneRenderer {
                     )?),
                 None,
             )?;
-            device.bind_buffer_memory(renderer.floor_buffer, renderer.floor_memory, 0)?;
+            device.bind_buffer_memory(renderer.floor.buffer, renderer.floor.memory, 0)?;
             let mapped = device.map_memory(
-                renderer.floor_memory,
+                renderer.floor.memory,
                 0,
                 std::mem::size_of::<FloorUniform>() as u64,
                 vk::MemoryMapFlags::empty(),
@@ -557,8 +602,8 @@ impl SceneRenderer {
                 mapped.cast::<u8>(),
                 std::mem::size_of::<FloorUniform>(),
             );
-            device.unmap_memory(renderer.floor_memory);
-            renderer.floor_pool = device.create_descriptor_pool(
+            device.unmap_memory(renderer.floor.memory);
+            renderer.floor.pool = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(1)
                     .pool_sizes(&[vk::DescriptorPoolSize {
@@ -567,17 +612,17 @@ impl SceneRenderer {
                     }]),
                 None,
             )?;
-            renderer.floor_descriptor = device.allocate_descriptor_sets(
+            renderer.floor.descriptor = device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(renderer.floor_pool)
+                    .descriptor_pool(renderer.floor.pool)
                     .set_layouts(&[renderer.floor_descriptor_layout]),
             )?[0];
             let buffers = [vk::DescriptorBufferInfo::default()
-                .buffer(renderer.floor_buffer)
+                .buffer(renderer.floor.buffer)
                 .range(std::mem::size_of::<FloorUniform>() as u64)];
             device.update_descriptor_sets(
                 &[vk::WriteDescriptorSet::default()
-                    .dst_set(renderer.floor_descriptor)
+                    .dst_set(renderer.floor.descriptor)
                     .dst_binding(0)
                     .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                     .buffer_info(&buffers)],
@@ -686,16 +731,17 @@ impl SceneRenderer {
     pub fn update_config(&mut self, config: &AppConfig) -> Result<()> {
         let atlas_size = config.window.reflection_atlas_size.into();
         self.validate_atlas_size(atlas_size)?;
-        self.atlas_size = atlas_size;
-        self.trace_through_transparent_windows = config.floor.trace_through_transparent_windows;
-        self.ambient_occlusion = config.floor.ambient_occlusion;
-        self.window_padding_px = config.window.effective_padding_px();
-        self.max_border_width_px = config.window.max_border_width_px();
-        self.environment_dim = 0.0;
+        self.atlas.size = atlas_size;
+        self.window.trace_through_transparent_windows =
+            config.floor.trace_through_transparent_windows;
+        self.window.ambient_occlusion = config.floor.ambient_occlusion;
+        self.window.window_padding_px = config.window.effective_padding_px();
+        self.window.max_border_width_px = config.window.max_border_width_px();
+        self.environment.dim = 0.0;
         let uniform = FloorUniform::from_config(
             config,
-            self.skybox_diffuse_irradiance,
-            self.background_exposure,
+            self.environment.diffuse_irradiance,
+            self.environment.background_exposure,
         );
         self.write_floor_uniform(&uniform)?;
         Ok(())
@@ -706,14 +752,14 @@ impl SceneRenderer {
             exposure.is_finite() && (0.0..=1.0).contains(&exposure),
             "background exposure fade must be between 0 and 1"
         );
-        if self.background_exposure == exposure {
+        if self.environment.background_exposure == exposure {
             return Ok(());
         }
-        self.background_exposure = exposure;
+        self.environment.background_exposure = exposure;
         let uniform = FloorUniform::from_config(
             config,
-            self.skybox_diffuse_irradiance,
-            self.background_exposure,
+            self.environment.diffuse_irradiance,
+            self.environment.background_exposure,
         );
         self.write_floor_uniform(&uniform)
     }
@@ -721,7 +767,7 @@ impl SceneRenderer {
     fn write_floor_uniform(&self, uniform: &FloorUniform) -> Result<()> {
         unsafe {
             let mapped = self.device.map_memory(
-                self.floor_memory,
+                self.floor.memory,
                 0,
                 std::mem::size_of::<FloorUniform>() as u64,
                 vk::MemoryMapFlags::empty(),
@@ -731,7 +777,7 @@ impl SceneRenderer {
                 mapped.cast::<u8>(),
                 std::mem::size_of::<FloorUniform>(),
             );
-            self.device.unmap_memory(self.floor_memory);
+            self.device.unmap_memory(self.floor.memory);
         }
         Ok(())
     }
@@ -741,7 +787,7 @@ impl SceneRenderer {
         diffuse_irradiance: Vec3,
         config: &AppConfig,
     ) -> Result<()> {
-        self.skybox_diffuse_irradiance = diffuse_irradiance;
+        self.environment.diffuse_irradiance = diffuse_irradiance;
         self.update_config(config)
     }
 }
@@ -755,24 +801,24 @@ impl Drop for SceneRenderer {
             self.device.destroy_pipeline(self.cursor_pipeline, None);
             self.device.destroy_pipeline(self.window_pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
-            if self.floor_pool != vk::DescriptorPool::null() {
-                self.device.destroy_descriptor_pool(self.floor_pool, None);
+            if self.floor.pool != vk::DescriptorPool::null() {
+                self.device.destroy_descriptor_pool(self.floor.pool, None);
             }
-            if self.floor_buffer != vk::Buffer::null() {
-                self.device.destroy_buffer(self.floor_buffer, None);
+            if self.floor.buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.floor.buffer, None);
             }
-            if self.floor_memory != vk::DeviceMemory::null() {
-                self.device.free_memory(self.floor_memory, None);
+            if self.floor.memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.floor.memory, None);
             }
-            if self.environment_pool != vk::DescriptorPool::null() {
+            if self.environment.pool != vk::DescriptorPool::null() {
                 self.device
-                    .destroy_descriptor_pool(self.environment_pool, None);
+                    .destroy_descriptor_pool(self.environment.pool, None);
             }
-            if self.environment_buffer != vk::Buffer::null() {
-                self.device.destroy_buffer(self.environment_buffer, None);
+            if self.environment.buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.environment.buffer, None);
             }
-            if self.environment_memory != vk::DeviceMemory::null() {
-                self.device.free_memory(self.environment_memory, None);
+            if self.environment.memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.environment.memory, None);
             }
             self.device.destroy_sampler(self.sampler, None);
             self.device.destroy_sampler(self.sky_sampler, None);
