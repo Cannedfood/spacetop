@@ -92,7 +92,7 @@ impl Compositor {
                         panel.pose_is_explicit = true;
                     }
                     match &panel.surface {
-                        x11::PanelSurface::X11 { window, .. } => {
+                        PanelSurface::X11 { window, .. } => {
                             let mut geometry = window.geometry();
                             geometry.size.w = width.max(1);
                             geometry.size.h = height.max(1);
@@ -100,7 +100,7 @@ impl Compositor {
                                 eprintln!("failed to resize X11 window: {error}");
                             }
                         }
-                        x11::PanelSurface::Wayland(surface) => {
+                        PanelSurface::Wayland(surface) => {
                             let window_bounds = with_states(surface.wl_surface(), |states| {
                                 states
                                     .cached_state
@@ -123,7 +123,7 @@ impl Compositor {
                             });
                             surface.send_configure();
                         }
-                        x11::PanelSurface::Popup(_) => {}
+                        PanelSurface::Popup(_) => {}
                     }
                 }
                 Ok(())
@@ -160,13 +160,13 @@ impl Compositor {
             XrInput::ClosePanel { panel_id } => {
                 if let Some(panel) = self.panels.iter().find(|panel| panel.id == panel_id) {
                     match &panel.surface {
-                        x11::PanelSurface::Wayland(surface) => surface.send_close(),
-                        x11::PanelSurface::X11 { window, .. } => {
+                        PanelSurface::Wayland(surface) => surface.send_close(),
+                        PanelSurface::X11 { window, .. } => {
                             if let Err(error) = window.close() {
                                 eprintln!("failed to close X11 window: {error}");
                             }
                         }
-                        x11::PanelSurface::Popup(_) => {}
+                        PanelSurface::Popup(_) => {}
                     }
                 }
                 Ok(())

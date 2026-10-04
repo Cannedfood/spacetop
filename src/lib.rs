@@ -10,6 +10,7 @@ mod config;
 mod gpu;
 mod input;
 mod panel;
+mod panel_surface;
 mod runtime;
 mod scene;
 mod timing;
@@ -23,6 +24,7 @@ use smithay::reexports::wayland_server::Display;
 
 use bridge::{PanelMode, PanelUpdate, XrInput};
 use panel::{PanelGeometry, PanelId, PanelPose, Ray3};
+use panel_surface::PanelSurface;
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
@@ -71,7 +73,6 @@ use smithay::{
     },
     xwayland::{X11Wm, XWaylandClientData},
 };
-use x11::PanelSurface;
 
 const MOUSE_CURSOR_IDLE: std::time::Duration = std::time::Duration::from_secs(2);
 
