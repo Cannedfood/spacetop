@@ -198,6 +198,7 @@ impl Compositor {
                 }
                 Ok(())
             }
+            XrInput::LauncherToggle => Ok(()),
             XrInput::PointerLost { time_ms } => {
                 for button in std::mem::take(&mut self.xr_buttons) {
                     self.dispatch_pointer_button(button, false, time_ms);

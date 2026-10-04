@@ -28,6 +28,7 @@ const BORDER: Color = Color::from_rgba(0.52, 0.73, 0.73, 0.22);
 
 #[derive(Debug, Clone)]
 enum Message {
+    LauncherChanged(String),
     BackgroundChanged(String),
     OpenBackgroundFolder,
     RefreshBackgrounds,
@@ -72,6 +73,7 @@ enum Message {
 
 #[derive(Debug, Clone, Copy)]
 enum ResetTarget {
+    ApplicationLauncher,
     BackgroundImage,
     BackgroundBrightness,
     BackgroundRotation,
@@ -160,7 +162,8 @@ impl SettingsApp {
     fn update(&mut self, message: Message) -> iced::Task<Message> {
         let editing = matches!(
             &message,
-            Message::BackgroundChanged(_)
+            Message::LauncherChanged(_)
+                | Message::BackgroundChanged(_)
                 | Message::BackgroundBrightnessChanged(_)
                 | Message::BackgroundRotationChanged(_)
                 | Message::FloorHeightChanged(_)
@@ -188,6 +191,7 @@ impl SettingsApp {
                 | Message::Reset(_)
         );
         match message {
+            Message::LauncherChanged(value) => self.config.application.launcher = value,
             Message::BackgroundChanged(selection) => {
                 if selection == RANDOM_BACKGROUND {
                     self.config.background.image = "random".into();
@@ -311,6 +315,9 @@ impl SettingsApp {
     fn reset(&mut self, target: ResetTarget) {
         let defaults = AppConfig::default();
         match target {
+            ResetTarget::ApplicationLauncher => {
+                self.config.application.launcher = defaults.application.launcher;
+            }
             ResetTarget::BackgroundImage => {
                 self.config.background.image = defaults.background.image;
                 self.load_background_preview();
@@ -681,6 +688,19 @@ impl SettingsApp {
             .spacing(8),
             self.config.background == defaults.background,
             ResetTarget::BackgroundSection,
+        );
+        let application = section(
+            "APPLICATION",
+            labeled_input(
+                "LAUNCHER EXECUTABLE",
+                &self.config.application.launcher,
+                "spacelauncher",
+                Message::LauncherChanged,
+                self.config.application.launcher == defaults.application.launcher,
+                ResetTarget::ApplicationLauncher,
+            ),
+            self.config.application.launcher == defaults.application.launcher,
+            ResetTarget::ApplicationLauncher,
         );
 
         let floor_height = labeled_input(
@@ -1112,7 +1132,15 @@ impl SettingsApp {
                 ]
                 .align_y(iced::Alignment::Center),
                 scrollable(
-                    column![environment, floor, placement, window_scale, windows].spacing(14),
+                    column![
+                        application,
+                        environment,
+                        floor,
+                        placement,
+                        window_scale,
+                        windows
+                    ]
+                    .spacing(14),
                 )
                 .height(Length::Fill),
                 footer,
@@ -1455,6 +1483,7 @@ mod tests {
         let defaults = AppConfig::default();
         let mut config = defaults.clone();
         config.background.image = "custom.exr".into();
+        config.application.launcher = "custom-launcher".into();
         config.background.brightness_stops = 1.0;
         config.floor.height_m = -2.0;
         config.floor.roughness = 0.8;
@@ -1463,6 +1492,7 @@ mod tests {
         config.window.border_width_px = 5.0;
 
         let mut app = SettingsApp::from_config(config, String::new(), false);
+        app.reset(ResetTarget::ApplicationLauncher);
         app.reset(ResetTarget::BackgroundSection);
         app.reset(ResetTarget::FloorSection);
         app.reset(ResetTarget::WindowPlacementSection);

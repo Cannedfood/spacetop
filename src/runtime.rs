@@ -24,6 +24,7 @@ pub(crate) type ReadyCallback = Box<dyn FnOnce(Option<String>) -> anyhow::Result
 
 pub fn run(
     on_ready: impl FnOnce(DisplayNames) -> anyhow::Result<()> + 'static,
+    mut on_launcher_toggle: impl FnMut() -> anyhow::Result<()> + 'static,
 ) -> anyhow::Result<()> {
     let config = AppConfig::load()?;
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
@@ -77,7 +78,14 @@ pub fn run(
             if let calloop::channel::Event::Msg(command) = event {
                 input_sender.received(&command);
                 let started = std::time::Instant::now();
-                compositor.handle_xr_input(command);
+                match command {
+                    XrInput::LauncherToggle => {
+                        if let Err(error) = on_launcher_toggle() {
+                            eprintln!("Could not toggle launcher: {error:#}");
+                        }
+                    }
+                    other => compositor.handle_xr_input(other),
+                }
                 compositor.timings.record(
                     "app/input-dispatch",
                     started.elapsed(),

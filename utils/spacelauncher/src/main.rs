@@ -217,6 +217,7 @@ enum Message {
     Keyboard(iced::keyboard::Event),
     RefreshSearchFocus,
     SearchFocusChanged(bool),
+    WindowUnfocused,
     LaunchFocused,
     Launch(usize),
 }
@@ -237,7 +238,7 @@ impl Launcher {
             apps,
             query: String::new(),
             result_focus: None,
-            search_focused: false,
+            search_focused: true,
             status: String::new(),
         }
     }
@@ -254,6 +255,7 @@ impl Launcher {
                     .map(Message::SearchFocusChanged);
             }
             Message::SearchFocusChanged(focused) => self.search_focused = focused,
+            Message::WindowUnfocused => return close_window(),
             Message::Keyboard(iced::keyboard::Event::KeyPressed { key, text, .. }) => {
                 if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) {
                     self.query.clear();
@@ -268,8 +270,7 @@ impl Launcher {
                     && let Some(index) = self.result_focus
                     && !self.search_focused
                 {
-                    self.launch_index(index);
-                    return iced::Task::none();
+                    return self.launch_index(index);
                 }
 
                 if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab)
@@ -349,30 +350,36 @@ impl Launcher {
                     && key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
                     && let Some(index) = self.result_focus
                 {
-                    self.launch_index(index);
+                    return self.launch_index(index);
                 }
             }
             Message::Keyboard(_) => {}
-            Message::LaunchFocused => self.launch_focused(),
+            Message::LaunchFocused => return self.launch_focused(),
             Message::Launch(index) => {
-                self.launch_index(index);
+                return self.launch_index(index);
             }
         }
         iced::Task::none()
     }
 
-    fn launch_focused(&mut self) {
+    fn launch_focused(&mut self) -> iced::Task<Message> {
         let index = self.result_focus.unwrap_or(0);
-        self.launch_index(index);
+        self.launch_index(index)
     }
 
-    fn launch_index(&mut self, index: usize) {
+    fn launch_index(&mut self, index: usize) -> iced::Task<Message> {
         let Some(app) = self.filtered_apps().get(index).cloned() else {
-            return;
+            return iced::Task::none();
         };
         match launch(app) {
-            Ok(()) => self.status = format!("Started {}", app.name),
-            Err(error) => self.status = format!("Could not start {}: {error}", app.name),
+            Ok(()) => {
+                self.status = format!("Started {}", app.name);
+                close_window()
+            }
+            Err(error) => {
+                self.status = format!("Could not start {}: {error}", app.name);
+                iced::Task::none()
+            }
         }
     }
 
@@ -460,6 +467,10 @@ impl Launcher {
         .padding(10)
         .into()
     }
+}
+
+fn close_window() -> iced::Task<Message> {
+    iced::window::latest().and_then(iced::window::close)
 }
 
 fn app_card<'a>(
@@ -682,27 +693,37 @@ fn launch(app: &AppEntry) -> std::io::Result<()> {
 }
 
 fn main() -> iced::Result {
-    iced::application(Launcher::new, Launcher::update, Launcher::view)
-        .subscription(|_| {
-            iced::event::listen_raw(|event, _, _| match event {
-                iced::Event::Keyboard(keyboard_event) => Some(Message::Keyboard(keyboard_event)),
-                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
-                | iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => {
-                    Some(Message::RefreshSearchFocus)
-                }
-                _ => None,
-            })
+    iced::application(
+        || {
+            (
+                Launcher::new(),
+                iced::widget::operation::focus(SEARCH_INPUT_ID),
+            )
+        },
+        Launcher::update,
+        Launcher::view,
+    )
+    .subscription(|_| {
+        iced::event::listen_raw(|event, _, _| match event {
+            iced::Event::Keyboard(keyboard_event) => Some(Message::Keyboard(keyboard_event)),
+            iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused),
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
+            | iced::Event::Touch(iced::touch::Event::FingerPressed { .. }) => {
+                Some(Message::RefreshSearchFocus)
+            }
+            _ => None,
         })
-        .title("Spacetop App Launcher")
-        .window_size((920.0, 680.0))
-        .transparent(true)
-        .centered()
-        .theme(Theme::Dark)
-        .style(|_state, _theme| iced::theme::Style {
-            background_color: Color::TRANSPARENT,
-            text_color: TEXT,
-        })
-        .run()
+    })
+    .title("Spacetop App Launcher")
+    .window_size((920.0, 680.0))
+    .transparent(true)
+    .centered()
+    .theme(Theme::Dark)
+    .style(|_state, _theme| iced::theme::Style {
+        background_color: Color::TRANSPARENT,
+        text_color: TEXT,
+    })
+    .run()
 }
 
 #[cfg(test)]

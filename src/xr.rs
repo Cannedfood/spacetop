@@ -1149,6 +1149,9 @@ pub fn run(
                     ),
                 ] {
                     if down != *previous {
+                        if button == 0x111 && down {
+                            input.send(XrInput::LauncherToggle)?;
+                        }
                         input.send(XrInput::Ray {
                             ray: cursor_ray.expect("tracked ray assigned"),
                             gaze_ray,

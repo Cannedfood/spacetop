@@ -19,11 +19,12 @@ Install `Xwayland` (version 23.1 or newer) to run X11 applications. Spacetop sta
 its own rootless XWayland server automatically when the executable is available.
 Without it, native Wayland applications still work.
 
-To launch an app with both display variables set automatically.
-Especially useful with app launchers (for example the small [SpaceLauncher](./utils/spacelauncher/README.md) so you can directly start apps on your PC)
+Press the controller's B button to open or close the configured launcher (by
+default [SpaceLauncher](./utils/spacelauncher/README.md)). The launcher starts
+closed. Use `--launcher` to override it for a session:
 
 ```sh
-cargo run --release -- --app=./target/release/spacelauncher
+cargo run --release -- --launcher=./target/release/spacelauncher
 ```
 
 The compositor prints its Wayland and X11 display names at startup. In another
@@ -52,6 +53,9 @@ The background image can be `"random"` to select an EXR from
 `~/` paths). The floor height is used when OpenXR does not provide a STAGE floor.
 
 ```toml
+[application]
+launcher = "spacelauncher"
+
 [background]
 image = "random"
 brightness_stops = 0.0
@@ -116,7 +120,7 @@ To select specific devices instead of automatic discovery, set
 
 ```sh
 ls -l /dev/input/by-id/*event-kbd
-SPACETOP_INPUT_DEVICES=/dev/input/by-id/YOUR_KEYBOARD-event-kbd cargo run --release -- --app=xterm
+SPACETOP_INPUT_DEVICES=/dev/input/by-id/YOUR_KEYBOARD-event-kbd cargo run --release -- --launcher=xterm
 ```
 
 `YOUR_KEYBOARD` is a placeholder for the device found above. Explicitly selected

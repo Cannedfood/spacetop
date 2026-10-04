@@ -11,9 +11,16 @@ use tempfile::NamedTempFile;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct AppConfig {
+    pub application: ApplicationConfig,
     pub background: BackgroundConfig,
     pub floor: FloorConfig,
     pub window: WindowConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ApplicationConfig {
+    pub launcher: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -270,6 +277,14 @@ impl WindowConfig {
     }
 }
 
+impl Default for ApplicationConfig {
+    fn default() -> Self {
+        Self {
+            launcher: "spacelauncher".into(),
+        }
+    }
+}
+
 impl Default for BackgroundConfig {
     fn default() -> Self {
         Self {
@@ -397,6 +412,10 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.application.launcher.trim().is_empty(),
+            "application.launcher must be a non-empty executable name"
+        );
         ensure!(
             self.background.image == "random" || !self.background.image.is_empty(),
             "background.image must be `random` or a non-empty file path"
@@ -549,6 +568,7 @@ mod tests {
     fn project_defaults_match_current_settings() {
         let config = AppConfig::default();
 
+        assert_eq!(config.application.launcher, "spacelauncher");
         assert_eq!(config.background.image, "random");
         assert_eq!(config.background.brightness_stops, -0.1);
         assert_eq!(config.background.rotation_degrees, 0.0);
@@ -581,6 +601,14 @@ mod tests {
         assert_eq!(config.window.grabbed_border_width_px, 1.0);
         assert_eq!(config.window.grabbed_border_color, [0.34, 0.82, 0.72, 1.0]);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_an_empty_launcher_executable() {
+        let mut config = AppConfig::default();
+        config.application.launcher = "  ".into();
+
+        assert!(config.validate().is_err());
     }
 
     #[test]

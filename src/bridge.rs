@@ -30,6 +30,7 @@ pub enum XrInput {
         pressed: bool,
         time_ms: u32,
     },
+    LauncherToggle,
     PointerLost {
         time_ms: u32,
     },
