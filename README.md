@@ -81,6 +81,8 @@ reflection_atlas_size = 256
 fullscreen_max_width_degrees = 100.0
 fullscreen_max_height_degrees = 75.0
 fullscreen_environment_dim = 0.5
+maximized_max_width_degrees = 70.0
+maximized_max_height_degrees = 50.0
 
 [cursor]
 default_distance_m = 1.6
@@ -135,6 +137,12 @@ environment is dimmed. The fullscreen width and height settings accept
 `1`–`170` degrees; environment dimming accepts `0` (off) to `1` (fully dimmed).
 Space Settings exposes these controls in its Fullscreen section. When the
 window leaves fullscreen, the previous window layout is restored.
+
+Maximize a grabbed window by pressing Y or B while holding grip. A maximized
+window is fitted within its configured maximum angular dimensions (defaults:
+70° wide by 50° high) and otherwise behaves like a normal window: other
+windows remain visible, collisions are resolved, and the environment is not
+dimmed. Press Y or B again while still grabbing it to restore its prior size.
 
 ## Keyboard And Pointer Input
 

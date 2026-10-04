@@ -69,6 +69,58 @@ impl PanelSurface {
         }
         Ok(())
     }
+
+    pub fn set_maximized(&self, maximized: bool) -> anyhow::Result<()> {
+        match self {
+            Self::Wayland(surface) => {
+                surface.with_pending_state(|state| {
+                    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+                    if maximized {
+                        state.states.set(State::Maximized);
+                        state.states.unset(State::Fullscreen);
+                        state.fullscreen_output = None;
+                    } else {
+                        state.states.unset(State::Maximized);
+                    }
+                });
+                surface.send_configure();
+            }
+            Self::X11 { window, .. } if !window.is_override_redirect() => {
+                if maximized && window.is_fullscreen() {
+                    window.set_fullscreen(false)?;
+                }
+                window.set_maximized(maximized)?;
+            }
+            Self::X11 { .. } | Self::Popup(_) => {}
+        }
+        Ok(())
+    }
+
+    pub fn set_fullscreen(&self, fullscreen: bool) -> anyhow::Result<()> {
+        match self {
+            Self::Wayland(surface) => {
+                surface.with_pending_state(|state| {
+                    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+                    if fullscreen {
+                        state.states.set(State::Fullscreen);
+                        state.states.unset(State::Maximized);
+                    } else {
+                        state.states.unset(State::Fullscreen);
+                        state.fullscreen_output = None;
+                    }
+                });
+                surface.send_configure();
+            }
+            Self::X11 { window, .. } if !window.is_override_redirect() => {
+                if fullscreen && window.is_maximized() {
+                    window.set_maximized(false)?;
+                }
+                window.set_fullscreen(fullscreen)?;
+            }
+            Self::X11 { .. } | Self::Popup(_) => {}
+        }
+        Ok(())
+    }
 }
 
 impl IsAlive for PanelSurface {
@@ -270,6 +322,7 @@ impl Compositor {
         }
         self.output.enter(&surface);
         let is_fullscreen = window.is_fullscreen();
+        let is_maximized = window.is_maximized();
         let pose = (0..=self.panels.len())
             .map(|slot| {
                 PanelPose::for_slot_at_distance(
@@ -288,6 +341,7 @@ impl Compositor {
             pose,
             geometry: None,
             is_fullscreen,
+            is_maximized,
             pose_is_explicit: false,
             resize_anchor: None,
             id: self.next_panel_id,
@@ -427,6 +481,12 @@ impl XwmHandler for Compositor {
         }
     }
     fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if window.is_maximized()
+            && let Err(error) = window.set_maximized(false)
+        {
+            eprintln!("failed to clear X11 maximize state: {error}");
+            return;
+        }
         if let Err(error) = window.set_fullscreen(true) {
             eprintln!("failed to mark X11 window fullscreen: {error}");
             return;
@@ -441,6 +501,36 @@ impl XwmHandler for Compositor {
     fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Err(error) = window.set_fullscreen(false) {
             eprintln!("failed to clear X11 fullscreen state: {error}");
+            return;
+        }
+        if let Some(surface) = window.wl_surface() {
+            let root = self.root_surface(&surface);
+            if let Some(index) = self.update_panel_from_commit(&root) {
+                self.invalidate_panel(index);
+            }
+        }
+    }
+    fn maximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if window.is_fullscreen()
+            && let Err(error) = window.set_fullscreen(false)
+        {
+            eprintln!("failed to clear X11 fullscreen state: {error}");
+            return;
+        }
+        if let Err(error) = window.set_maximized(true) {
+            eprintln!("failed to mark X11 window maximized: {error}");
+            return;
+        }
+        if let Some(surface) = window.wl_surface() {
+            let root = self.root_surface(&surface);
+            if let Some(index) = self.update_panel_from_commit(&root) {
+                self.invalidate_panel(index);
+            }
+        }
+    }
+    fn unmaximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Err(error) = window.set_maximized(false) {
+            eprintln!("failed to clear X11 maximize state: {error}");
             return;
         }
         if let Some(surface) = window.wl_surface() {

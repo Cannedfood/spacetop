@@ -64,6 +64,8 @@ pub struct WindowConfig {
     pub fullscreen_max_width_degrees: f32,
     pub fullscreen_max_height_degrees: f32,
     pub fullscreen_environment_dim: f32,
+    pub maximized_max_width_degrees: f32,
+    pub maximized_max_height_degrees: f32,
 
     pub cursor_proximity_radius_px: f32,
     pub padding_px: f32,
@@ -271,6 +273,8 @@ impl Default for WindowConfig {
             fullscreen_max_width_degrees: 100.0,
             fullscreen_max_height_degrees: 75.0,
             fullscreen_environment_dim: 0.5,
+            maximized_max_width_degrees: 70.0,
+            maximized_max_height_degrees: 50.0,
 
             cursor_proximity_radius_px: 301.0,
             padding_px: 42.0,
@@ -574,6 +578,16 @@ impl AppConfig {
             self.window.fullscreen_environment_dim.is_finite()
                 && (0.0..=1.0).contains(&self.window.fullscreen_environment_dim),
             "window.fullscreen_environment_dim must be between 0 and 1"
+        );
+        ensure!(
+            self.window.maximized_max_width_degrees.is_finite()
+                && (1.0..=170.0).contains(&self.window.maximized_max_width_degrees),
+            "window.maximized_max_width_degrees must be between 1 and 170 degrees"
+        );
+        ensure!(
+            self.window.maximized_max_height_degrees.is_finite()
+                && (1.0..=170.0).contains(&self.window.maximized_max_height_degrees),
+            "window.maximized_max_height_degrees must be between 1 and 170 degrees"
         );
         for (name, value, maximum) in [
             ("window.padding_px", self.window.padding_px, 500.0),
@@ -941,6 +955,16 @@ mod tests {
         config.window.fullscreen_environment_dim = -0.01;
         assert!(config.validate().is_err());
         config.window.fullscreen_environment_dim = 1.01;
+        assert!(config.validate().is_err());
+
+        config.window.fullscreen_environment_dim = 0.5;
+        config.window.maximized_max_width_degrees = 0.0;
+        assert!(config.validate().is_err());
+        config.window.maximized_max_width_degrees = 171.0;
+        assert!(config.validate().is_err());
+
+        config.window.maximized_max_width_degrees = 70.0;
+        config.window.maximized_max_height_degrees = f32::NAN;
         assert!(config.validate().is_err());
     }
 

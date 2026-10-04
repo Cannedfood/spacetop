@@ -42,6 +42,9 @@ pub enum XrInput {
         panel_id: u64,
         pose: PanelPose,
     },
+    ToggleMaximize {
+        panel_id: u64,
+    },
     ResizePanel {
         panel_id: u64,
         width: i32,
@@ -137,6 +140,7 @@ pub enum PanelUpdate {
         dmabuf: Dmabuf,
         geometry: PanelGeometry,
         is_fullscreen: bool,
+        is_maximized: bool,
     },
     Removed {
         panel_id: u64,

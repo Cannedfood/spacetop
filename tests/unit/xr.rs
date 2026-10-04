@@ -56,10 +56,53 @@ fn resize_snapshot_uses_committed_pose_without_animation() {
         pose: current.resized_pose_from_edges((120, 70).into(), [false, true, false, true], 32.0),
         logical_size: (120, 70).into(),
     };
-    reconcile_panel_geometry(&mut current, &mut saved, &mut temporary, committed, true);
+    reconcile_panel_geometry(
+        &mut current,
+        &mut saved,
+        &mut temporary,
+        committed,
+        true,
+        false,
+    );
     assert_eq!(current, committed);
     assert_eq!(saved, committed.pose);
     assert_eq!(temporary, committed.pose);
+}
+
+#[test]
+fn maximize_geometry_updates_preserve_the_restore_width() {
+    let mut current = PanelGeometry {
+        pose: PanelPose {
+            width_m: 2.0,
+            ..PanelPose::looking_from_to(glam::Vec3::new(0.0, 0.0, -1.6), glam::Vec3::ZERO)
+        },
+        logical_size: (100, 50).into(),
+    };
+    let mut saved = PanelPose {
+        width_m: 1.0,
+        ..current.pose
+    };
+    let mut temporary = saved;
+    let committed = PanelGeometry {
+        pose: PanelPose {
+            width_m: 1.0,
+            ..current.pose
+        },
+        logical_size: current.logical_size,
+    };
+
+    reconcile_panel_geometry(
+        &mut current,
+        &mut saved,
+        &mut temporary,
+        committed,
+        false,
+        true,
+    );
+
+    assert_eq!(current.pose.width_m, 2.0);
+    assert_eq!(saved.width_m, 1.0);
+    assert_eq!(temporary.width_m, 1.0);
 }
 
 #[test]

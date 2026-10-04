@@ -7,6 +7,8 @@ hot-reload them.
 
 Fullscreen controls configure the maximum window width and height in degrees
 and how much the environment is dimmed while a window is fullscreen.
+Maximized-window controls set its maximum angular width and height. Maximize
+or restore a grabbed window by pressing Y or B while holding grip.
 
 Run from the workspace root:
 

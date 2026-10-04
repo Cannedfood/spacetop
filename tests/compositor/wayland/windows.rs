@@ -48,6 +48,69 @@ fn fullscreen_requests_toggle_compositor_panel_state() {
 }
 
 #[test]
+fn maximize_requests_toggle_compositor_panel_state() {
+    let mut app = super::fixture::WaylandApp::new(None);
+    assert!(!app.compositor.panels[0].is_maximized);
+
+    app.toplevel.set_maximized();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    app.surface.commit();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert!(app.compositor.panels[0].is_maximized);
+    assert!(!app.compositor.panels[0].is_fullscreen);
+
+    app.toplevel.unset_maximized();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    app.surface.commit();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert!(!app.compositor.panels[0].is_maximized);
+
+    let panel_id = app.compositor.panels[0].id;
+    app.compositor
+        .handle_xr_input(crate::XrInput::ToggleMaximize { panel_id });
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    app.surface.commit();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert!(app.compositor.panels[0].is_maximized);
+}
+
+#[test]
 fn pointer_coordinates_match_logical_content_pixels() {
     let mut app = super::fixture::WaylandApp::new(None);
     let geometry = app.compositor.panels[0].geometry.unwrap();
@@ -235,6 +298,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
                 dmabuf,
                 geometry,
                 is_fullscreen,
+                is_maximized,
             } = receiver.try_recv().unwrap()
             else {
                 panic!("mapped window must publish its own GPU image");
@@ -243,6 +307,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
             assert_eq!(geometry.pose, second_pose);
             assert_eq!(geometry.logical_size, expected_size.into());
             assert!(!is_fullscreen);
+            assert!(!is_maximized);
             let shared = crate::gpu::SharedImage::import(
                 &vulkan.instance,
                 &vulkan.device,

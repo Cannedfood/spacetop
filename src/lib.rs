@@ -95,6 +95,7 @@ struct ToplevelPanel {
     pose: PanelPose,
     geometry: Option<PanelGeometry>,
     is_fullscreen: bool,
+    is_maximized: bool,
     pose_is_explicit: bool,
     resize_anchor: Option<(PanelGeometry, [bool; 4])>,
     id: u64,
@@ -292,6 +293,21 @@ impl Compositor {
                 }
                 Ok(())
             }
+            XrInput::ToggleMaximize { panel_id } => (|| {
+                let Some(index) = self.panels.iter().position(|panel| panel.id == panel_id) else {
+                    return Ok(());
+                };
+                let maximized = !self.panels[index].is_maximized;
+                self.panels[index]
+                    .surface
+                    .set_maximized(maximized)
+                    .context("failed to toggle window maximize state")?;
+                let surface = self.panels[index].surface.wl_surface().clone();
+                if let Some(index) = self.update_panel_from_commit(&surface) {
+                    self.invalidate_panel(index);
+                }
+                Ok(())
+            })(),
             XrInput::GpuDevice {
                 render_node,
                 limits,
@@ -512,6 +528,13 @@ impl Compositor {
             PanelSurface::X11 { window, .. } => window.is_fullscreen(),
             PanelSurface::Popup(_) => false,
         };
+        self.panels[index].is_maximized = match &self.panels[index].surface {
+            PanelSurface::Wayland(surface) => surface.current_state().states.contains(
+                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
+            ),
+            PanelSurface::X11 { window, .. } => window.is_maximized(),
+            PanelSurface::Popup(_) => false,
+        };
         if logical_size.is_none() && was_mapped {
             self.frame_sender.publish(PanelUpdate::Removed {
                 panel_id: self.panels[index].id,
@@ -690,6 +713,7 @@ impl Compositor {
             dmabuf,
             geometry,
             is_fullscreen: self.panels[index].is_fullscreen,
+            is_maximized: self.panels[index].is_maximized,
         });
         for (surface, _) in surfaces {
             self.complete_frame_callbacks(&surface);
@@ -1098,6 +1122,9 @@ impl XdgShellHandler for Compositor {
             is_fullscreen: surface.current_state().states.contains(
                 smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
             ),
+            is_maximized: surface.current_state().states.contains(
+                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
+            ),
             pose_is_explicit: false,
             resize_anchor: None,
             id: panel_id,
@@ -1119,6 +1146,7 @@ impl XdgShellHandler for Compositor {
         surface.with_pending_state(|state| {
             use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
             state.states.set(State::Fullscreen);
+            state.states.unset(State::Maximized);
             state.fullscreen_output = output;
         });
         let _ = surface.send_configure();
@@ -1128,6 +1156,22 @@ impl XdgShellHandler for Compositor {
             use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
             state.states.unset(State::Fullscreen);
             state.fullscreen_output = None;
+        });
+        let _ = surface.send_configure();
+    }
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        surface.with_pending_state(|state| {
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+            state.states.set(State::Maximized);
+            state.states.unset(State::Fullscreen);
+            state.fullscreen_output = None;
+        });
+        let _ = surface.send_configure();
+    }
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        surface.with_pending_state(|state| {
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+            state.states.unset(State::Maximized);
         });
         let _ = surface.send_configure();
     }

@@ -28,6 +28,8 @@ struct XrPanel {
     resize_pending: bool,
     is_fullscreen: bool,
     fullscreen_anchor_pose: Option<PanelPose>,
+    is_maximized: bool,
+    maximize_restore_width: Option<f32>,
 }
 
 struct XrEye {
@@ -103,6 +105,7 @@ fn reconcile_panel_geometry(
     temporary_pose: &mut PanelPose,
     committed: PanelGeometry,
     resizing: bool,
+    preserve_saved_width: bool,
 ) {
     if resizing {
         *current = committed;
@@ -113,8 +116,10 @@ fn reconcile_panel_geometry(
     let animated_pose = current.pose;
     *current = committed;
     current.pose = animated_pose;
-    saved_pose.width_m = committed.pose.width_m;
-    temporary_pose.width_m = committed.pose.width_m;
+    if !preserve_saved_width {
+        saved_pose.width_m = committed.pose.width_m;
+        temporary_pose.width_m = committed.pose.width_m;
+    }
 }
 
 fn update_dodge_targets(
@@ -129,7 +134,7 @@ fn update_dodge_targets(
     let geometries: Vec<_> = panels
         .iter()
         .map(|(id, panel)| {
-            let pose = if fixed_windows.contains(id) {
+            let pose = if fixed_windows.contains(id) || panel.is_maximized {
                 panel.geometry.pose
             } else {
                 panel.saved_pose
@@ -168,7 +173,16 @@ fn save_dodge_targets_except(
             continue;
         }
         panel.resize_pending = false;
-        panel.saved_pose = panel.temporary_pose;
+        panel.saved_pose = if panel.is_maximized {
+            PanelPose {
+                width_m: panel
+                    .maximize_restore_width
+                    .unwrap_or(panel.saved_pose.width_m),
+                ..panel.temporary_pose
+            }
+        } else {
+            panel.temporary_pose
+        };
         input.send(XrInput::MovePanel {
             panel_id: *panel_id,
             pose: panel.saved_pose,
@@ -539,19 +553,24 @@ pub fn run(
     let mut stage_floor_calibrated = false;
     let action_set = instance.create_action_set("spacetop", "Spacetop input", 0)?;
     let right_hand = instance.string_to_path("/user/hand/right")?;
+    let left_hand = instance.string_to_path("/user/hand/left")?;
     let aim_action =
         action_set.create_action::<xr::Posef>("aim_pose", "Aim pose", &[right_hand])?;
     let trigger_action = action_set.create_action::<bool>("trigger", "Trigger", &[right_hand])?;
-    let secondary_action =
-        action_set.create_action::<bool>("secondary", "Secondary click", &[right_hand])?;
+    let secondary_action = action_set.create_action::<bool>(
+        "secondary",
+        "Secondary click",
+        &[right_hand, left_hand],
+    )?;
     let grip_action = action_set.create_action::<bool>("grip", "Grip", &[right_hand])?;
     let stick_action =
         action_set.create_action::<xr::Vector2f>("stick", "Thumbstick", &[right_hand])?;
     let aim_path = instance.string_to_path("/user/hand/right/input/aim/pose")?;
-    for (profile, button, secondary, grip, stick) in [
+    for (profile, button, right_secondary, left_secondary, grip, stick) in [
         (
             "/interaction_profiles/khr/simple_controller",
             "select/click",
+            None,
             None,
             None,
             None,
@@ -560,6 +579,7 @@ pub fn run(
             "/interaction_profiles/oculus/touch_controller",
             "trigger/value",
             Some("b/click"),
+            Some("y/click"),
             Some("squeeze/value"),
             Some("thumbstick"),
         ),
@@ -567,6 +587,7 @@ pub fn run(
             "/interaction_profiles/valve/index_controller",
             "trigger/click",
             Some("b/click"),
+            Some("y/click"),
             Some("squeeze/value"),
             Some("thumbstick"),
         ),
@@ -574,12 +595,14 @@ pub fn run(
             "/interaction_profiles/htc/vive_controller",
             "trigger/click",
             Some("trackpad/click"),
+            Some("trackpad/click"),
             Some("squeeze/click"),
             Some("trackpad"),
         ),
         (
             "/interaction_profiles/microsoft/motion_controller",
             "trigger/value",
+            Some("trackpad/click"),
             Some("trackpad/click"),
             Some("squeeze/click"),
             Some("thumbstick"),
@@ -592,10 +615,16 @@ pub fn run(
                 instance.string_to_path(&format!("/user/hand/right/input/{button}"))?,
             ),
         ];
-        if let Some(secondary) = secondary {
+        if let Some(secondary) = right_secondary {
             bindings.push(xr::Binding::new(
                 &secondary_action,
                 instance.string_to_path(&format!("/user/hand/right/input/{secondary}"))?,
+            ));
+        }
+        if let Some(secondary) = left_secondary {
+            bindings.push(xr::Binding::new(
+                &secondary_action,
+                instance.string_to_path(&format!("/user/hand/left/input/{secondary}"))?,
             ));
         }
         if let Some(grip) = grip {
@@ -626,12 +655,14 @@ pub fn run(
     let mut pointer_tracked = false;
     let mut trigger_pressed = false;
     let mut secondary_pressed = false;
+    let mut maximize_right_chord_pressed = false;
     let mut grabbed_panel: Option<u64> = None;
     let mut grab_radius = config.window.default_distance_m;
     let mut grab_player_position = glam::Vec3::ZERO;
     let mut grab_initial_radius = config.window.default_distance_m;
     let mut grab_initial_width = 1.0_f32;
     let mut grab_direction_offset = glam::Vec2::ZERO;
+    let mut maximize_layout_dirty = false;
     let mut resizing_panel = None;
     let mut resize_geometry = None;
     let mut resize_initial_size = (0_i32, 0_i32);
@@ -763,6 +794,7 @@ pub fn run(
                             pointer_tracked = false;
                             trigger_pressed = false;
                             secondary_pressed = false;
+                            maximize_right_chord_pressed = false;
                             running = false;
                             timings.measure(
                                 "openxr/end-session",
@@ -787,6 +819,9 @@ pub fn run(
         let updates = frames.drain();
         for update in &updates {
             if let PanelUpdate::Removed { panel_id } = update {
+                maximize_layout_dirty |= panel_frames
+                    .get(panel_id)
+                    .is_some_and(|panel| panel.is_maximized);
                 timings.measure("mixed/panel-retire", Duration::ZERO, || {
                     panel_frames.remove(panel_id);
                 });
@@ -816,6 +851,7 @@ pub fn run(
                     dmabuf,
                     geometry,
                     is_fullscreen,
+                    is_maximized,
                 } => {
                     let shared = timings
                         .measure("gpu/dmabuf-import", Duration::ZERO, || {
@@ -836,15 +872,34 @@ pub fn run(
                     timings.measure("gpu/panel-replace", Duration::ZERO, || {
                         if let Some(panel) = panel_frames.get_mut(&panel_id) {
                             let fullscreen_changed = panel.is_fullscreen != is_fullscreen;
+                            let maximized_changed = panel.is_maximized != is_maximized;
+                            if maximized_changed && is_maximized {
+                                panel.maximize_restore_width = Some(panel.saved_pose.width_m);
+                            }
                             reconcile_panel_geometry(
                                 &mut panel.geometry,
                                 &mut panel.saved_pose,
                                 &mut panel.temporary_pose,
                                 geometry,
                                 panel.resize_pending && panel.is_fullscreen == is_fullscreen,
+                                panel.is_maximized || is_maximized,
                             );
                             panel.texture = texture;
                             panel.is_fullscreen = is_fullscreen;
+                            panel.is_maximized = is_maximized;
+                            if maximized_changed {
+                                maximize_layout_dirty = true;
+                                if is_maximized {
+                                    grabbed_panel = None;
+                                    resizing_panel = None;
+                                    resize_geometry = None;
+                                    resize_requested_size = None;
+                                } else if let Some(width) = panel.maximize_restore_width.take() {
+                                    panel.saved_pose.width_m = width;
+                                    panel.temporary_pose.width_m = width;
+                                    panel.geometry.pose.width_m = width;
+                                }
+                            }
                             if fullscreen_changed {
                                 panel.fullscreen_anchor_pose = None;
                                 if is_fullscreen {
@@ -880,12 +935,18 @@ pub fn run(
                                     resize_pending: false,
                                     is_fullscreen,
                                     fullscreen_anchor_pose: None,
+                                    is_maximized,
+                                    maximize_restore_width: is_maximized
+                                        .then_some(geometry.pose.width_m),
                                 },
                             );
                             if is_fullscreen {
                                 active_fullscreen_panel = Some(panel_id);
                             }
                             pending_spawn.insert(panel_id);
+                            if is_maximized {
+                                maximize_layout_dirty = true;
+                            }
                         }
                     });
                 }
@@ -982,6 +1043,26 @@ pub fn run(
                     );
                     save_dodge_targets(&mut panel_frames, &input)?;
                 }
+            }
+            for panel in panel_frames.values_mut().filter(|panel| panel.is_maximized) {
+                let distance = panel.geometry.pose.center.distance(grab_player_position);
+                panel.geometry.pose = PanelGeometry::fit_pose_to_angular_bounds(
+                    panel.geometry.pose,
+                    panel.geometry.logical_size,
+                    distance,
+                    config.window.maximized_max_width_degrees,
+                    config.window.maximized_max_height_degrees,
+                );
+            }
+            if maximize_layout_dirty && active_fullscreen_panel.is_none() {
+                update_dodge_targets(
+                    &mut panel_frames,
+                    &[],
+                    grab_player_position,
+                    config.window.collision_margin_m,
+                );
+                save_dodge_targets(&mut panel_frames, &input)?;
+                maximize_layout_dirty = false;
             }
             if let (Some(panel_id), Some(look_direction)) =
                 (active_fullscreen_panel, fullscreen_look_direction)
@@ -1245,6 +1326,31 @@ pub fn run(
                 let secondary = timings.measure("openxr/action-state", Duration::ZERO, || {
                     secondary_action.state(&session, right_hand)
                 })?;
+                let left_secondary =
+                    timings.measure("openxr/action-state", Duration::ZERO, || {
+                        secondary_action.state(&session, left_hand)
+                    })?;
+                let right_chord_down = grip.is_active
+                    && grip.current_state
+                    && grabbed_panel.is_some()
+                    && secondary.is_active
+                    && secondary.current_state;
+                let right_chord_was_down = maximize_right_chord_pressed;
+                if right_chord_down && !right_chord_was_down {
+                    input.send(XrInput::ToggleMaximize {
+                        panel_id: grabbed_panel.expect("maximize chord requires a grabbed panel"),
+                    })?;
+                }
+                let left_chord_down = grip.is_active
+                    && grip.current_state
+                    && grabbed_panel.is_some()
+                    && left_secondary.is_active
+                    && left_secondary.current_state;
+                if left_chord_down && left_secondary.changed_since_last_sync {
+                    input.send(XrInput::ToggleMaximize {
+                        panel_id: grabbed_panel.expect("maximize chord requires a grabbed panel"),
+                    })?;
+                }
                 for (button, down, previous) in [
                     (
                         0x110,
@@ -1258,6 +1364,10 @@ pub fn run(
                     ),
                 ] {
                     if down != *previous {
+                        if button == 0x111 && (right_chord_down || right_chord_was_down) {
+                            *previous = down;
+                            continue;
+                        }
                         if button == 0x111 && down {
                             input.send(XrInput::LauncherToggle)?;
                         }
@@ -1274,6 +1384,7 @@ pub fn run(
                         *previous = down;
                     }
                 }
+                maximize_right_chord_pressed = right_chord_down;
             }
         } else {
             cursor_ray = None;
@@ -1311,6 +1422,7 @@ pub fn run(
                 input.send(XrInput::PointerLost { time_ms })?;
                 trigger_pressed = false;
                 secondary_pressed = false;
+                maximize_right_chord_pressed = false;
             }
         }
         pointer_tracked = tracked_this_frame;
@@ -1354,6 +1466,16 @@ pub fn run(
             } else {
                 panel.geometry.pose =
                     smooth_pose(panel.geometry.pose, panel.temporary_pose, smoothing);
+            }
+            if panel.is_maximized && Some(*panel_id) != active_fullscreen_panel {
+                let distance = panel.geometry.pose.center.distance(grab_player_position);
+                panel.geometry.pose = PanelGeometry::fit_pose_to_angular_bounds(
+                    panel.geometry.pose,
+                    panel.geometry.logical_size,
+                    distance,
+                    config.window.maximized_max_width_degrees,
+                    config.window.maximized_max_height_degrees,
+                );
             }
         }
         timings.measure("openxr/begin-frame", period, || frame_stream.begin())?;

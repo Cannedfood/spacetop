@@ -69,6 +69,8 @@ enum Message {
     WindowFullscreenMaxWidthChanged(f32),
     WindowFullscreenMaxHeightChanged(f32),
     WindowFullscreenEnvironmentDimChanged(f32),
+    WindowMaximizedMaxWidthChanged(f32),
+    WindowMaximizedMaxHeightChanged(f32),
     WindowBorderWidthChanged(f32),
     WindowBorderRadiusChanged(f32),
     WindowCursorProximityChanged(f32),
@@ -114,6 +116,7 @@ enum ResetTarget {
     WindowGrabbedBorderColor,
     WindowPlacementSection,
     WindowFullscreenSection,
+    WindowMaximizedSection,
     WindowResolutionSection,
     WindowBorderSection,
 }
@@ -205,6 +208,8 @@ impl SettingsApp {
                 | Message::WindowFullscreenMaxWidthChanged(_)
                 | Message::WindowFullscreenMaxHeightChanged(_)
                 | Message::WindowFullscreenEnvironmentDimChanged(_)
+                | Message::WindowMaximizedMaxWidthChanged(_)
+                | Message::WindowMaximizedMaxHeightChanged(_)
                 | Message::WindowBorderWidthChanged(_)
                 | Message::WindowBorderRadiusChanged(_)
                 | Message::WindowCursorProximityChanged(_)
@@ -319,6 +324,12 @@ impl SettingsApp {
             }
             Message::WindowFullscreenEnvironmentDimChanged(value) => {
                 self.config.window.fullscreen_environment_dim = value / 100.0
+            }
+            Message::WindowMaximizedMaxWidthChanged(value) => {
+                self.config.window.maximized_max_width_degrees = value
+            }
+            Message::WindowMaximizedMaxHeightChanged(value) => {
+                self.config.window.maximized_max_height_degrees = value
             }
             Message::WindowBorderWidthChanged(value) => self.config.window.border_width_px = value,
             Message::WindowBorderRadiusChanged(value) => {
@@ -497,6 +508,12 @@ impl SettingsApp {
                     defaults.window.fullscreen_max_height_degrees;
                 self.config.window.fullscreen_environment_dim =
                     defaults.window.fullscreen_environment_dim;
+            }
+            ResetTarget::WindowMaximizedSection => {
+                self.config.window.maximized_max_width_degrees =
+                    defaults.window.maximized_max_width_degrees;
+                self.config.window.maximized_max_height_degrees =
+                    defaults.window.maximized_max_height_degrees;
             }
             ResetTarget::WindowResolutionSection => {
                 self.config.window.pixels_per_degree = defaults.window.pixels_per_degree;
@@ -1135,6 +1152,39 @@ impl SettingsApp {
                     == defaults.window.fullscreen_environment_dim,
             ResetTarget::WindowFullscreenSection,
         );
+        let maximized = section(
+            "MAXIMIZED WINDOW",
+            column![
+                slider_row(
+                    "MAX WIDTH (DEG)",
+                    self.config.window.maximized_max_width_degrees,
+                    1.0,
+                    170.0,
+                    1.0,
+                    Message::WindowMaximizedMaxWidthChanged,
+                    self.config.window.maximized_max_width_degrees
+                        == defaults.window.maximized_max_width_degrees,
+                    ResetTarget::WindowMaximizedSection,
+                ),
+                slider_row(
+                    "MAX HEIGHT (DEG)",
+                    self.config.window.maximized_max_height_degrees,
+                    1.0,
+                    170.0,
+                    1.0,
+                    Message::WindowMaximizedMaxHeightChanged,
+                    self.config.window.maximized_max_height_degrees
+                        == defaults.window.maximized_max_height_degrees,
+                    ResetTarget::WindowMaximizedSection,
+                ),
+            ]
+            .spacing(10),
+            self.config.window.maximized_max_width_degrees
+                == defaults.window.maximized_max_width_degrees
+                && self.config.window.maximized_max_height_degrees
+                    == defaults.window.maximized_max_height_degrees,
+            ResetTarget::WindowMaximizedSection,
+        );
 
         let windows = section(
             "WINDOWS BORDER",
@@ -1327,6 +1377,7 @@ impl SettingsApp {
                         floor,
                         placement,
                         fullscreen,
+                        maximized,
                         window_scale,
                         windows
                     ]
@@ -1710,6 +1761,26 @@ mod tests {
     }
 
     #[test]
+    fn maximized_window_settings_can_be_changed_and_reset() {
+        let mut app = SettingsApp::from_config(AppConfig::default(), String::new(), false);
+
+        let _ = app.update(Message::WindowMaximizedMaxWidthChanged(90.0));
+        let _ = app.update(Message::WindowMaximizedMaxHeightChanged(60.0));
+        assert_eq!(app.config.window.maximized_max_width_degrees, 90.0);
+        assert_eq!(app.config.window.maximized_max_height_degrees, 60.0);
+
+        app.reset(ResetTarget::WindowMaximizedSection);
+        assert_eq!(
+            app.config.window.maximized_max_width_degrees,
+            AppConfig::default().window.maximized_max_width_degrees
+        );
+        assert_eq!(
+            app.config.window.maximized_max_height_degrees,
+            AppConfig::default().window.maximized_max_height_degrees
+        );
+    }
+
+    #[test]
     fn section_resets_restore_defaults_and_text_fields() {
         let defaults = AppConfig::default();
         let mut config = defaults.clone();
@@ -1727,6 +1798,8 @@ mod tests {
         config.window.fullscreen_max_width_degrees = 120.0;
         config.window.fullscreen_max_height_degrees = 80.0;
         config.window.fullscreen_environment_dim = 0.75;
+        config.window.maximized_max_width_degrees = 90.0;
+        config.window.maximized_max_height_degrees = 60.0;
 
         let mut app = SettingsApp::from_config(config, String::new(), false);
         app.reset(ResetTarget::ApplicationLauncher);
@@ -1734,6 +1807,7 @@ mod tests {
         app.reset(ResetTarget::FloorSection);
         app.reset(ResetTarget::WindowPlacementSection);
         app.reset(ResetTarget::WindowFullscreenSection);
+        app.reset(ResetTarget::WindowMaximizedSection);
         app.reset(ResetTarget::WindowResolutionSection);
         app.reset(ResetTarget::WindowBorderSection);
 
