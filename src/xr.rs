@@ -26,6 +26,8 @@ struct XrPanel {
     saved_pose: PanelPose,
     temporary_pose: PanelPose,
     resize_pending: bool,
+    is_fullscreen: bool,
+    fullscreen_anchor_pose: Option<PanelPose>,
 }
 
 struct XrEye {
@@ -121,6 +123,9 @@ fn update_dodge_targets(
     player: glam::Vec3,
     margin_m: f32,
 ) {
+    if panels.values().any(|panel| panel.is_fullscreen) {
+        return;
+    }
     let geometries: Vec<_> = panels
         .iter()
         .map(|(id, panel)| {
@@ -155,6 +160,9 @@ fn save_dodge_targets_except(
     input: &crate::bridge::InputSender,
     excluded_panel: Option<u64>,
 ) -> Result<()> {
+    if panels.values().any(|panel| panel.is_fullscreen) {
+        return Ok(());
+    }
     for (panel_id, panel) in panels {
         if Some(*panel_id) == excluded_panel {
             continue;
@@ -531,19 +539,30 @@ pub fn run(
     let mut stage_floor_calibrated = false;
     let action_set = instance.create_action_set("spacetop", "Spacetop input", 0)?;
     let right_hand = instance.string_to_path("/user/hand/right")?;
+    let left_hand = instance.string_to_path("/user/hand/left")?;
     let aim_action =
         action_set.create_action::<xr::Posef>("aim_pose", "Aim pose", &[right_hand])?;
     let trigger_action = action_set.create_action::<bool>("trigger", "Trigger", &[right_hand])?;
-    let secondary_action =
-        action_set.create_action::<bool>("secondary", "Secondary click", &[right_hand])?;
+    let launcher_action =
+        action_set.create_action::<bool>("launcher", "Launcher toggle", &[right_hand])?;
+    let face_click_action = action_set.create_action::<bool>(
+        "face_click",
+        "Face button click",
+        &[left_hand, right_hand],
+    )?;
+    let stick_click_action =
+        action_set.create_action::<bool>("stick_click", "Thumbstick click", &[right_hand])?;
     let grip_action = action_set.create_action::<bool>("grip", "Grip", &[right_hand])?;
     let stick_action =
         action_set.create_action::<xr::Vector2f>("stick", "Thumbstick", &[right_hand])?;
     let aim_path = instance.string_to_path("/user/hand/right/input/aim/pose")?;
-    for (profile, button, secondary, grip, stick) in [
+    for (profile, button, launcher, left_face, right_face, grip, stick, stick_click) in [
         (
             "/interaction_profiles/khr/simple_controller",
             "select/click",
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -552,29 +571,41 @@ pub fn run(
             "/interaction_profiles/oculus/touch_controller",
             "trigger/value",
             Some("b/click"),
+            Some("x/click"),
+            Some("a/click"),
             Some("squeeze/value"),
             Some("thumbstick"),
+            Some("thumbstick/click"),
         ),
         (
             "/interaction_profiles/valve/index_controller",
             "trigger/click",
             Some("b/click"),
+            Some("a/click"),
+            Some("a/click"),
             Some("squeeze/value"),
             Some("thumbstick"),
+            Some("thumbstick/click"),
         ),
         (
             "/interaction_profiles/htc/vive_controller",
             "trigger/click",
             Some("trackpad/click"),
+            None,
+            None,
             Some("squeeze/click"),
             Some("trackpad"),
+            None,
         ),
         (
             "/interaction_profiles/microsoft/motion_controller",
             "trigger/value",
             Some("trackpad/click"),
+            None,
+            None,
             Some("squeeze/click"),
             Some("thumbstick"),
+            Some("thumbstick/click"),
         ),
     ] {
         let mut bindings = vec![
@@ -584,10 +615,22 @@ pub fn run(
                 instance.string_to_path(&format!("/user/hand/right/input/{button}"))?,
             ),
         ];
-        if let Some(secondary) = secondary {
+        if let Some(launcher) = launcher {
             bindings.push(xr::Binding::new(
-                &secondary_action,
-                instance.string_to_path(&format!("/user/hand/right/input/{secondary}"))?,
+                &launcher_action,
+                instance.string_to_path(&format!("/user/hand/right/input/{launcher}"))?,
+            ));
+        }
+        if let Some(left_face) = left_face {
+            bindings.push(xr::Binding::new(
+                &face_click_action,
+                instance.string_to_path(&format!("/user/hand/left/input/{left_face}"))?,
+            ));
+        }
+        if let Some(right_face) = right_face {
+            bindings.push(xr::Binding::new(
+                &face_click_action,
+                instance.string_to_path(&format!("/user/hand/right/input/{right_face}"))?,
             ));
         }
         if let Some(grip) = grip {
@@ -602,6 +645,12 @@ pub fn run(
                 instance.string_to_path(&format!("/user/hand/right/input/{stick}"))?,
             ));
         }
+        if let Some(stick_click) = stick_click {
+            bindings.push(xr::Binding::new(
+                &stick_click_action,
+                instance.string_to_path(&format!("/user/hand/right/input/{stick_click}"))?,
+            ));
+        }
         instance
             .suggest_interaction_profile_bindings(instance.string_to_path(profile)?, &bindings)?;
     }
@@ -611,12 +660,15 @@ pub fn run(
     let mut running = false;
     let mut exit = false;
     let mut panel_frames = PanelImages::new();
+    let mut active_fullscreen_panel = None;
     let mut pending_spawn = std::collections::BTreeSet::new();
     let mut cursor_ray: Option<Ray3> = None;
     let mut cursor_sphere_radius = config.window.default_distance_m;
     let mut pointer_tracked = false;
-    let mut trigger_pressed = false;
-    let mut secondary_pressed = false;
+    let mut left_click_pressed = false;
+    let mut middle_click_pressed = false;
+    let mut stick_click_consumed = false;
+    let mut launcher_pressed = false;
     let mut grabbed_panel: Option<u64> = None;
     let mut grab_radius = config.window.default_distance_m;
     let mut grab_player_position = glam::Vec3::ZERO;
@@ -755,8 +807,9 @@ pub fn run(
                         xr::SessionState::STOPPING => {
                             input.send(XrInput::PointerLost { time_ms: 0 })?;
                             pointer_tracked = false;
-                            trigger_pressed = false;
-                            secondary_pressed = false;
+                            left_click_pressed = false;
+                            middle_click_pressed = false;
+                            launcher_pressed = false;
                             running = false;
                             timings.measure(
                                 "openxr/end-session",
@@ -788,6 +841,19 @@ pub fn run(
                 if grabbed_panel == Some(*panel_id) {
                     grabbed_panel = None;
                 }
+                if active_fullscreen_panel == Some(*panel_id) {
+                    active_fullscreen_panel = panel_frames
+                        .iter()
+                        .rev()
+                        .find(|(_, panel)| panel.is_fullscreen)
+                        .map(|(id, _)| *id);
+                    if active_fullscreen_panel.is_none() {
+                        for panel in panel_frames.values_mut() {
+                            panel.geometry.pose = panel.saved_pose;
+                            panel.temporary_pose = panel.saved_pose;
+                        }
+                    }
+                }
             }
         }
         for command in updates {
@@ -796,6 +862,7 @@ pub fn run(
                     panel_id,
                     dmabuf,
                     geometry,
+                    is_fullscreen,
                 } => {
                     let shared = timings
                         .measure("gpu/dmabuf-import", Duration::ZERO, || {
@@ -815,14 +882,40 @@ pub fn run(
                     })?;
                     timings.measure("gpu/panel-replace", Duration::ZERO, || {
                         if let Some(panel) = panel_frames.get_mut(&panel_id) {
+                            let fullscreen_changed = panel.is_fullscreen != is_fullscreen;
                             reconcile_panel_geometry(
                                 &mut panel.geometry,
                                 &mut panel.saved_pose,
                                 &mut panel.temporary_pose,
                                 geometry,
-                                panel.resize_pending,
+                                panel.resize_pending && panel.is_fullscreen == is_fullscreen,
                             );
                             panel.texture = texture;
+                            panel.is_fullscreen = is_fullscreen;
+                            if fullscreen_changed {
+                                panel.fullscreen_anchor_pose = None;
+                                if is_fullscreen {
+                                    active_fullscreen_panel = Some(panel_id);
+                                } else if active_fullscreen_panel == Some(panel_id) {
+                                    active_fullscreen_panel = panel_frames
+                                        .iter()
+                                        .rev()
+                                        .find(|(_, candidate)| candidate.is_fullscreen)
+                                        .map(|(id, _)| *id);
+                                    if active_fullscreen_panel.is_none() {
+                                        for panel in panel_frames.values_mut() {
+                                            panel.geometry.pose = panel.saved_pose;
+                                            panel.temporary_pose = panel.saved_pose;
+                                        }
+                                    }
+                                }
+                                if is_fullscreen {
+                                    grabbed_panel = None;
+                                    resizing_panel = None;
+                                    resize_geometry = None;
+                                    resize_requested_size = None;
+                                }
+                            }
                         } else {
                             panel_frames.insert(
                                 panel_id,
@@ -832,8 +925,13 @@ pub fn run(
                                     saved_pose: geometry.pose,
                                     temporary_pose: geometry.pose,
                                     resize_pending: false,
+                                    is_fullscreen,
+                                    fullscreen_anchor_pose: None,
                                 },
                             );
+                            if is_fullscreen {
+                                active_fullscreen_panel = Some(panel_id);
+                            }
                             pending_spawn.insert(panel_id);
                         }
                     });
@@ -900,7 +998,9 @@ pub fn run(
             let orientation =
                 glam::Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w);
             let look_direction = orientation * glam::Vec3::NEG_Z;
+            let mut fullscreen_look_direction = None;
             if view_state.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+                fullscreen_look_direction = Some(look_direction);
                 gaze_ray = Some(Ray3 {
                     origin: grab_player_position,
                     direction: look_direction,
@@ -929,6 +1029,17 @@ pub fn run(
                     );
                     save_dodge_targets(&mut panel_frames, &input)?;
                 }
+            }
+            if let (Some(panel_id), Some(look_direction)) =
+                (active_fullscreen_panel, fullscreen_look_direction)
+                && let Some(panel) = panel_frames.get_mut(&panel_id)
+                && panel.fullscreen_anchor_pose.is_none()
+            {
+                panel.fullscreen_anchor_pose = Some(PanelPose::looking_from_to(
+                    grab_player_position
+                        + look_direction.normalize_or_zero() * config.window.default_distance_m,
+                    grab_player_position,
+                ));
             }
         }
         // Update the action set and forward the right controller's aim ray.
@@ -972,6 +1083,9 @@ pub fn run(
                 let nearest_proximity = cursor_ray.and_then(|ray| {
                     panel_frames
                         .iter()
+                        .filter(|(id, _)| {
+                            active_fullscreen_panel.is_none_or(|fullscreen| **id == fullscreen)
+                        })
                         .filter_map(|(id, panel)| {
                             let hit = panel.geometry.intersect_unbounded(ray)?;
                             let width = panel.geometry.logical_size.w as f32;
@@ -1018,6 +1132,10 @@ pub fn run(
                         grabbed_panel = cursor_ray.and_then(|ray| {
                             panel_frames
                                 .iter()
+                                .filter(|(id, _)| {
+                                    active_fullscreen_panel
+                                        .is_none_or(|fullscreen| **id == fullscreen)
+                                })
                                 .filter_map(|(id, panel)| {
                                     panel
                                         .geometry
@@ -1063,6 +1181,7 @@ pub fn run(
                     && trigger.current_state
                     && grabbed_panel.is_none()
                     && let Some(panel_id) = hovered_panel
+                    && active_fullscreen_panel.is_none_or(|fullscreen| fullscreen == panel_id)
                     && let Some(panel) = panel_frames.get(&panel_id)
                     && let Some(ray) = cursor_ray
                     && let Some(hit) = panel
@@ -1170,25 +1289,46 @@ pub fn run(
                         });
                     }
                 }
-                let secondary = timings.measure("openxr/action-state", Duration::ZERO, || {
-                    secondary_action.state(&session, right_hand)
+                let left_face = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    face_click_action.state(&session, left_hand)
                 })?;
+                let right_face = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    face_click_action.state(&session, right_hand)
+                })?;
+                let stick_click = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    stick_click_action.state(&session, right_hand)
+                })?;
+                let launcher = timings.measure("openxr/action-state", Duration::ZERO, || {
+                    launcher_action.state(&session, right_hand)
+                })?;
+                let stick_click_down = stick_click.is_active && stick_click.current_state;
+                if !stick_click_down {
+                    stick_click_consumed = false;
+                } else if grabbed_panel.is_some() {
+                    stick_click_consumed = true;
+                }
+                if stick_click.changed_since_last_sync
+                    && stick_click_down
+                    && let Some(panel_id) = grabbed_panel.take()
+                {
+                    input.send(XrInput::ClosePanel { panel_id })?;
+                    save_dodge_targets_except(&mut panel_frames, &input, Some(panel_id))?;
+                }
+                let left_click_down =
+                    (trigger.is_active && trigger.current_state && resizing_panel.is_none())
+                        || (left_face.is_active && left_face.current_state)
+                        || (right_face.is_active && right_face.current_state);
+                let middle_click_down =
+                    stick_click_down && grabbed_panel.is_none() && !stick_click_consumed;
+                if launcher.is_active && launcher.current_state && !launcher_pressed {
+                    input.send(XrInput::LauncherToggle)?;
+                }
+                launcher_pressed = launcher.is_active && launcher.current_state;
                 for (button, down, previous) in [
-                    (
-                        0x110,
-                        trigger.is_active && trigger.current_state && resizing_panel.is_none(),
-                        &mut trigger_pressed,
-                    ),
-                    (
-                        0x111,
-                        secondary.is_active && secondary.current_state,
-                        &mut secondary_pressed,
-                    ),
+                    (0x110, left_click_down, &mut left_click_pressed),
+                    (0x112, middle_click_down, &mut middle_click_pressed),
                 ] {
                     if down != *previous {
-                        if button == 0x111 && down {
-                            input.send(XrInput::LauncherToggle)?;
-                        }
                         input.send(XrInput::Ray {
                             ray: cursor_ray.expect("tracked ray assigned"),
                             gaze_ray,
@@ -1237,8 +1377,9 @@ pub fn run(
             resize_requested_size = None;
             if pointer_tracked {
                 input.send(XrInput::PointerLost { time_ms })?;
-                trigger_pressed = false;
-                secondary_pressed = false;
+                left_click_pressed = false;
+                middle_click_pressed = false;
+                launcher_pressed = false;
             }
         }
         pointer_tracked = tracked_this_frame;
@@ -1246,7 +1387,9 @@ pub fn run(
             let _ = input.try_send(XrInput::GazeRay { ray });
         }
         let active_panel = grabbed_panel.or(resizing_panel);
-        if let Some(panel_id) = active_panel {
+        if let Some(panel_id) = active_panel
+            && active_fullscreen_panel.is_none_or(|fullscreen| fullscreen == panel_id)
+        {
             update_dodge_targets(
                 &mut panel_frames,
                 &[panel_id],
@@ -1264,7 +1407,18 @@ pub fn run(
                 .exp()
         };
         for (panel_id, panel) in &mut panel_frames {
-            if Some(*panel_id) == active_panel {
+            if Some(*panel_id) == active_fullscreen_panel {
+                if let Some(anchor) = panel.fullscreen_anchor_pose {
+                    let distance = anchor.center.distance(grab_player_position);
+                    panel.geometry.pose = PanelGeometry::fit_pose_to_angular_bounds(
+                        anchor,
+                        panel.geometry.logical_size,
+                        distance,
+                        config.window.fullscreen_max_width_degrees,
+                        config.window.fullscreen_max_height_degrees,
+                    );
+                }
+            } else if Some(*panel_id) == active_panel {
                 panel.geometry.pose = panel.temporary_pose;
             } else {
                 panel.geometry.pose =
@@ -1299,14 +1453,20 @@ pub fn run(
                 cursor_pose(
                     ray,
                     grab_player_position,
-                    panel_frames.values().map(|panel| panel.geometry),
+                    panel_frames
+                        .iter()
+                        .filter(|(id, _)| {
+                            active_fullscreen_panel.is_none_or(|fullscreen| **id == fullscreen)
+                        })
+                        .map(|(_, panel)| panel.geometry),
                     &mut cursor_sphere_radius,
                 )
             }),
         };
         let panel_draws = panel_frames
-            .values()
-            .map(|panel| (&panel.texture, panel.geometry))
+            .iter()
+            .filter(|(id, _)| active_fullscreen_panel.is_none_or(|fullscreen| **id == fullscreen))
+            .map(|(_, panel)| (&panel.texture, panel.geometry))
             .collect::<Vec<_>>();
         let scene_frame = SceneFrame {
             skybox: Some(skybox),
@@ -1319,6 +1479,11 @@ pub fn run(
             }),
             grabbed_panel: grabbed_panel
                 .and_then(|id| panel_frames.get(&id).map(|panel| panel.geometry)),
+            environment_dim: if active_fullscreen_panel.is_some() {
+                config.window.fullscreen_environment_dim
+            } else {
+                0.0
+            },
             floor_y,
             texture_sample_phase: rendered_frame_index & 1,
         };

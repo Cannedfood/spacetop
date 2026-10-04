@@ -15,6 +15,23 @@ Then start Spacetop from the project directory:
 cargo run --release
 ```
 
+### Arch Linux installation
+
+On Arch Linux, build and install the package from the repository's Arch
+packaging directory:
+
+```sh
+cd packaging/archlinux
+makepkg -si
+```
+
+This installs Spacetop, Space Launcher, and Space Settings, including desktop
+menu entries. Spacetop runs as an application inside your existing desktop
+session; it requires a separately installed and configured OpenXR runtime and a
+compatible Vulkan 1.2 GPU. See
+[the Arch Linux packaging notes](packaging/archlinux/README.md) for
+dependencies and runtime setup.
+
 Install `Xwayland` (version 23.1 or newer) to run X11 applications. Spacetop starts
 its own rootless XWayland server automatically when the executable is available.
 Without it, native Wayland applications still work.
@@ -80,6 +97,9 @@ default_distance_m = 1.6
 pixels_per_degree = 30.0
 display_scale = 1.0
 reflection_atlas_size = 256
+fullscreen_max_width_degrees = 100.0
+fullscreen_max_height_degrees = 75.0
+fullscreen_environment_dim = 0.5
 
 [cursor]
 default_distance_m = 1.6
@@ -132,12 +152,23 @@ cargo run -p spacesettings
 Saving replaces the file atomically; a running Spacetop instance picks up the
 new settings automatically.
 
+Wayland and X11 windows can request fullscreen. The fullscreen window is placed
+in front of the user in LOCAL space, fitted within the configured maximum
+angular width and height, while the other windows are hidden and the
+environment is dimmed. The fullscreen width and height settings accept
+`1`–`170` degrees; environment dimming accepts `0` (off) to `1` (fully dimmed).
+Space Settings exposes these controls in its Fullscreen section. When the
+window leaves fullscreen, the previous window layout is restored.
+
 ## Keyboard And Pointer Input
 
-Point with the right controller and pull the trigger to click. Secondary click
-uses B on Touch/Index controllers or trackpad click on Vive/Microsoft motion
-controllers. The simple-controller profile has no secondary-click binding.
-Grip moves the panel; the stick scrolls when not gripping.
+Point with the right controller and pull the trigger, or press X/A on the
+Touch controllers (A on Index controllers), to left-click. Pressing the right
+thumbstick clicks the middle mouse button on controllers with a thumbstick;
+while grabbing a window, pressing it closes the grabbed window instead.
+Press B on Touch/Index controllers or trackpad click on Vive/Microsoft motion
+controllers to open or close the configured launcher. Grip moves the panel;
+the stick scrolls when not gripping.
 
 Spacetop automatically discovers readable keyboard and mouse event devices on
 the current seat (`XDG_SEAT`, or `seat0` if unset), using udev's keyboard/mouse

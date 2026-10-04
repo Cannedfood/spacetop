@@ -169,6 +169,29 @@ fn new_window_vertical_angle_offsets_the_aim_direction() {
 }
 
 #[test]
+fn fullscreen_panel_fits_within_both_angular_bounds() {
+    let geometry = panel();
+    let distance = 1.6;
+    let fitted = PanelGeometry::fit_pose_to_angular_bounds(
+        geometry.pose,
+        geometry.logical_size,
+        distance,
+        100.0,
+        50.0,
+    );
+    let width_degrees = 2.0 * (fitted.width_m / (2.0 * distance)).atan().to_degrees();
+    let height_m = fitted.width_m * geometry.logical_size.h as f32 / geometry.logical_size.w as f32;
+    let height_degrees = 2.0 * (height_m / (2.0 * distance)).atan().to_degrees();
+
+    assert!(width_degrees <= 100.0);
+    assert!(height_degrees <= 50.0);
+    assert!((height_degrees - 50.0).abs() < 1.0e-4);
+    assert_eq!(fitted.center, geometry.pose.center);
+    assert_eq!(fitted.yaw, geometry.pose.yaw);
+    assert_eq!(fitted.pitch, geometry.pose.pitch);
+}
+
+#[test]
 fn dodge_windows_moves_overlapping_panels_and_keeps_fixed_pose() {
     let first = panel();
     let second = PanelGeometry {

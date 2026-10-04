@@ -62,6 +62,9 @@ pub struct WindowConfig {
     pub default_vertical_angle_degrees: f32,
     pub animation_half_time_s: f32,
     pub collision_margin_m: f32,
+    pub fullscreen_max_width_degrees: f32,
+    pub fullscreen_max_height_degrees: f32,
+    pub fullscreen_environment_dim: f32,
 
     pub cursor_proximity_radius_px: f32,
     pub padding_px: f32,
@@ -267,6 +270,9 @@ impl Default for WindowConfig {
             default_vertical_angle_degrees: -10.0,
             animation_half_time_s: 0.2,
             collision_margin_m: 0.04,
+            fullscreen_max_width_degrees: 100.0,
+            fullscreen_max_height_degrees: 75.0,
+            fullscreen_environment_dim: 0.5,
 
             cursor_proximity_radius_px: 301.0,
             padding_px: 42.0,
@@ -561,6 +567,21 @@ impl AppConfig {
             self.window.collision_margin_m.is_finite()
                 && (0.0..=0.5).contains(&self.window.collision_margin_m),
             "window.collision_margin_m must be between 0 and 0.5 meters"
+        );
+        ensure!(
+            self.window.fullscreen_max_width_degrees.is_finite()
+                && (1.0..=170.0).contains(&self.window.fullscreen_max_width_degrees),
+            "window.fullscreen_max_width_degrees must be between 1 and 170 degrees"
+        );
+        ensure!(
+            self.window.fullscreen_max_height_degrees.is_finite()
+                && (1.0..=170.0).contains(&self.window.fullscreen_max_height_degrees),
+            "window.fullscreen_max_height_degrees must be between 1 and 170 degrees"
+        );
+        ensure!(
+            self.window.fullscreen_environment_dim.is_finite()
+                && (0.0..=1.0).contains(&self.window.fullscreen_environment_dim),
+            "window.fullscreen_environment_dim must be between 0 and 1"
         );
         for (name, value, maximum) in [
             ("window.padding_px", self.window.padding_px, 500.0),
@@ -923,6 +944,30 @@ mod tests {
         config.window.collision_margin_m = -0.01;
         assert!(config.validate().is_err());
         config.window.collision_margin_m = f32::NAN;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_fullscreen_settings() {
+        let mut config = AppConfig::default();
+        config.window.fullscreen_max_width_degrees = 120.0;
+        config.window.fullscreen_max_height_degrees = 80.0;
+        config.window.fullscreen_environment_dim = 0.75;
+        assert!(config.validate().is_ok());
+
+        config.window.fullscreen_max_width_degrees = 0.0;
+        assert!(config.validate().is_err());
+        config.window.fullscreen_max_width_degrees = 171.0;
+        assert!(config.validate().is_err());
+
+        config.window.fullscreen_max_width_degrees = 100.0;
+        config.window.fullscreen_max_height_degrees = f32::NAN;
+        assert!(config.validate().is_err());
+        config.window.fullscreen_max_height_degrees = 75.0;
+
+        config.window.fullscreen_environment_dim = -0.01;
+        assert!(config.validate().is_err());
+        config.window.fullscreen_environment_dim = 1.01;
         assert!(config.validate().is_err());
     }
 

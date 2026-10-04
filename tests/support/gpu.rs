@@ -263,6 +263,7 @@ impl Vulkan {
                     cursor: scene.cursor,
                     cursor_close_panel: None,
                     grabbed_panel: None,
+                    environment_dim: 0.0,
                     floor_y: scene.floor_y,
                     texture_sample_phase: 0,
                 };

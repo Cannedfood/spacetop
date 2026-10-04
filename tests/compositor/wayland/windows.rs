@@ -6,6 +6,48 @@ use std::{io::Write, os::fd::AsFd};
 use wayland_client::protocol::wl_shm;
 
 #[test]
+fn fullscreen_requests_toggle_compositor_panel_state() {
+    let mut app = super::fixture::WaylandApp::new(None);
+    assert!(!app.compositor.panels[0].is_fullscreen);
+
+    app.toplevel.set_fullscreen(None);
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    app.surface.commit();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert!(app.compositor.panels[0].is_fullscreen);
+
+    app.toplevel.unset_fullscreen();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    app.surface.commit();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert!(!app.compositor.panels[0].is_fullscreen);
+}
+
+#[test]
 fn pointer_coordinates_match_logical_content_pixels() {
     let mut app = super::fixture::WaylandApp::new(None);
     let geometry = app.compositor.panels[0].geometry.unwrap();
@@ -138,6 +180,24 @@ fn resize_panel_uses_wayland_window_geometry_size() {
     }
 }
 
+#[test]
+fn close_panel_sends_a_close_request_to_the_wayland_window() {
+    let mut app = super::fixture::WaylandApp::new(None);
+    let panel_id = app.compositor.panels[0].id;
+
+    app.compositor
+        .handle_xr_input(crate::XrInput::ClosePanel { panel_id });
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+
+    assert_eq!(app.client.toplevel_closes, 1);
+}
+
 pub(super) fn exercise(app: &mut WaylandApp) {
     let WaylandApp {
         display,
@@ -192,6 +252,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
                 panel_id,
                 dmabuf,
                 geometry,
+                is_fullscreen,
             } = receiver.try_recv().unwrap()
             else {
                 panic!("mapped window must publish its own GPU image");
@@ -199,6 +260,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
             assert_eq!(panel_id, second_id);
             assert_eq!(geometry.pose, second_pose);
             assert_eq!(geometry.logical_size, expected_size.into());
+            assert!(!is_fullscreen);
             let shared = crate::gpu::SharedImage::import(
                 &vulkan.instance,
                 &vulkan.device,

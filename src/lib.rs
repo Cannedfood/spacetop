@@ -94,6 +94,7 @@ struct ToplevelPanel {
     surface: PanelSurface,
     pose: PanelPose,
     geometry: Option<PanelGeometry>,
+    is_fullscreen: bool,
     pose_is_explicit: bool,
     resize_anchor: Option<(PanelGeometry, [bool; 4])>,
     id: u64,
@@ -288,6 +289,20 @@ impl Compositor {
                         .flatten()
                     {
                         panel.pose = geometry.root_pose(root_size, panel.bounds);
+                    }
+                }
+                Ok(())
+            }
+            XrInput::ClosePanel { panel_id } => {
+                if let Some(panel) = self.panels.iter().find(|panel| panel.id == panel_id) {
+                    match &panel.surface {
+                        x11::PanelSurface::Wayland(surface) => surface.send_close(),
+                        x11::PanelSurface::X11 { window, .. } => {
+                            if let Err(error) = window.close() {
+                                eprintln!("failed to close X11 window: {error}");
+                            }
+                        }
+                        x11::PanelSurface::Popup(_) => {}
                     }
                 }
                 Ok(())
@@ -523,6 +538,13 @@ impl Compositor {
             .flatten();
 
         let was_mapped = self.panels[index].geometry.is_some();
+        self.panels[index].is_fullscreen = match &self.panels[index].surface {
+            PanelSurface::Wayland(surface) => surface.current_state().states.contains(
+                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
+            ),
+            PanelSurface::X11 { window, .. } => window.is_fullscreen(),
+            PanelSurface::Popup(_) => false,
+        };
         if logical_size.is_none() && was_mapped {
             self.frame_sender.publish(PanelUpdate::Removed {
                 panel_id: self.panels[index].id,
@@ -702,6 +724,7 @@ impl Compositor {
             panel_id,
             dmabuf,
             geometry,
+            is_fullscreen: self.panels[index].is_fullscreen,
         });
         for (surface, _) in surfaces {
             self.complete_frame_callbacks(&surface);
@@ -733,9 +756,15 @@ impl Compositor {
     }
 
     fn dispatch_ray(&mut self, ray: Ray3, time_ms: u32) -> bool {
+        let fullscreen_panel = self
+            .panels
+            .iter()
+            .find(|panel| panel.is_fullscreen)
+            .map(|panel| panel.id);
         let hit = self
             .panels
             .iter()
+            .filter(|panel| fullscreen_panel.is_none_or(|id| panel.id == id))
             .filter(|panel| panel.surface.alive())
             .filter_map(|panel| {
                 let geometry = panel.geometry?;
@@ -848,9 +877,15 @@ impl Compositor {
     }
 
     fn mouse_cursor_pose(&self, ray: Ray3) -> Option<PanelPose> {
+        let fullscreen_panel = self
+            .panels
+            .iter()
+            .find(|panel| panel.is_fullscreen)
+            .map(|panel| panel.id);
         let nearest = self
             .panels
             .iter()
+            .filter(|panel| fullscreen_panel.is_none_or(|id| panel.id == id))
             .filter(|panel| panel.surface.alive())
             .filter_map(|panel| {
                 let geometry = panel.geometry?;
@@ -1095,6 +1130,9 @@ impl XdgShellHandler for Compositor {
             surface: PanelSurface::Wayland(surface.clone()),
             pose,
             geometry: None,
+            is_fullscreen: surface.current_state().states.contains(
+                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
+            ),
             pose_is_explicit: false,
             resize_anchor: None,
             id: panel_id,
@@ -1107,6 +1145,26 @@ impl XdgShellHandler for Compositor {
         } else {
             let _ = surface.send_configure();
         }
+    }
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
+    ) {
+        surface.with_pending_state(|state| {
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+            state.states.set(State::Fullscreen);
+            state.fullscreen_output = output;
+        });
+        let _ = surface.send_configure();
+    }
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        surface.with_pending_state(|state| {
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+            state.states.unset(State::Fullscreen);
+            state.fullscreen_output = None;
+        });
+        let _ = surface.send_configure();
     }
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
         surface.with_pending_state(|state| {
