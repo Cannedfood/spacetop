@@ -120,6 +120,9 @@ fn dodge_windows_moves_overlapping_panels_and_keeps_fixed_pose() {
     assert_eq!(moved[&1], first.pose);
     assert_ne!(moved[&2].center, second.pose.center);
     assert!((moved[&2].center.length() - second.pose.center.length()).abs() < 1.0e-5);
+    let original_angles = PanelPose::spherical_angles(second.pose.center);
+    let moved_angles = PanelPose::spherical_angles(moved[&2].center);
+    assert!((moved_angles.y - original_angles.y).abs() < 1.0e-5);
 }
 
 #[test]
@@ -140,9 +143,13 @@ fn dodge_windows_separates_multiple_panels_with_margin() {
             let first_angles = PanelPose::spherical_angles(geometries[first_index].pose.center);
             let second_angles = PanelPose::spherical_angles(geometries[second_index].pose.center);
             let yaw_distance = PanelPose::wrap_angle(first_angles.x - second_angles.x).abs() * 2.0;
-            let pitch_distance = (first_angles.y - second_angles.y).abs() * 2.0;
-            assert!(yaw_distance > 0.45 || pitch_distance > 0.45);
+            assert!(yaw_distance > 0.45);
         }
+    }
+    for (id, geometry) in &panels {
+        let original_pitch = PanelPose::spherical_angles(geometry.pose.center).y;
+        let moved_pitch = PanelPose::spherical_angles(moved[id].center).y;
+        assert!((moved_pitch - original_pitch).abs() < 1.0e-5);
     }
 }
 
