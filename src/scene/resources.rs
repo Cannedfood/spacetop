@@ -1,4 +1,5 @@
 use super::*;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 #[derive(Clone, Copy)]
 pub(super) struct SkyboxMip {
@@ -18,6 +19,7 @@ pub(super) fn sanitize_hdr_pixels(pixels: &mut [f32], mut random_state: u64) -> 
     if random_state == 0 {
         random_state = 0x9e37_79b9_7f4a_7c15;
     }
+    let mut random = StdRng::seed_from_u64(random_state);
 
     for index in 0..pixels.len() {
         if pixels[index].is_nan() {
@@ -25,7 +27,7 @@ pub(super) fn sanitize_hdr_pixels(pixels: &mut [f32], mut random_state: u64) -> 
             let channel = index % 4;
             let mut replacement = 0.0;
             if pixel_count > 1 {
-                let start = next_random(&mut random_state) as usize % pixel_count;
+                let start = random.random_range(0..pixel_count);
                 for offset in 0..pixel_count {
                     let candidate_pixel = (start + offset) % pixel_count;
                     let candidate_index = candidate_pixel * 4 + channel;
@@ -41,13 +43,6 @@ pub(super) fn sanitize_hdr_pixels(pixels: &mut [f32], mut random_state: u64) -> 
         }
     }
     Ok(())
-}
-
-fn next_random(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
 }
 
 pub(super) fn build_skybox_mips(
@@ -869,4 +864,3 @@ impl Drop for ReflectionAtlas {
         }
     }
 }
-

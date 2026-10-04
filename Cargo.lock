@@ -4238,6 +4238,7 @@ dependencies = [
  "naga 30.0.1",
  "notify",
  "openxr",
+ "rand",
  "rayon",
  "smithay",
  "spacetop-config",

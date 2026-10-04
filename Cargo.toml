@@ -22,6 +22,7 @@ naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 notify = "8"
 openxr = { version = "0.22", default-features = false, features = ["loaded"] }
 rayon = "1"
+rand = "0.9"
 smithay = { version = "0.7.0", default-features = false, features = ["desktop", "wayland_frontend", "renderer_gl", "backend_gbm", "backend_gbm_has_create_with_modifiers2", "backend_gbm_has_fd_for_plane", "xwayland"] }
 spacetop-config = { path = "utils/spacetop-config" }
 udev = "0.9"
