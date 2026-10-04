@@ -4,7 +4,12 @@ A minimal VR Wayland Compositor and a simple app launcher
 
 ## Getting started
 
-Install Rust using [rustup](https://rustup.rs/), then start Spacetop from the project directory:
+Install Rust using [rustup](https://rustup.rs/).
+
+Building input discovery requires `pkg-config` and the libudev development
+package (`libudev-dev` on Debian/Ubuntu, or `systemd-devel` on Fedora).
+
+Then start Spacetop from the project directory:
 
 ```sh
 cargo run --release
@@ -99,18 +104,31 @@ uses B on Touch/Index controllers or trackpad click on Vive/Microsoft motion
 controllers. The simple-controller profile has no secondary-click binding.
 Grip moves the panel; the stick scrolls when not gripping.
 
-To type, choose a keyboard event device and give your user read access to it:
+Spacetop automatically discovers readable keyboard and mouse event devices on
+the current seat (`XDG_SEAT`, or `seat0` if unset), using udev's keyboard/mouse
+classification. It rescans every second for newly connected devices,
+reconnection, and permission changes. Disconnecting a device releases its held
+keys and buttons. Input-device read permissions must still be configured
+externally; discovery does not grant access.
+
+To select specific devices instead of automatic discovery, set
+`SPACETOP_INPUT_DEVICES`:
 
 ```sh
 ls -l /dev/input/by-id/*event-kbd
 SPACETOP_INPUT_DEVICES=/dev/input/by-id/YOUR_KEYBOARD-event-kbd cargo run --release -- --app=xterm
 ```
 
-`YOUR_KEYBOARD` is a placeholder for the device found above. Multiple device
-paths can be separated with `:`; mouse devices supply buttons and wheel input
+`YOUR_KEYBOARD` is a placeholder for the device found above. Explicitly selected
+devices must be accessible at startup; after startup they are retried if
+disconnected. Prefer stable `/dev/input/by-id/` paths for reconnection. Set
+`SPACETOP_INPUT_DEVICES` to an empty string to disable physical input.
+Multiple device paths can be separated with `:`; mouse devices supply buttons and wheel input
 at the controller's current pointer location, not relative mouse movement.
 Use `XKB_DEFAULT_LAYOUT`, `XKB_DEFAULT_VARIANT`, and `XKB_DEFAULT_OPTIONS` to
-configure typing. Devices are opt-in and are not grabbed exclusively: the host
-desktop can receive the same input. Do not run the compositor as root or grant
-blanket access to every input device. Automatic seat/device discovery, hotplug,
-and an XR virtual keyboard are not implemented.
+configure typing. Devices are not grabbed exclusively: the host desktop can
+receive the same input, even while interacting with XR windows. Automatic
+discovery excludes devices not classified as keyboards or mice, such as
+gamepads and touchpads. Do not run the compositor as root or grant blanket
+access to every input device. An XR virtual keyboard and physical mouse-motion
+mapping are not implemented.

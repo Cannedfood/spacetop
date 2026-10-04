@@ -66,8 +66,15 @@ capacity. Best-effort motion, scroll, and spatial movement are rejected once
 including the ray preceding a button. Their backlog can grow during a prolonged
 compositor stall; frame requests are separately coalesced to one queued tick.
 
-The optional evdev backend reads the colon-separated `SPACETOP_INPUT_DEVICES`
-paths on the compositor event loop. Keyboard events feed Smithay/XKB directly,
+The evdev backend automatically enumerates udev input event devices classified
+as keyboards or mice on `XDG_SEAT` (default `seat0`). Setting the colon-separated
+`SPACETOP_INPUT_DEVICES` overrides discovery; an empty value disables physical
+input. Explicit paths must be accessible at startup. A one-second timer on the
+compositor event loop reconciles devices, retries failed opens (including
+permission changes), and reopens reconnected devices. Device-node identity
+deduplicates aliases and detects replacement at the same path. Unavailable
+devices are reported once per distinct error until they reconnect or leave the selection.
+Keyboard events feed Smithay/XKB directly,
 with modifier updates and client-side repeat (200 ms delay, 25 Hz). Kernel
 repeat events are ignored to avoid double repeat. Evdev recovers dropped kernel
 events; disconnect releases that device's held keys/buttons. Shared counts keep
@@ -76,7 +83,7 @@ provide left/right/middle/extra buttons and vertical/horizontal wheel events,
 including value120 information, at the XR pointer location.
 
 Input-device permissions must be configured externally; no exclusive grabs or
-automatic device discovery are performed. Devices are not reopened on hotplug.
+session access management are performed. The host desktop can receive the same input.
 XKB uses `XKB_DEFAULT_*` environment settings. Text-input/IME, a virtual keyboard,
 physical mouse-motion mapping, and relative-pointer/constraints remain
 unsupported. See [README.md](README.md) for a launch example.
