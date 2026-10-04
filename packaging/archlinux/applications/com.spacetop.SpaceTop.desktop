@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Spacetop
+Comment=Start the Spacetop XR Wayland compositor
+Exec=spacetop
+TryExec=spacetop
+Icon=video-display
+Terminal=false
+Categories=Utility;
+StartupNotify=false

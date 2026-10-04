@@ -15,6 +15,23 @@ Then start Spacetop from the project directory:
 cargo run --release
 ```
 
+### Arch Linux installation
+
+On Arch Linux, build and install the package from the repository's Arch
+packaging directory:
+
+```sh
+cd packaging/archlinux
+makepkg -si
+```
+
+This installs Spacetop, Space Launcher, and Space Settings, including desktop
+menu entries. Spacetop runs as an application inside your existing desktop
+session; it requires a separately installed and configured OpenXR runtime and a
+compatible Vulkan 1.2 GPU. See
+[the Arch Linux packaging notes](packaging/archlinux/README.md) for
+dependencies and runtime setup.
+
 Install `Xwayland` (version 23.1 or newer) to run X11 applications. Spacetop starts
 its own rootless XWayland server automatically when the executable is available.
 Without it, native Wayland applications still work.
