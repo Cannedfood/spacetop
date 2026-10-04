@@ -38,10 +38,21 @@ pub(super) fn exercise(app: &mut WaylandApp) {
     sub_surface.commit();
     surface.commit();
     pump(display, compositor, queue, client, connection);
+    let panel = &compositor.panels[0];
+    let geometry = panel.geometry.unwrap();
+    let target_x = (30 - panel.bounds.loc.x) as f32 / geometry.logical_size.w as f32;
+    let target_y = (15 - panel.bounds.loc.y) as f32 / geometry.logical_size.h as f32;
+    let local_offset = Vec3::new(
+        (target_x - 0.5) * geometry.pose.width_m,
+        (0.5 - target_y) * geometry.pose.width_m * geometry.logical_size.h as f32
+            / geometry.logical_size.w as f32,
+        0.0,
+    );
+    let target = geometry.pose.center + geometry.pose.orientation() * local_offset;
     assert!(compositor.dispatch_ray(
         Ray3 {
-            origin: Vec3::new(-0.2, 0.1, 0.0),
-            direction: Vec3::NEG_Z
+            origin: Vec3::ZERO,
+            direction: target.normalize()
         },
         23
     ));
@@ -80,14 +91,14 @@ pub(super) fn exercise(app: &mut WaylandApp) {
     assert!(!compositor.dispatch_ray(
         Ray3 {
             origin: Vec3::ZERO,
-            direction: Vec3::NEG_Z
+            direction: geometry.pose.center.normalize()
         },
         26
     ));
     assert!(compositor.dispatch_ray(
         Ray3 {
-            origin: Vec3::new(-0.2, 0.1, 0.0),
-            direction: Vec3::NEG_Z
+            origin: Vec3::ZERO,
+            direction: target.normalize()
         },
         27
     ));

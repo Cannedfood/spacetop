@@ -397,7 +397,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
     assert!(compositor.dispatch_ray(
         Ray3 {
             origin: Vec3::ZERO,
-            direction: Vec3::NEG_Z
+            direction: first_pose.center.normalize()
         },
         25
     ));

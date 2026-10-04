@@ -121,7 +121,11 @@ fn capture_uses_native_size_hidpi_and_aspect_preserving_limits() {
 
 #[test]
 fn placement_slots_are_unique_and_nonoverlapping() {
-    assert_eq!(PanelPose::for_slot(0).center, Vec3::new(0.0, 0.0, -1.6));
+    let defaults = crate::config::AppConfig::default().window;
+    let first_pose = PanelPose::for_slot(0);
+    let first_angles = PanelPose::spherical_angles(first_pose.center);
+    assert!((first_pose.center.length() - defaults.default_distance_m).abs() < 1.0e-6);
+    assert!((first_angles.y - defaults.default_vertical_angle_degrees.to_radians()).abs() < 1.0e-6);
     for angle in [-90.0, -45.0, 0.0, 45.0, 90.0] {
         for slot in 0..4 {
             let pose = PanelPose::for_slot_at_distance(slot, 2.0, angle);

@@ -216,11 +216,14 @@ pub(super) fn exercise(app: &mut WaylandApp) {
     compositor.dispatch_scroll(-12.5, 9);
     compositor.flush_clients();
     assert!(client.axis_values.is_empty());
-    for (step, x) in [0.0, 0.1].into_iter().enumerate() {
+    let geometry = compositor.panels[0].geometry.unwrap();
+    for (step, normalized_x) in [0.5_f32, 0.6].into_iter().enumerate() {
+        let local_offset = Vec3::new((normalized_x - 0.5) * geometry.pose.width_m, 0.0, 0.0);
+        let target = geometry.pose.center + geometry.pose.orientation() * local_offset;
         assert!(compositor.dispatch_ray(
             Ray3 {
-                origin: Vec3::new(x, 0.0, 0.0),
-                direction: Vec3::NEG_Z
+                origin: Vec3::ZERO,
+                direction: target.normalize()
             },
             step as u32
         ));

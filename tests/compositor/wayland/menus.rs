@@ -85,7 +85,8 @@ pub(super) fn exercise(app: &mut WaylandApp) {
         xdg_surface,
         ..
     } = app;
-    xdg_surface.set_window_geometry(5, 5, 90, 40);
+    let window_geometry_origin = 5;
+    xdg_surface.set_window_geometry(window_geometry_origin, window_geometry_origin, 90, 40);
     surface.commit();
     pump(display, compositor, queue, client, connection);
     compositor.dispatch_pointer_button(0x111, true, 16);
@@ -129,17 +130,34 @@ pub(super) fn exercise(app: &mut WaylandApp) {
     );
     assert_eq!(compositor.panels[0].bounds.size, (120, 40).into());
     assert!(compositor.seat.get_keyboard().unwrap().is_grabbed());
+    let panel = &compositor.panels[0];
+    let geometry = panel.geometry.unwrap();
+    let popup_location = client.popup_configures.last().unwrap();
+    let target_x = (popup_location.0 + 10 + window_geometry_origin - panel.bounds.loc.x) as f32
+        / geometry.logical_size.w as f32;
+    let target_y = (popup_location.1 + 10 + window_geometry_origin - panel.bounds.loc.y) as f32
+        / geometry.logical_size.h as f32;
+    let local_offset = Vec3::new(
+        (target_x - 0.5) * geometry.pose.width_m,
+        (0.5 - target_y) * geometry.pose.width_m * geometry.logical_size.h as f32
+            / geometry.logical_size.w as f32,
+        0.0,
+    );
+    let target = geometry.pose.center + geometry.pose.orientation() * local_offset;
     assert!(compositor.dispatch_ray(
         Ray3 {
-            origin: Vec3::new(0.45, 0.0, 0.0),
-            direction: Vec3::NEG_Z
+            origin: Vec3::ZERO,
+            direction: target.normalize()
         },
         18
     ));
     pump(display, compositor, queue, client, connection);
     assert_eq!(client.pointer_surface.as_ref(), Some(&menu_surface));
     let (pointer_x, pointer_y) = *client.motions.last().unwrap();
-    assert!((pointer_x - 10.0).abs() < 0.001 && (pointer_y - 10.0).abs() < 0.001);
+    assert!(
+        (pointer_x - 10.0).abs() < 0.001 && (pointer_y - 10.0).abs() < 0.001,
+        "popup pointer location was ({pointer_x}, {pointer_y})"
+    );
     if let Some(vulkan) = vulkan.as_ref() {
         let crate::PanelUpdate::GpuFrame { dmabuf, .. } = receiver.try_recv().unwrap() else {
             panic!("menu frame missing");
@@ -176,10 +194,27 @@ pub(super) fn exercise(app: &mut WaylandApp) {
     child_surface.commit();
     pump(display, compositor, queue, client, connection);
     assert_eq!(compositor.panels[0].bounds.size, (130, 40).into());
+    let panel = &compositor.panels[0];
+    let geometry = panel.geometry.unwrap();
+    let menu_location = client.popup_configures[0];
+    let child_location = client.popup_configures.last().unwrap();
+    let target_x = (window_geometry_origin + menu_location.0 + child_location.0 + 10
+        - panel.bounds.loc.x) as f32
+        / geometry.logical_size.w as f32;
+    let target_y = (window_geometry_origin + menu_location.1 + child_location.1 + 5
+        - panel.bounds.loc.y) as f32
+        / geometry.logical_size.h as f32;
+    let local_offset = Vec3::new(
+        (target_x - 0.5) * geometry.pose.width_m,
+        (0.5 - target_y) * geometry.pose.width_m * geometry.logical_size.h as f32
+            / geometry.logical_size.w as f32,
+        0.0,
+    );
+    let target = geometry.pose.center + geometry.pose.orientation() * local_offset;
     assert!(compositor.dispatch_ray(
         Ray3 {
-            origin: Vec3::new(0.75, 0.0, 0.0),
-            direction: Vec3::NEG_Z
+            origin: Vec3::ZERO,
+            direction: target.normalize()
         },
         19
     ));
