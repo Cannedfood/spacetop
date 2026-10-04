@@ -4,13 +4,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+const CURRENT_CONFIG_VERSION: i64 = 1;
+const CONFIG_VERSION_KEY: &str = "config_version";
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct AppConfig {
+    pub config_version: i64,
     pub background: BackgroundConfig,
     pub application: ApplicationConfig,
     pub floor: FloorConfig,
@@ -221,6 +225,141 @@ impl Default for WindowConfig {
     }
 }
 
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            config_version: CURRENT_CONFIG_VERSION,
+            background: BackgroundConfig::default(),
+            application: ApplicationConfig::default(),
+            floor: FloorConfig::default(),
+            window: WindowConfig::default(),
+        }
+    }
+}
+
+fn migrate_config(value: &mut toml::Value) -> Result<()> {
+    let mut version = match value
+        .as_table_mut()
+        .context("configuration root must be a TOML table")?
+        .remove(CONFIG_VERSION_KEY)
+    {
+        Some(toml::Value::Integer(version)) => version,
+        Some(_) => bail!("config_version must be an integer"),
+        None => 0,
+    };
+
+    ensure!(version >= 0, "config_version cannot be negative");
+    ensure!(
+        version <= CURRENT_CONFIG_VERSION,
+        "configuration version {version} is newer than supported version {CURRENT_CONFIG_VERSION}"
+    );
+
+    if version < 1 {
+        version = 1;
+
+        let root = value
+            .as_table_mut()
+            .context("configuration root must be a TOML table")?;
+
+        if let Some(floor) = root.get_mut("floor").and_then(toml::Value::as_table_mut) {
+            let transparency = floor
+                .remove("transparency")
+                .map(|value| value_as_f32(&value, "floor.transparency"))
+                .transpose()?;
+
+            match floor.get_mut("albedo") {
+                Some(value) => {
+                    let channels = value
+                        .as_array_mut()
+                        .context("floor.albedo must contain three legacy or four RGBA channels")?;
+                    match channels.len() {
+                        3 => channels.push(toml::Value::Float(f64::from(
+                            1.0 - transparency.unwrap_or(0.0),
+                        ))),
+                        4 => {}
+                        _ => bail!("floor.albedo must contain three legacy or four RGBA channels"),
+                    }
+                }
+                None if transparency.is_some() => {
+                    let mut channels = FloorConfig::default()
+                        .albedo
+                        .into_iter()
+                        .map(|channel| toml::Value::Float(f64::from(channel)))
+                        .collect::<Vec<_>>();
+                    channels[3] = toml::Value::Float(f64::from(1.0 - transparency.unwrap()));
+                    floor.insert("albedo".into(), toml::Value::Array(channels));
+                }
+                None => {}
+            }
+        }
+
+        if let Some(window) = root.get_mut("window").and_then(toml::Value::as_table_mut) {
+            let samples = window.remove("texture_samples");
+            let temporal = window.remove("temporal_texture_aa");
+
+            if let Some(value) = window.get_mut("texture_aa") {
+                if let Some(mode) = value.as_str()
+                    && let Some(canonical) = match mode {
+                        "ss2x2" | "s_s2x2" => Some("super_sample2x2"),
+                        "ss4" => Some("super_sample4"),
+                        "ss4x2" | "four_by_two" => Some("super_sample4x2"),
+                        "ss8" => Some("super_sample8"),
+                        "ss8x2" => Some("super_sample8x2"),
+                        "ss16" => Some("super_sample16"),
+                        _ => None,
+                    }
+                {
+                    *value = toml::Value::String(canonical.into());
+                }
+            } else if samples.is_some() || temporal.is_some() {
+                let samples = samples
+                    .map(|value| {
+                        value
+                            .as_integer()
+                            .context("window.texture_samples must be an integer")
+                    })
+                    .transpose()?
+                    .unwrap_or(4);
+                let temporal = temporal
+                    .map(|value| {
+                        value
+                            .as_bool()
+                            .context("window.temporal_texture_aa must be a boolean")
+                    })
+                    .transpose()?
+                    .unwrap_or(true);
+                let mode = match (samples, temporal) {
+                    (1, _) => "nearest",
+                    (4, true) => "super_sample2x2",
+                    (4, false) => "super_sample4",
+                    (8, true) => "super_sample4x2",
+                    (8, false) => "super_sample8",
+                    (16, true) => "super_sample8x2",
+                    (16, false) => "super_sample16",
+                    (samples, _) => {
+                        bail!("window.texture_samples must be 1, 4, 8, or 16; got {samples}")
+                    }
+                };
+                window.insert("texture_aa".into(), toml::Value::String(mode.into()));
+            }
+        }
+    }
+
+    value
+        .as_table_mut()
+        .context("configuration root must be a TOML table")?
+        .insert(CONFIG_VERSION_KEY.into(), toml::Value::Integer(version));
+    Ok(())
+}
+
+fn value_as_f32(value: &toml::Value, name: &str) -> Result<f32> {
+    match value {
+        toml::Value::Float(value) => Ok(*value as f32),
+        toml::Value::Integer(value) => Ok(*value as f32),
+        _ => bail!("{name} must be a number"),
+    }
+}
+
 impl AppConfig {
     pub fn path() -> Result<PathBuf> {
         Ok(std::env::var_os("HOME")
@@ -230,37 +369,55 @@ impl AppConfig {
     }
 
     pub fn load() -> Result<Self> {
-        Self::load_from(&Self::path()?)
+        let path = Self::path()?;
+        Self::create_default_at(&path)?;
+        Self::load_from(&path)
     }
 
-    pub fn load_from(path: &Path) -> Result<Self> {
+    pub fn create_default_at(path: &Path) -> Result<()> {
         let parent = path.parent().context("configuration path has no parent")?;
         fs::create_dir_all(parent)
             .with_context(|| format!("create configuration directory {}", parent.display()))?;
-        if !path.exists() {
-            let defaults = toml::to_string_pretty(&Self::default())?;
-            let mut file = NamedTempFile::new_in(parent)
-                .with_context(|| format!("create default config beside {}", path.display()))?;
-            file.write_all(defaults.as_bytes())?;
-            file.as_file().sync_all()?;
-            match file.persist_noclobber(path) {
-                Ok(_) => eprintln!("Created configuration: {}", path.display()),
-                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    return Err(error.error)
-                        .with_context(|| format!("create configuration {}", path.display()));
-                }
+        if path.exists() {
+            return Ok(());
+        }
+
+        let defaults = toml::to_string_pretty(&Self::default())?;
+        let mut file = NamedTempFile::new_in(parent)
+            .with_context(|| format!("create default config beside {}", path.display()))?;
+        file.write_all(defaults.as_bytes())?;
+        file.as_file().sync_all()?;
+        match file.persist_noclobber(path) {
+            Ok(_) => eprintln!("Created configuration: {}", path.display()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error.error)
+                    .with_context(|| format!("create configuration {}", path.display()));
             }
         }
+
+        Ok(())
+    }
+
+    pub fn load_from(path: &Path) -> Result<Self> {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("read configuration {}", path.display()))?;
-        let config: Self = toml::from_str(&contents)
+        let mut value: toml::Value = toml::from_str(&contents)
+            .with_context(|| format!("parse configuration {}", path.display()))?;
+        migrate_config(&mut value)
+            .with_context(|| format!("migrate configuration {}", path.display()))?;
+        let config: Self = value
+            .try_into()
             .with_context(|| format!("parse configuration {}", path.display()))?;
         config.validate()?;
         Ok(config)
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.config_version == CURRENT_CONFIG_VERSION,
+            "config_version must be {CURRENT_CONFIG_VERSION}"
+        );
         ensure!(
             !self.application.launcher.trim().is_empty(),
             "application.launcher must be a non-empty executable name"
@@ -405,17 +562,93 @@ mod tests {
     use super::*;
 
     #[test]
-    fn creates_missing_config_and_round_trips_defaults() {
+    fn creates_default_config_and_round_trips_defaults() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(".config/spacetop/config.toml");
 
+        AppConfig::create_default_at(&path).unwrap();
         let config = AppConfig::load_from(&path).unwrap();
 
         assert_eq!(config, AppConfig::default());
+        let contents = fs::read_to_string(&path).unwrap();
+        let value: toml::Value = toml::from_str(&contents).unwrap();
         assert_eq!(
-            toml::from_str::<AppConfig>(&fs::read_to_string(path).unwrap()).unwrap(),
-            config
+            value
+                .get(CONFIG_VERSION_KEY)
+                .and_then(toml::Value::as_integer),
+            Some(1)
         );
+        assert_eq!(toml::from_str::<AppConfig>(&contents).unwrap(), config);
+    }
+
+    #[test]
+    fn load_from_does_not_create_missing_config_or_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing/config.toml");
+
+        assert!(AppConfig::load_from(&path).is_err());
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn migrates_unversioned_legacy_fields_before_deserializing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "[floor]\nalbedo = [0.2, 0.3, 0.4]\ntransparency = 0.1\n\
+             [window]\ntexture_samples = 8\ntemporal_texture_aa = false\n",
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from(&path).unwrap();
+
+        assert_eq!(config.floor.albedo, [0.2, 0.3, 0.4, 0.9]);
+        assert_eq!(config.window.texture_aa, WindowTextureAa::SuperSample8);
+
+        config.save_to(&path).unwrap();
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .get(CONFIG_VERSION_KEY)
+                .and_then(toml::Value::as_integer),
+            Some(1)
+        );
+        assert!(saved["floor"].get("transparency").is_none());
+        assert!(saved["window"].get("texture_samples").is_none());
+        assert!(saved["window"].get("temporal_texture_aa").is_none());
+        assert_eq!(
+            saved["window"]["texture_aa"].as_str(),
+            Some("super_sample8")
+        );
+
+        let mut alias: toml::Value =
+            toml::from_str("[window]\ntexture_aa = \"four_by_two\"\n").unwrap();
+        migrate_config(&mut alias).unwrap();
+        let migrated: AppConfig = alias.try_into().unwrap();
+        assert_eq!(migrated.window.texture_aa, WindowTextureAa::SuperSample4x2);
+    }
+
+    #[test]
+    fn rejects_newer_configuration_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "config_version = 2\n").unwrap();
+
+        let error = AppConfig::load_from(&path).unwrap_err();
+
+        assert!(format!("{error:#}").contains("newer than supported version"));
+    }
+
+    #[test]
+    fn rejects_non_current_config_version_when_saving() {
+        let config = AppConfig {
+            config_version: 0,
+            ..AppConfig::default()
+        };
+
+        assert!(config.validate().is_err());
     }
 
     #[test]

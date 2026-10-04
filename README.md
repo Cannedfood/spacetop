@@ -53,6 +53,8 @@ The background image can be `"random"` to select an EXR from
 `~/` paths). The floor height is used when OpenXR does not provide a STAGE floor.
 
 ```toml
+config_version = 1
+
 [application]
 launcher = "spacelauncher"
 

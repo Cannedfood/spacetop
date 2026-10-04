@@ -58,6 +58,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(".config/spacetop/config.toml");
 
+        AppConfig::create_default_at(&path).unwrap();
         let config = AppConfig::load_from(&path).unwrap();
 
         assert_eq!(config, AppConfig::default());
