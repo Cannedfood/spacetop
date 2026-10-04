@@ -4,14 +4,9 @@
 
 The Cargo package provides both the `spacetop` library and executable:
 
-- [src/lib.rs](src/lib.rs) owns private compositor state and Wayland protocol
-	handlers. Rendering, input, X11, and XR implementation modules remain private.
-- [src/runtime.rs](src/runtime.rs) owns backend startup, sockets, the event loop,
-	and fatal-error propagation. The library exports `run`, `run_xr_client`, and
-	`DisplayNames` from this module.
-- [src/main.rs](src/main.rs) handles CLI parsing and application process spawning,
-	including the child's display environment. The library does not parse CLI
-	arguments or choose which application to launch.
+- [src/lib.rs](src/lib.rs) owns private compositor state and Wayland protocol handlers. Rendering, input, X11, and XR implementation modules remain private.
+- [src/runtime.rs](src/runtime.rs) owns backend startup, sockets, the event loop, and fatal-error propagation. The library exports `run`, `run_xr_client`, and `DisplayNames` from this module.
+- [src/main.rs](src/main.rs) handles CLI parsing and application process spawning, including the child's display environment. The library does not parse CLI arguments or choose which application to launch.
 
 `run` blocks until the compositor stops and accepts a one-shot readiness callback
 receiving `DisplayNames`: the Wayland socket name and an optional X11 display.
@@ -275,25 +270,11 @@ do not log or create per-stage report entries.
 
 The scopes distinguish where delays are observed:
 
-- `app/wayland-dispatch`, `app/wayland-flush`, and `app/input-dispatch` measure
-	compositor event processing. `app/compositor-capture` includes the whole
-	capture pipeline, including GLES completion; `gpu/gles-completion` isolates
-	the explicit GPU wait. `mixed/compositor-batch` catches cumulative capture
-	costs across multiple windows.
-- `app/panel-updates` and `app/xr-frame-work` exclude measured OpenXR/GPU calls
-	and resource retirement. The latter uses one predicted frame period as its
-	budget. GPU command recording and other unwrapped driver work remain in
-	this application scope; it is elapsed time, not CPU utilization.
-- `gpu/...` times DMA-BUF import/replacement, Vulkan submission, and fence waits.
-	`gpu/frame-work` also checks their aggregate time against one frame period.
-- `openxr/...` times polling, session/swapchain operations, tracking/action calls,
-	frame begin/end, and image acquire/wait/release. `openxr/frame-calls` aggregates
-	calls during active frame work, excluding `wait_frame` and the final `end_frame`.
-- `mixed/xr-active-frame` checks total work after `wait_frame` and before
-	`end_frame`, then prints the current frame's app/OpenXR/GPU breakdown. It can
-	report a missed budget even when each domain is individually below its limit.
-	Resource retirement is also labeled `mixed` because destructors can invoke
-	both OpenXR and Vulkan.
+- `app/wayland-dispatch`, `app/wayland-flush`, and `app/input-dispatch` measure compositor event processing. `app/compositor-capture` includes the whole capture pipeline, including GLES completion; `gpu/gles-completion` isolates the explicit GPU wait. `mixed/compositor-batch` catches cumulative capture costs across multiple windows.
+- `app/panel-updates` and `app/xr-frame-work` exclude measured OpenXR/GPU calls and resource retirement. The latter uses one predicted frame period as its budget. GPU command recording and other unwrapped driver work remain in this application scope; it is elapsed time, not CPU utilization.
+- `gpu/...` times DMA-BUF import/replacement, Vulkan submission, and fence waits. `gpu/frame-work` also checks their aggregate time against one frame period.
+- `openxr/...` times polling, session/swapchain operations, tracking/action calls, frame begin/end, and image acquire/wait/release. `openxr/frame-calls` aggregates calls during active frame work, excluding `wait_frame` and the final `end_frame`.
+- `mixed/xr-active-frame` checks total work after `wait_frame` and before `end_frame`, then prints the current frame's app/OpenXR/GPU breakdown. It can report a missed budget even when each domain is individually below its limit. Resource retirement is also labeled `mixed` because destructors can invoke both OpenXR and Vulkan.
 
 Normal pacing in `wait_frame` is expected: warnings require more than three
 predicted frame periods, and waits for non-renderable frames are not reported.
@@ -319,14 +300,9 @@ the executable target. `cargo test --lib` and `cargo test --bin spacetop` can ru
 those targets separately.
 These are unit-test modules, not separate Cargo integration-test binaries:
 
-- [tests/compositor/mod.rs](tests/compositor/mod.rs) groups the Wayland and X11
-	scenarios, shared protocol client, and compositor failure tests. Wayland checks
-	are split into basic rendering/input, menus, subsurfaces, and multiwindow
-	scenarios with one shared fixture.
-- [tests/unit/panel.rs](tests/unit/panel.rs) and neighboring unit modules cover
-	geometry, input state, channels, CLI arguments, and XR color formats.
-- [tests/support/gpu.rs](tests/support/gpu.rs) contains test-only Vulkan setup,
-	pixel readback, and cursor checks.
+- [tests/compositor/mod.rs](tests/compositor/mod.rs) groups the Wayland and X11 scenarios, shared protocol client, and compositor failure tests. Wayland checks are split into basic rendering/input, menus, subsurfaces, and multiwindow scenarios with one shared fixture.
+- [tests/unit/panel.rs](tests/unit/panel.rs) and neighboring unit modules cover geometry, input state, channels, CLI arguments, and XR color formats.
+- [tests/support/gpu.rs](tests/support/gpu.rs) contains test-only Vulkan setup, pixel readback, and cursor checks.
 
 Existing test-name filters and opt-in hardware requirements are unchanged.
 
