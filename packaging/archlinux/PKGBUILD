@@ -1,6 +1,6 @@
 # Maintainer: Spacetop contributors
 pkgname=spacetop
-pkgver=0.1.0.r1.g0000000
+pkgver=0.1.0.r91.gd844598
 pkgrel=1
 pkgdesc='VR Wayland compositor and spatial desktop applications'
 arch=('x86_64' 'aarch64')
