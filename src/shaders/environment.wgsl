@@ -47,12 +47,8 @@ fn skybox_mip_level(
 }
 fn sample_environment_skybox(direction: vec3<f32>, mip_level: f32) -> vec3<f32> {
     let uv = skybox_uv(direction);
-    let hdr = max(
-        textureSampleLevel(environment_skybox, environment_sky_filter, uv, mip_level).rgb
-            * skybox_exposure(),
-        vec3(0.0),
-    );
-    return reinhard_tone_map(hdr);
+    return textureSampleLevel(environment_skybox, environment_sky_filter, uv, mip_level).rgb
+        * skybox_exposure();
 }
 fn nearest_window_hit(origin: vec3<f32>, ray: vec3<f32>, minimum_distance: f32) -> WindowHit {
     var nearest = WindowHit(1.0e30, 0u, vec2(0.0), false);
@@ -91,6 +87,11 @@ fn sample_reflected_window(index: u32, uv: vec2<f32>) -> vec4<f32> {
         0.0,
     );
 }
+fn reflected_window_radiance(color: vec4<f32>) -> vec3<f32> {
+    if color.a <= 0.0001 { return vec3(0.0); }
+    let straight_color = color.rgb / color.a;
+    return inverse_reinhard_tone_map(straight_color) * color.a;
+}
 fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f32) -> vec3<f32> {
     if TRACE_THROUGH_TRANSPARENT_WINDOWS {
         var radiance = vec3(0.0);
@@ -101,7 +102,7 @@ fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f3
             if !hit.found { break; }
             let color =
                 sample_reflected_window(hit.index, hit.uv);
-            radiance += color.rgb * remaining;
+            radiance += reflected_window_radiance(color) * remaining;
             remaining *= 1.0 - color.a;
             if remaining < 0.001 { return radiance; }
             minimum_distance = hit.distance + 0.00001;
@@ -113,7 +114,7 @@ fn sample_reflected_environment(origin: vec3<f32>, ray: vec3<f32>, mip_level: f3
     }
     let hit = nearest_window_hit(origin, ray, 0.00001);
     if hit.found {
-        return sample_reflected_window(hit.index, hit.uv).rgb;
+        return reflected_window_radiance(vec4(sample_reflected_window(hit.index, hit.uv).rgb, 1.0));
     }
     return sample_environment_skybox(ray, mip_level);
 }
@@ -243,11 +244,11 @@ fn window_blocked_diffuse_irradiance(origin: vec3<f32>) -> vec3<f32> {
     let eye = transform.eye_position.xyz;
     let incident = normalize(input.direction);
     if incident.y >= 0.0 {
-        return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+        return vec4(reinhard_tone_map(sample_environment_skybox(incident, 0.0)), 1.0);
     }
     let floor_distance = (transform.emitter_up.w - eye.y) / incident.y;
     if floor_distance <= 0.0 {
-        return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+        return vec4(reinhard_tone_map(sample_environment_skybox(incident, 0.0)), 1.0);
     }
     let world = eye + incident * floor_distance;
     let ground_distance_from_origin = length(world.xz);
@@ -256,7 +257,7 @@ fn window_blocked_diffuse_irradiance(origin: vec3<f32>) -> vec3<f32> {
         atan2(ground_distance_from_origin, height_from_origin) * (180.0 / PI);
     let radius_degrees = floor_material.ground_radius.x;
     if ground_angle_degrees >= radius_degrees {
-        return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+        return vec4(reinhard_tone_map(sample_environment_skybox(incident, 0.0)), 1.0);
     }
     var ground_coverage = 1.0;
     if radius_degrees < 90.0 && floor_material.ground_radius.y > 0.0 {
@@ -264,7 +265,7 @@ fn window_blocked_diffuse_irradiance(origin: vec3<f32>) -> vec3<f32> {
         let floor_radius_m = height_from_origin * sin(radius_radians)
             / max(cos(radius_radians), 0.000001);
         if ground_distance_from_origin >= floor_radius_m {
-            return vec4(sample_environment_skybox(incident, 0.0), 1.0);
+            return vec4(reinhard_tone_map(sample_environment_skybox(incident, 0.0)), 1.0);
         }
         let feather_start_m = max(0.0, floor_radius_m - floor_material.ground_radius.y);
         ground_coverage = 1.0 - smoothstep(
@@ -319,5 +320,5 @@ fn window_blocked_diffuse_irradiance(origin: vec3<f32>) -> vec3<f32> {
     }
     let sky = sample_environment_skybox(incident, 0.0);
     let floor = ground + sum * opacity / f32(ray_count);
-    return vec4(mix(sky, floor, ground_coverage), 1.0);
+    return vec4(reinhard_tone_map(mix(sky, floor, ground_coverage)), 1.0);
 }
