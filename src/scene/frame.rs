@@ -5,7 +5,8 @@ impl SceneRenderer {
         let skybox = frame.skybox.context("environment pass requires a skybox")?;
         if self.environment.dim != frame.environment_dim {
             let byte_offset =
-                std::mem::offset_of!(FloorUniform, ground_radius) + 2 * std::mem::size_of::<f32>();
+                std::mem::offset_of!(FloorUniform, sampling) + 3 * std::mem::size_of::<f32>();
+            let exposure = self.environment.background_exposure * (1.0 - frame.environment_dim);
             unsafe {
                 let mapped = self.device.map_memory(
                     self.floor.memory,
@@ -14,7 +15,7 @@ impl SceneRenderer {
                     vk::MemoryMapFlags::empty(),
                 )?;
                 std::ptr::copy_nonoverlapping(
-                    (&frame.environment_dim as *const f32).cast::<u8>(),
+                    (&exposure as *const f32).cast::<u8>(),
                     (mapped.cast::<u8>()).add(byte_offset),
                     std::mem::size_of::<f32>(),
                 );

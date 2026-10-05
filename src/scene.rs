@@ -345,7 +345,6 @@ impl FloorUniform {
         skybox_diffuse_irradiance: Vec3,
         background_exposure: f32,
     ) -> Self {
-        let exposure = 2.0_f32.powf(config.background.brightness_stops) * background_exposure;
         Self {
             albedo: config.floor.albedo,
             controls: [
@@ -376,9 +375,9 @@ impl FloorUniform {
             ],
             grabbed_border_color: config.window.grabbed_border_color,
             diffuse_irradiance: [
-                skybox_diffuse_irradiance.x * exposure,
-                skybox_diffuse_irradiance.y * exposure,
-                skybox_diffuse_irradiance.z * exposure,
+                skybox_diffuse_irradiance.x,
+                skybox_diffuse_irradiance.y,
+                skybox_diffuse_irradiance.z,
                 0.0,
             ],
             ground_radius: [
@@ -762,7 +761,7 @@ impl SceneRenderer {
         let uniform = FloorUniform::from_config(
             config,
             self.environment.diffuse_irradiance,
-            self.environment.background_exposure,
+            self.environment.background_exposure * (1.0 - self.environment.dim),
         );
         self.write_floor_uniform(&uniform)
     }
