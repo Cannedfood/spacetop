@@ -92,7 +92,8 @@ impl ClientData for ClientState {
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
 
-struct ToplevelPanel {
+struct WindowPanel {
+    id: PanelId,
     surface: PanelSurface,
     pose: PanelPose,
     geometry: Option<PanelGeometry>,
@@ -100,7 +101,6 @@ struct ToplevelPanel {
     maximize_restore_size: Option<(i32, i32)>,
     pose_is_explicit: bool,
     resize_anchor: Option<(PanelGeometry, [bool; 4])>,
-    id: PanelId,
     bounds: Rectangle<i32, Logical>,
 }
 
@@ -118,7 +118,7 @@ struct Compositor {
     seat: Seat<Self>,
 
     output: Output,
-    panels: Vec<ToplevelPanel>,
+    panels: Vec<WindowPanel>,
     gpu_renderer: Option<gpu::GpuRenderer>,
     dmabuf_state: DmabufState,
     dmabuf_global: Option<DmabufGlobal>,
@@ -225,7 +225,7 @@ impl XdgShellHandler for Compositor {
             })
             .find(|pose| self.panels.iter().all(|panel| panel.pose != *pose))
             .expect("an unused panel placement exists");
-        self.panels.push(ToplevelPanel {
+        self.panels.push(WindowPanel {
             surface: PanelSurface::Wayland(surface.clone()),
             pose,
             geometry: None,

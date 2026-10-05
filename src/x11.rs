@@ -15,7 +15,7 @@ use smithay::{
 };
 
 use crate::{
-    Compositor, ToplevelPanel,
+    Compositor, WindowPanel,
     bridge::{PanelMode, PanelUpdate},
     panel::PanelPose,
     panel_surface::PanelSurface,
@@ -144,7 +144,7 @@ impl Compositor {
             })
             .find(|pose| self.panels.iter().all(|panel| panel.pose != *pose))
             .expect("an unused panel placement exists");
-        self.panels.push(ToplevelPanel {
+        self.panels.push(WindowPanel {
             surface: PanelSurface::X11 {
                 window,
                 surface: surface.clone(),
