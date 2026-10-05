@@ -1,5 +1,5 @@
 use super::*;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 
 #[derive(Clone, Copy)]
 pub(super) struct SkyboxMip {
