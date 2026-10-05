@@ -119,6 +119,7 @@ struct Compositor {
 
     output: Output,
     panels: Vec<WindowPanel>,
+    presented_geometries: BTreeMap<PanelId, PanelGeometry>,
     gpu_renderer: Option<gpu::GpuRenderer>,
     dmabuf_state: DmabufState,
     dmabuf_global: Option<DmabufGlobal>,

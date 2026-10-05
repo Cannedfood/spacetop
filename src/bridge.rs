@@ -17,6 +17,9 @@ use crate::panel::{PanelGeometry, PanelId, PanelLimits, PanelPose, Ray3};
 #[derive(Debug)]
 pub enum XrInput {
     FrameTick,
+    PresentedPanels {
+        geometries: Vec<(PanelId, PanelGeometry)>,
+    },
     Ray {
         ray: Ray3,
         gaze_ray: Option<Ray3>,

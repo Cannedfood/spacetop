@@ -1610,6 +1610,16 @@ pub fn run(
         }
         let skybox = skybox.as_mut().expect("skybox is ready for rendering");
 
+        let _ = input.try_send(XrInput::PresentedPanels {
+            geometries: panel_frames
+                .iter()
+                .filter(|(id, _)| {
+                    active_fullscreen_panel.is_none_or(|fullscreen| **id == fullscreen)
+                })
+                .map(|(id, panel)| (*id, panel.geometry))
+                .collect(),
+        });
+
         let cursor_scene_pose = match mouse_cursor_state {
             Some(CursorState {
                 mouse_controlled: true,

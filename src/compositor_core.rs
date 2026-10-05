@@ -28,6 +28,10 @@ impl Compositor {
                 self.frame_requested = true;
                 Ok(())
             }
+            XrInput::PresentedPanels { geometries } => {
+                self.presented_geometries = geometries.into_iter().collect();
+                Ok(())
+            }
             XrInput::Ray {
                 ray,
                 gaze_ray,
@@ -312,6 +316,7 @@ impl Compositor {
             seat,
             output,
             panels: Vec::new(),
+            presented_geometries: BTreeMap::new(),
             gpu_renderer: None,
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
@@ -655,6 +660,17 @@ impl Compositor {
         }
     }
 
+    fn input_geometry(&self, panel: &WindowPanel) -> Option<PanelGeometry> {
+        let committed = panel.geometry?;
+        Some(
+            self.presented_geometries
+                .get(&panel.id)
+                .copied()
+                .filter(|presented| presented.logical_size == committed.logical_size)
+                .unwrap_or(committed),
+        )
+    }
+
     pub(super) fn dispatch_ray(&mut self, ray: Ray3, time_ms: u32) -> bool {
         let fullscreen_panel = self
             .panels
@@ -667,7 +683,7 @@ impl Compositor {
             .filter(|panel| fullscreen_panel.is_none_or(|id| panel.id == id))
             .filter(|panel| panel.surface.alive())
             .filter_map(|panel| {
-                let geometry = panel.geometry?;
+                let geometry = self.input_geometry(panel)?;
                 let hit = geometry.intersect(ray)?;
                 let point = Point::from((hit.surface_px.x as f64, hit.surface_px.y as f64))
                     + panel.bounds.loc.to_f64();
@@ -793,7 +809,7 @@ impl Compositor {
             .filter(|panel| fullscreen_panel.is_none_or(|id| panel.id == id))
             .filter(|panel| panel.surface.alive())
             .filter_map(|panel| {
-                let geometry = panel.geometry?;
+                let geometry = self.input_geometry(panel)?;
                 geometry
                     .intersect(ray)
                     .map(|hit| (geometry.pose, hit.distance_m))

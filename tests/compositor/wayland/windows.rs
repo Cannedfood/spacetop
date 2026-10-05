@@ -329,6 +329,66 @@ fn panel_bounds_use_wayland_window_geometry() {
 }
 
 #[test]
+fn presented_window_geometry_controls_pointer_coordinates() {
+    for mode in [
+        crate::bridge::PanelMode::Maximized,
+        crate::bridge::PanelMode::FullScreen,
+    ] {
+        let mut app = WaylandApp::new(None);
+        let panel_id = app.compositor.panels[0].id;
+        let committed = app.compositor.panels[0].geometry.unwrap();
+        app.compositor.panels[0].mode = mode;
+        let mut presented = committed;
+        presented.pose.width_m *= 3.0;
+        presented.pose.center += Vec3::new(0.3, 0.2, 0.0);
+        app.compositor
+            .handle_xr_input(crate::XrInput::PresentedPanels {
+                geometries: vec![(panel_id, presented)],
+            });
+
+        let local = Vec3::new(presented.pose.width_m * 0.25, 0.0, 1.0);
+        let ray = Ray3 {
+            origin: presented.pose.center + presented.pose.orientation() * local,
+            direction: presented.pose.orientation() * Vec3::NEG_Z,
+        };
+        assert!(app.compositor.dispatch_ray(ray, 1));
+        pump(
+            &mut app.display,
+            &mut app.compositor,
+            &mut app.queue,
+            &mut app.client,
+            &app.connection,
+        );
+        let &(actual_x, actual_y) = app.client.motions.last().unwrap();
+        assert!((actual_x - 75.0).abs() <= 1.0 / 256.0);
+        assert!((actual_y - 25.0).abs() <= 1.0 / 256.0);
+        assert_eq!(app.compositor.panels[0].geometry, Some(committed));
+        let cursor = app.compositor.mouse_cursor_pose(ray).unwrap();
+        assert!(cursor.center.distance(ray.origin + ray.direction) < 1.0e-5);
+
+        app.compositor
+            .handle_xr_input(crate::XrInput::PresentedPanels {
+                geometries: Vec::new(),
+            });
+        let ray = Ray3 {
+            origin: committed.pose.center + committed.pose.orientation() * Vec3::new(0.0, 0.0, 1.0),
+            direction: committed.pose.orientation() * Vec3::NEG_Z,
+        };
+        assert!(app.compositor.dispatch_ray(ray, 2));
+        pump(
+            &mut app.display,
+            &mut app.compositor,
+            &mut app.queue,
+            &mut app.client,
+            &app.connection,
+        );
+        let &(actual_x, actual_y) = app.client.motions.last().unwrap();
+        assert!((actual_x - 50.0).abs() <= 1.0 / 256.0);
+        assert!((actual_y - 25.0).abs() <= 1.0 / 256.0);
+    }
+}
+
+#[test]
 fn resize_panel_uses_wayland_window_geometry_size() {
     let mut app = super::fixture::WaylandApp::new(None);
     let panel_id = app.compositor.panels[0].id;
