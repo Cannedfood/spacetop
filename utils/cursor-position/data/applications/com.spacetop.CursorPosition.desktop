@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Cursor Position
+Comment=Show cursor position and window measurements
+Exec=cursor-position
+TryExec=cursor-position
+Icon=input-mouse
+Terminal=false
+Categories=Utility;

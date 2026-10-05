@@ -5,7 +5,7 @@ edition = "2024"
 default-run = "spacetop"
 
 [workspace]
-members = [".", "utils/spacelauncher", "utils/spacetop-config", "utils/spacesettings"]
+members = [".", "utils/spacelauncher", "utils/spacetop-config", "utils/spacesettings", "utils/cursor-position"]
 default-members = ["."]
 resolver = "3"
 
