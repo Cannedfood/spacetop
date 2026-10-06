@@ -1,1 +1,2 @@
 - Use `cargo clippy` instead of `cargo check`
+- Leave README.md alone
