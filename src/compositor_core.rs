@@ -29,7 +29,14 @@ impl Compositor {
                 Ok(())
             }
             XrInput::PresentedPanels { geometries } => {
-                self.presented_geometries = geometries.into_iter().collect();
+                for panel in &mut self.panels {
+                    panel.presented_geometry = None;
+                }
+                for (panel_id, geometry) in geometries {
+                    if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == panel_id) {
+                        panel.presented_geometry = Some(geometry);
+                    }
+                }
                 Ok(())
             }
             XrInput::Ray {
@@ -383,7 +390,6 @@ impl Compositor {
             seat,
             output,
             panels: Vec::new(),
-            presented_geometries: BTreeMap::new(),
             gpu_renderer: None,
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
@@ -721,9 +727,8 @@ impl Compositor {
     fn input_geometry(&self, panel: &WindowPanel) -> Option<PanelGeometry> {
         let committed = panel.geometry?;
         Some(
-            self.presented_geometries
-                .get(&panel.id)
-                .copied()
+            panel
+                .presented_geometry
                 .filter(|presented| presented.logical_size == committed.logical_size)
                 .unwrap_or(committed),
         )

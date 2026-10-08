@@ -11,8 +11,7 @@ use crate::bridge::{CursorState, PanelReceiver, PanelState, PanelUpdate, XrInput
 use crate::config::{AppConfig, ConfigWatcher};
 use crate::gpu::{self, SharedImage};
 use crate::panel::{
-    PanelGeometry, PanelHistory, PanelId, PanelPastState, PanelPose, Ray3,
-    dodge_windows,
+    PanelGeometry, PanelHistory, PanelId, PanelPastState, PanelPose, Ray3, dodge_windows,
 };
 use crate::scene::{PanelTexture, RenderTarget, SceneFrame, SceneRenderer, SkyboxTexture};
 use anyhow::{Context, Result, ensure};

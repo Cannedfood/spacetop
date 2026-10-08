@@ -149,6 +149,7 @@ impl Compositor {
             },
             pose,
             geometry: None,
+            presented_geometry: None,
             state,
             history: crate::panel::PanelHistory::default(),
             pose_is_explicit: false,

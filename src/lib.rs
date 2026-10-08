@@ -97,6 +97,7 @@ struct WindowPanel {
     surface: PanelSurface,
     pose: PanelPose,
     geometry: Option<PanelGeometry>,
+    presented_geometry: Option<PanelGeometry>,
     state: PanelState,
     history: panel::PanelHistory,
     pose_is_explicit: bool,
@@ -119,7 +120,6 @@ struct Compositor {
 
     output: Output,
     panels: Vec<WindowPanel>,
-    presented_geometries: BTreeMap<PanelId, PanelGeometry>,
     gpu_renderer: Option<gpu::GpuRenderer>,
     dmabuf_state: DmabufState,
     dmabuf_global: Option<DmabufGlobal>,
@@ -230,6 +230,7 @@ impl XdgShellHandler for Compositor {
             surface: PanelSurface::Wayland(surface.clone()),
             pose,
             geometry: None,
+            presented_geometry: None,
             state: PanelState {
                 fullscreen: surface.current_state().states.contains(
                     smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
