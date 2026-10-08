@@ -1,4 +1,53 @@
-use super::*;
+use anyhow::{Context, Result};
+use ash::vk;
+
+use super::SceneRenderer;
+
+const SHADER_PARTS: [&str; 5] = [
+    include_str!("../shaders/shared.wgsl"),
+    include_str!("../shaders/panel.wgsl"),
+    include_str!("../shaders/tone_mapping.wgsl"),
+    include_str!("../shaders/lighting.wgsl"),
+    include_str!("../shaders/environment.wgsl"),
+];
+fn shader(
+    entry: &str,
+    stage: naga::ShaderStage,
+    trace_through_transparent_windows: bool,
+    ambient_occlusion: bool,
+) -> Result<Vec<u32>> {
+    let mut shader_source = SHADER_PARTS.join("\n").replace(
+        "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = false;",
+        &format!(
+            "const TRACE_THROUGH_TRANSPARENT_WINDOWS: bool = {};",
+            trace_through_transparent_windows
+        ),
+    );
+    shader_source = shader_source.replace(
+        "const AMBIENT_OCCLUSION: bool = false;",
+        &format!("const AMBIENT_OCCLUSION: bool = {ambient_occlusion};"),
+    );
+    let module = naga::front::wgsl::parse_str(&shader_source)
+        .map_err(|error| anyhow::anyhow!(error.emit_to_string(&shader_source)))?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::IMMEDIATES,
+    )
+    .validate(&module)?;
+    let options = naga::back::spv::Options {
+        flags: naga::back::spv::WriterFlags::empty(),
+        ..Default::default()
+    };
+    Ok(naga::back::spv::write_vec(
+        &module,
+        &info,
+        &options,
+        Some(&naga::back::spv::PipelineOptions {
+            shader_stage: stage,
+            entry_point: entry.into(),
+        }),
+    )?)
+}
 
 impl SceneRenderer {
     pub(super) fn pipeline(
@@ -117,196 +166,45 @@ impl SceneRenderer {
         }
         result.context("create Vulkan scene pipeline")
     }
+}
 
-    pub unsafe fn draw<'a>(
-        &self,
-        command: vk::CommandBuffer,
-        target: &RenderTarget,
-        view: &xr::View,
-        frame: &SceneFrame<'a>,
-    ) {
-        let projection = view_projection(view);
-        let mut panels = frame.panels.to_vec();
-        panels.sort_by(|(_, first), (_, second)| {
-            let first = (projection * first.pose.center.extend(1.0)).w;
-            let second = (projection * second.pose.center.extend(1.0)).w;
-            second.total_cmp(&first)
-        });
-        let area = vk::Rect2D::default().extent(target.extent);
-        let clear = [
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
-                },
-            },
-            vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
-            },
-        ];
-        unsafe {
-            self.device.cmd_begin_render_pass(
-                command,
-                &vk::RenderPassBeginInfo::default()
-                    .render_pass(self.render_pass)
-                    .framebuffer(target.framebuffer)
-                    .render_area(area)
-                    .clear_values(&clear),
-                vk::SubpassContents::INLINE,
-            );
-            self.device.cmd_set_viewport(
-                command,
-                0,
-                &[vk::Viewport {
-                    x: 0.0,
-                    y: 0.0,
-                    width: target.extent.width as f32,
-                    height: target.extent.height as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                }],
-            );
-            self.device.cmd_set_scissor(command, 0, &[area]);
-            self.device.cmd_bind_descriptor_sets(
-                command,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.layout,
-                1,
-                &[self.floor.descriptor, self.environment.descriptor],
-                &[],
-            );
-            let floor_height = [frame.floor_y];
-            let floor_height_bytes =
-                std::slice::from_raw_parts(floor_height.as_ptr().cast::<u8>(), 4);
-            self.device.cmd_push_constants(
-                command,
-                self.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                108,
-                floor_height_bytes,
-            );
-            let mut eye = [
-                view.pose.position.x,
-                view.pose.position.y,
-                view.pose.position.z,
-                0.0,
-            ];
-            let eye_bytes = std::slice::from_raw_parts(eye.as_ptr().cast::<u8>(), 16);
-            self.device.cmd_push_constants(
-                command,
-                self.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                112,
-                eye_bytes,
-            );
-            self.device.cmd_bind_pipeline(
-                command,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.environment_pipelines[usize::from(self.window.ambient_occlusion) * 2
-                    + usize::from(self.window.trace_through_transparent_windows)],
-            );
-            self.draw_panel(command, sky_matrix(view));
-            self.device.cmd_bind_pipeline(
-                command,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.window_pipeline,
-            );
-            for (texture, geometry) in panels {
-                let close_hit = frame
-                    .cursor_close_panel
-                    .filter(|(close_geometry, _)| *close_geometry == geometry);
-                let mut cursor_position = close_hit.map_or([0.0; 4], |(_, position)| {
-                    [
-                        position.x + self.window.window_padding_px,
-                        position.y + self.window.window_padding_px,
-                        0.0,
-                        0.0,
-                    ]
-                });
-                cursor_position[2] = frame.texture_sample_phase as f32;
-                let cursor_position_bytes =
-                    std::slice::from_raw_parts(cursor_position.as_ptr().cast::<u8>(), 16);
-                self.device.cmd_push_constants(
-                    command,
-                    self.layout,
-                    vk::ShaderStageFlags::FRAGMENT,
-                    64,
-                    cursor_position_bytes,
-                );
-                eye[0] = geometry.logical_size.w as f32
-                    + self.window.window_padding_px * 2.0
-                    + self.window.max_border_width_px
-                    + 2.0;
-                eye[1] = geometry.logical_size.h as f32
-                    + self.window.window_padding_px * 2.0
-                    + self.window.max_border_width_px
-                    + 2.0;
-                eye[2] = if frame.grabbed_panel == Some(geometry) {
-                    1.0
-                } else {
-                    0.0
-                };
-                eye[3] = if close_hit.is_some() { 1.0 } else { 0.0 };
-                let eye_bytes = std::slice::from_raw_parts(eye.as_ptr().cast::<u8>(), 16);
-                self.device.cmd_push_constants(
-                    command,
-                    self.layout,
-                    vk::ShaderStageFlags::FRAGMENT,
-                    112,
-                    eye_bytes,
-                );
-                self.device.cmd_bind_descriptor_sets(
-                    command,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.layout,
-                    0,
-                    &[texture.descriptor],
-                    &[],
-                );
-                self.draw_panel(
-                    command,
-                    projection
-                        * expanded_window_model(
-                            geometry,
-                            self.window.window_padding_px,
-                            self.window.max_border_width_px,
-                        ),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shaders_compile() {
+        for (entry, stage) in [
+            ("sky_vertex", naga::ShaderStage::Vertex),
+            ("vertex", naga::ShaderStage::Vertex),
+            ("window", naga::ShaderStage::Fragment),
+            ("cursor", naga::ShaderStage::Fragment),
+            ("environment", naga::ShaderStage::Fragment),
+        ] {
+            for ambient_occlusion in [false, true] {
+                assert_eq!(
+                    shader(entry, stage, false, ambient_occlusion).unwrap()[0],
+                    0x0723_0203
                 );
             }
-            if let Some(mut pose) = frame.cursor {
-                pose.center += pose.orientation() * Vec3::Z * 0.001;
-                self.device.cmd_bind_pipeline(
-                    command,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.cursor_pipeline,
-                );
-                self.draw_panel(
-                    command,
-                    projection
-                        * model(PanelGeometry {
-                            pose,
-                            logical_size: (21, 21).into(),
-                        }),
-                );
+            for trace_transparent in [false, true] {
+                for ambient_occlusion in [false, true] {
+                    assert_eq!(
+                        shader(
+                            "environment",
+                            naga::ShaderStage::Fragment,
+                            trace_transparent,
+                            ambient_occlusion,
+                        )
+                        .unwrap()[0],
+                        0x0723_0203
+                    );
+                }
             }
-            self.device.cmd_end_render_pass(command);
         }
-    }
-
-    unsafe fn draw_panel(&self, command: vk::CommandBuffer, matrix: Mat4) {
-        let columns = matrix.to_cols_array();
-        let bytes = unsafe { std::slice::from_raw_parts(columns.as_ptr().cast::<u8>(), 64) };
-        unsafe {
-            self.device.cmd_push_constants(
-                command,
-                self.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                bytes,
-            );
-            self.device.cmd_draw(command, 6, 1, 0, 0);
-        }
+        assert_eq!(
+            shader("environment", naga::ShaderStage::Fragment, true, false).unwrap()[0],
+            0x0723_0203
+        );
     }
 }
