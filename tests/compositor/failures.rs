@@ -67,7 +67,7 @@ fn gpu_and_xr_failures_are_fatal() {
     let directory = tempfile::tempdir().unwrap();
     for command in [
         crate::XrInput::GpuDevice {
-            limits: crate::panel::PanelLimits::default(),
+            max_panel_size: crate::panel::DEFAULT_MAX_PANEL_SIZE,
             render_node: directory.path().join("missing-render-node"),
         },
         crate::XrInput::FatalError {

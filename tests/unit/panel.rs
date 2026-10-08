@@ -13,6 +13,68 @@ fn panel() -> PanelGeometry {
 }
 
 #[test]
+fn panel_history_uses_layout_precedence_for_all_state_flags() {
+    use crate::bridge::PanelState;
+
+    let mut history = PanelHistory::default();
+    let regular = PanelPastState {
+        distance: 1.0,
+        size: (100, 50).into(),
+    };
+    let maximized = PanelPastState {
+        distance: 2.0,
+        size: (200, 100).into(),
+    };
+    let fullscreen = PanelPastState {
+        distance: 3.0,
+        size: (300, 150).into(),
+    };
+    history.save(PanelState::default(), regular);
+    history.save(
+        PanelState {
+            maximized: true,
+            ..Default::default()
+        },
+        maximized,
+    );
+    history.save(
+        PanelState {
+            fullscreen: true,
+            ..Default::default()
+        },
+        fullscreen,
+    );
+
+    for minimized in [false, true] {
+        for maximized_flag in [false, true] {
+            for fullscreen_flag in [false, true] {
+                let state = PanelState {
+                    minimized,
+                    maximized: maximized_flag,
+                    fullscreen: fullscreen_flag,
+                };
+                let expected = if fullscreen_flag {
+                    fullscreen
+                } else if maximized_flag {
+                    maximized
+                } else {
+                    regular
+                };
+                assert_eq!(history.get(state), Some(expected));
+                let replacement = PanelPastState {
+                    distance: 4.0,
+                    ..expected
+                };
+                let mut updated = history;
+                updated.save(state, replacement);
+                assert_eq!(updated.get(state), Some(replacement));
+                assert_eq!(history.get(state), Some(expected));
+            }
+        }
+    }
+}
+
+#[test]
 fn edge_resize_preserves_the_existing_scale_for_small_size_changes() {
     let geometry = panel();
     for width_m in [0.5, 1.0, 2.0] {
@@ -23,10 +85,9 @@ fn edge_resize_preserves_the_existing_scale_for_small_size_changes() {
             },
             ..geometry
         };
-        let resized = geometry.resized_pose_from_edges(
+        let resized = geometry.resized_pose(
             (geometry.logical_size.w + 1, geometry.logical_size.h).into(),
-            [false, true, false, false],
-            32.0,
+            geometry.pixels_per_degree(),
         );
         assert!(resized.width_m > width_m);
         assert!(resized.width_m < width_m * 1.01);
@@ -36,7 +97,70 @@ fn edge_resize_preserves_the_existing_scale_for_small_size_changes() {
 #[test]
 fn maximized_surface_size_uses_angular_bounds_and_logical_pixel_density() {
     let size = panel().size_for_angular_bounds(2.0, 32.0, 70.0, 50.0);
-    assert_eq!(size, (2240, 1120));
+    assert_eq!(size, (2240, 1492));
+}
+
+#[test]
+fn negotiated_size_fills_both_angular_bounds_independently_of_original_aspect() {
+    for original_size in [(1000, 500), (300, 1200)] {
+        let geometry = PanelGeometry {
+            logical_size: original_size.into(),
+            ..panel()
+        };
+        for (width, height) in [(70.0, 50.0), (100.0, 65.0)] {
+            let size = geometry.size_for_angular_bounds(2.0, 32.0, width, height);
+            let fitted = PanelGeometry::fit_pose_to_angular_bounds(
+                geometry.pose,
+                size.into(),
+                2.0,
+                width,
+                height,
+            );
+            let actual_width = 2.0 * (fitted.width_m / 4.0).atan().to_degrees();
+            let actual_height = 2.0
+                * (fitted.width_m * size.1 as f32 / size.0 as f32 / 4.0)
+                    .atan()
+                    .to_degrees();
+            assert!((actual_width - width).abs() < 0.03);
+            assert!((actual_height - height).abs() < 0.03);
+        }
+    }
+}
+
+#[test]
+fn trace_classifies_content_and_handles_with_one_reach_value() {
+    let geometry = panel();
+    let ray = Ray3 {
+        origin: Vec3::ZERO,
+        direction: Vec3::NEG_Z * 2.0,
+    };
+    let center = geometry.trace(ray, 6.0).unwrap();
+    assert!(center.on_panel && center.on_content);
+    assert_eq!(center.on_edges, [false; 4]);
+    assert_eq!(center.position, geometry.pose.center);
+    assert_eq!(center.distance_m, 2.0);
+    let ray = Ray3 {
+        origin: Vec3::new(-0.505, 0.0, 0.0),
+        ..ray
+    };
+    let edge = geometry.trace(ray, 6.0).unwrap();
+    assert!(edge.on_panel && !edge.on_content);
+    assert_eq!(edge.on_edges, [true, false, false, false]);
+    assert!(!geometry.trace(ray, 4.0).unwrap().on_panel);
+}
+
+#[test]
+fn grab_reach_uses_largest_border_or_padding_plus_margin() {
+    let mut window = crate::config::AppConfig::default().window;
+    window.padding_px = 100.0;
+    window.margin_px = 0.0;
+    window.border_width_px = 10.0;
+    window.cursor_close_border_width_px = 20.0;
+    window.grabbed_border_width_px = 60.0;
+    assert_eq!(window.grab_reach_px(), 100.0);
+    window.padding_px = 2.0;
+    window.margin_px = 3.0;
+    assert_eq!(window.grab_reach_px(), 60.0);
 }
 
 #[test]
@@ -48,9 +172,9 @@ fn pixel_grab_margin_accepts_hits_just_outside_panel_bounds() {
     };
 
     assert!(geometry.intersect(ray).is_none());
-    let hit = geometry.intersect_with_margin_px(ray, 6.0).unwrap();
+    let hit = geometry.trace(ray, 6.0).filter(|hit| hit.on_panel).unwrap();
     assert!((hit.surface_px.x + 5.0).abs() < 0.001);
-    assert!(geometry.intersect_with_margin_px(ray, 4.0).is_none());
+    assert!(!geometry.trace(ray, 4.0).unwrap().on_panel);
 }
 
 #[test]
@@ -60,20 +184,15 @@ fn resize_handles_are_outside_the_panel_not_inside_its_edges() {
         origin: Vec3::new(-0.499, 0.0, -2.0),
         direction: Vec3::NEG_Z,
     };
-    let inside_hit = geometry.intersect_unbounded(inside_edge_ray).unwrap();
-    assert_eq!(geometry.resize_edges_from_hit(inside_hit), [false; 4]);
+    let inside_hit = geometry.trace(inside_edge_ray, 0.0).unwrap();
+    assert_eq!(inside_hit.on_edges, [false; 4]);
 
     let outside_edge_ray = Ray3 {
         origin: Vec3::new(-0.505, 0.0, -2.0),
         direction: Vec3::NEG_Z,
     };
-    let outside_hit = geometry
-        .intersect_with_margin_px(outside_edge_ray, 6.0)
-        .unwrap();
-    assert_eq!(
-        geometry.resize_edges_from_hit(outside_hit),
-        [true, false, false, false]
-    );
+    let outside_hit = geometry.trace(outside_edge_ray, 6.0).unwrap();
+    assert_eq!(outside_hit.on_edges, [true, false, false, false]);
 }
 
 #[test]
@@ -84,9 +203,9 @@ fn pixel_intersection_margins_are_uniform_across_rectangular_axes() {
             origin,
             direction: Vec3::NEG_Z,
         };
-        let hit = geometry.intersect_with_margin_px(ray, 6.0).unwrap();
+        let hit = geometry.trace(ray, 6.0).filter(|hit| hit.on_panel).unwrap();
         assert!(hit.surface_px.x >= -6.0 && hit.surface_px.y >= -6.0);
-        assert!(geometry.intersect_with_margin_px(ray, 2.0).is_none());
+        assert!(!geometry.trace(ray, 2.0).unwrap().on_panel);
     }
 }
 
@@ -109,11 +228,7 @@ fn expanded_bounds_preserve_root_placement_and_pixel_scale() {
 
 #[test]
 fn capture_uses_display_scale_and_aspect_preserving_limits() {
-    let limits = PanelLimits {
-        max_width: 1600,
-        max_height: 1000,
-        max_layers: 4,
-    };
+    let max_panel_size = 1600;
     for (logical, buffer_scale, display_scale, expected) in [
         ((800, 400), 1, 1.0, (800, 400)),
         ((800, 400), 2, 1.0, (1600, 800)),
@@ -121,9 +236,9 @@ fn capture_uses_display_scale_and_aspect_preserving_limits() {
         ((800, 400), 1, 1.5, (1200, 600)),
         ((800, 400), 2, 1.5, (1600, 800)),
         ((3200, 1600), 1, 1.0, (1600, 800)),
-        ((600, 3000), 2, 1.0, (200, 1000)),
+        ((600, 3000), 2, 1.0, (320, 1600)),
     ] {
-        let (size, _) = limits.capture_size(logical.into(), buffer_scale, display_scale);
+        let (size, _) = capture_size(max_panel_size, logical.into(), buffer_scale, display_scale);
         assert_eq!((size.w, size.h), expected);
     }
 }
@@ -335,38 +450,56 @@ fn pixel_density_sets_angular_width_and_resize_grows_the_panel() {
 }
 
 #[test]
-fn edge_resize_keeps_the_opposite_edge_anchored() {
+fn centered_resize_doubles_each_axis_delta_and_accumulates_uncommitted_requests() {
+    let geometry = panel();
+    let previous = Ray3 {
+        origin: Vec3::ZERO,
+        direction: Vec3::NEG_Z,
+    };
+    let current = Ray3 {
+        origin: Vec3::new(0.01, -0.02, 0.0),
+        ..previous
+    };
+    for (edges, expected) in [
+        ([true, false, true, false], Vec2::new(980.0, 460.0)),
+        ([false, true, false, true], Vec2::new(1020.0, 540.0)),
+        ([false, true, false, false], Vec2::new(1020.0, 500.0)),
+        ([false, false, false, true], Vec2::new(1000.0, 540.0)),
+    ] {
+        let size = geometry
+            .resized_size_from_rays(previous, current, Vec2::new(1000.0, 500.0), edges)
+            .unwrap();
+        assert!((size - expected).length() < 0.001);
+        let next = Ray3 {
+            origin: current.origin * 2.0,
+            ..current
+        };
+        let accumulated = geometry
+            .resized_size_from_rays(current, next, size, edges)
+            .unwrap();
+        assert!((accumulated - (expected * 2.0 - Vec2::new(1000.0, 500.0))).length() < 0.001);
+    }
+}
+
+#[test]
+fn edge_resize_keeps_the_center_fixed() {
     let initial = panel();
-    let resized_width = initial.pose.width_m;
-    let unchanged =
-        initial.resized_pose_from_edges(initial.logical_size, [false, true, false, false], 32.0);
+    let unchanged = initial.resized_pose(initial.logical_size, initial.pixels_per_degree());
     assert_eq!(unchanged, initial.pose);
 
-    let right_resize =
-        initial.resized_pose_from_edges((1200, 500).into(), [false, true, false, false], 32.0);
-    let right_axis = initial.pose.orientation() * Vec3::X;
-    let initial_left = initial.pose.center.dot(right_axis) - initial.pose.width_m * 0.5;
-    let resized_left = right_resize.center.dot(right_axis) - right_resize.width_m * 0.5;
-    assert!((resized_left - initial_left).abs() < 1.0e-5);
+    let right_resize = initial.resized_pose((1200, 500).into(), initial.pixels_per_degree());
+    assert_eq!(right_resize.center, initial.pose.center);
+    assert!(right_resize.width_m > initial.pose.width_m);
 
-    let left_resize =
-        initial.resized_pose_from_edges((800, 500).into(), [true, false, false, false], 32.0);
-    let initial_right = initial.pose.center.dot(right_axis) + initial.pose.width_m * 0.5;
-    let resized_right = left_resize.center.dot(right_axis) + left_resize.width_m * 0.5;
-    assert!((resized_right - initial_right).abs() < 1.0e-5);
+    let left_resize = initial.resized_pose((800, 500).into(), initial.pixels_per_degree());
+    assert_eq!(left_resize.center, initial.pose.center);
+    assert!(left_resize.width_m < initial.pose.width_m);
 
-    let bottom_resize =
-        initial.resized_pose_from_edges((1000, 700).into(), [false, false, false, true], 32.0);
-    let up_axis = initial.pose.orientation() * Vec3::Y;
-    let initial_top = initial.pose.center.dot(up_axis) + resized_width * 0.25;
-    let resized_top = bottom_resize.center.dot(up_axis) + bottom_resize.width_m * 0.35;
-    assert!((resized_top - initial_top).abs() < 1.0e-5);
+    let bottom_resize = initial.resized_pose((1000, 700).into(), initial.pixels_per_degree());
+    assert_eq!(bottom_resize, initial.pose);
 
-    let top_resize =
-        initial.resized_pose_from_edges((1000, 300).into(), [false, false, true, false], 32.0);
-    let initial_bottom = initial.pose.center.dot(up_axis) - resized_width * 0.25;
-    let resized_bottom = top_resize.center.dot(up_axis) - top_resize.width_m * 0.15;
-    assert!((resized_bottom - initial_bottom).abs() < 1.0e-5);
+    let top_resize = initial.resized_pose((1000, 300).into(), initial.pixels_per_degree());
+    assert_eq!(top_resize, initial.pose);
 }
 
 #[test]
@@ -405,10 +538,13 @@ fn ray_misses_outside_panel_and_behind_origin() {
 #[test]
 fn unbounded_intersection_preserves_outside_panel_coordinates() {
     let hit = panel()
-        .intersect_unbounded(Ray3 {
-            origin: Vec3::ZERO,
-            direction: Vec3::new(0.6, 0.0, -2.0).normalize(),
-        })
+        .trace(
+            Ray3 {
+                origin: Vec3::ZERO,
+                direction: Vec3::new(0.6, 0.0, -2.0).normalize(),
+            },
+            0.0,
+        )
         .unwrap();
     assert!(hit.surface_px.x > panel().logical_size.w as f32);
 }

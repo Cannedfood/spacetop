@@ -225,7 +225,8 @@ impl WindowConfig {
     }
 
     pub fn grab_reach_px(&self) -> f32 {
-        self.effective_padding_px() + self.effective_margin_px()
+        self.max_border_width_px()
+            .max(self.padding_px + self.margin_px)
     }
 }
 

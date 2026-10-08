@@ -22,7 +22,7 @@ pub use runtime::{DisplayNames, RuntimeCallbacks, run, run_with_callbacks, run_w
 #[cfg(test)]
 use smithay::reexports::wayland_server::Display;
 
-use bridge::{PanelMode, PanelUpdate, XrInput};
+use bridge::{PanelState, PanelUpdate, XrInput};
 use panel::{PanelGeometry, PanelId, PanelPose, Ray3};
 use panel_surface::PanelSurface;
 use smithay::{
@@ -97,10 +97,10 @@ struct WindowPanel {
     surface: PanelSurface,
     pose: PanelPose,
     geometry: Option<PanelGeometry>,
-    mode: PanelMode,
-    maximize_restore_size: Option<(i32, i32)>,
+    state: PanelState,
+    history: panel::PanelHistory,
     pose_is_explicit: bool,
-    resize_anchor: Option<(PanelGeometry, [bool; 4])>,
+    resize_density: Option<f32>,
     bounds: Rectangle<i32, Logical>,
 }
 
@@ -125,7 +125,7 @@ struct Compositor {
     dmabuf_global: Option<DmabufGlobal>,
     next_panel_id: PanelId,
     frame_sender: bridge::PanelSender,
-    panel_limits: panel::PanelLimits,
+    max_panel_size: u32,
 
     window_config: config::WindowConfig,
 
@@ -230,20 +230,18 @@ impl XdgShellHandler for Compositor {
             surface: PanelSurface::Wayland(surface.clone()),
             pose,
             geometry: None,
-            mode: if surface.current_state().states.contains(
-                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
-            ) {
-                PanelMode::FullScreen
-            } else if surface.current_state().states.contains(
-                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
-            ) {
-                PanelMode::Maximized
-            } else {
-                PanelMode::Regular
+            state: PanelState {
+                fullscreen: surface.current_state().states.contains(
+                    smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
+                ),
+                maximized: surface.current_state().states.contains(
+                    smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
+                ),
+                minimized: false,
             },
-            maximize_restore_size: None,
+            history: panel::PanelHistory::default(),
             pose_is_explicit: false,
-            resize_anchor: None,
+            resize_density: None,
             id: panel_id,
             bounds: Rectangle::default(),
         });
@@ -264,21 +262,32 @@ impl XdgShellHandler for Compositor {
             .panels
             .iter()
             .position(|panel| panel.surface.wl_surface() == surface.wl_surface())
-            && self.panels[index].mode.is_maximized()
-            && let Err(error) = self.request_panel_maximized(index, false)
         {
-            eprintln!("failed to restore maximized Wayland window before fullscreen: {error:#}");
+            if let Err(error) = self.request_panel_fullscreen(index, true) {
+                eprintln!("failed to fullscreen Wayland window: {error:#}");
+            }
+            surface.with_pending_state(|state| state.fullscreen_output = output);
+            surface.send_configure();
             return;
         }
         surface.with_pending_state(|state| {
             use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
             state.states.set(State::Fullscreen);
-            state.states.unset(State::Maximized);
             state.fullscreen_output = output;
         });
         let _ = surface.send_configure();
     }
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if let Some(index) = self
+            .panels
+            .iter()
+            .position(|panel| panel.surface.wl_surface() == surface.wl_surface())
+        {
+            if let Err(error) = self.request_panel_fullscreen(index, false) {
+                eprintln!("failed to restore fullscreen Wayland window: {error:#}");
+            }
+            return;
+        }
         surface.with_pending_state(|state| {
             use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
             state.states.unset(State::Fullscreen);
@@ -299,8 +308,6 @@ impl XdgShellHandler for Compositor {
             surface.with_pending_state(|state| {
                 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
                 state.states.set(State::Maximized);
-                state.states.unset(State::Fullscreen);
-                state.fullscreen_output = None;
             });
             let _ = surface.send_configure();
         }

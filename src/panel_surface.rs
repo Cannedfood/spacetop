@@ -59,8 +59,6 @@ impl PanelSurface {
                     use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
                     if maximized {
                         state.states.set(State::Maximized);
-                        state.states.unset(State::Fullscreen);
-                        state.fullscreen_output = None;
                     } else {
                         state.states.unset(State::Maximized);
                     }
@@ -71,9 +69,6 @@ impl PanelSurface {
                 surface.send_configure();
             }
             Self::X11 { window, .. } if !window.is_override_redirect() => {
-                if maximized && window.is_fullscreen() {
-                    window.set_fullscreen(false)?;
-                }
                 window.set_maximized(maximized)?;
                 if let Some((width, height)) = size {
                     let mut geometry = window.geometry();
@@ -87,26 +82,30 @@ impl PanelSurface {
         Ok(())
     }
 
-    pub fn set_fullscreen(&self, fullscreen: bool) -> anyhow::Result<()> {
+    pub fn set_fullscreen(&self, fullscreen: bool, size: Option<(i32, i32)>) -> anyhow::Result<()> {
         match self {
             Self::Wayland(surface) => {
                 surface.with_pending_state(|state| {
                     use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
                     if fullscreen {
                         state.states.set(State::Fullscreen);
-                        state.states.unset(State::Maximized);
                     } else {
                         state.states.unset(State::Fullscreen);
                         state.fullscreen_output = None;
+                    }
+                    if let Some((width, height)) = size {
+                        state.size = Some((width.max(1), height.max(1)).into());
                     }
                 });
                 surface.send_configure();
             }
             Self::X11 { window, .. } if !window.is_override_redirect() => {
-                if fullscreen && window.is_maximized() {
-                    window.set_maximized(false)?;
-                }
                 window.set_fullscreen(fullscreen)?;
+                if let Some((width, height)) = size {
+                    let mut geometry = window.geometry();
+                    geometry.size = (width.max(1), height.max(1)).into();
+                    window.configure(geometry)?;
+                }
             }
             Self::X11 { .. } | Self::Popup(_) => {}
         }

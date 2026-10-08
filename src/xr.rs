@@ -7,10 +7,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::bridge::{CursorState, PanelMode, PanelReceiver, PanelUpdate, XrInput};
+use crate::bridge::{CursorState, PanelReceiver, PanelState, PanelUpdate, XrInput};
 use crate::config::{AppConfig, ConfigWatcher};
 use crate::gpu::{self, SharedImage};
-use crate::panel::{PanelGeometry, PanelId, PanelLimits, PanelPose, Ray3, dodge_windows};
+use crate::panel::{
+    PanelGeometry, PanelHistory, PanelId, PanelPastState, PanelPose, Ray3,
+    dodge_windows,
+};
 use crate::scene::{PanelTexture, RenderTarget, SceneFrame, SceneRenderer, SkyboxTexture};
 use anyhow::{Context, Result, ensure};
 use ash::{
@@ -26,9 +29,9 @@ struct XrPanel {
     saved_pose: PanelPose,
     temporary_pose: PanelPose,
     resize_pending: bool,
-    mode: PanelMode,
+    state: PanelState,
     fullscreen_anchor_pose: Option<PanelPose>,
-    maximize_restore_width: Option<f32>,
+    history: PanelHistory,
 }
 
 struct XrEye {
@@ -127,13 +130,13 @@ fn update_dodge_targets(
     player: glam::Vec3,
     margin_m: f32,
 ) {
-    if panels.values().any(|panel| panel.mode.is_fullscreen()) {
+    if panels.values().any(|panel| panel.state.fullscreen) {
         return;
     }
     let geometries: Vec<_> = panels
         .iter()
         .map(|(id, panel)| {
-            let pose = if fixed_windows.contains(id) || panel.mode.is_maximized() {
+            let pose = if fixed_windows.contains(id) || panel.state.maximized {
                 panel.geometry.pose
             } else {
                 panel.saved_pose
@@ -178,7 +181,7 @@ fn save_dodge_targets_except(
     input: &crate::bridge::InputSender,
     excluded_panel: Option<PanelId>,
 ) -> Result<()> {
-    if panels.values().any(|panel| panel.mode.is_fullscreen()) {
+    if panels.values().any(|panel| panel.state.fullscreen) {
         return Ok(());
     }
     for (panel_id, panel) in panels {
@@ -186,16 +189,7 @@ fn save_dodge_targets_except(
             continue;
         }
         panel.resize_pending = false;
-        panel.saved_pose = if panel.mode.is_maximized() {
-            PanelPose {
-                width_m: panel
-                    .maximize_restore_width
-                    .unwrap_or(panel.saved_pose.width_m),
-                ..panel.temporary_pose
-            }
-        } else {
-            panel.temporary_pose
-        };
+        panel.saved_pose = panel.temporary_pose;
         input.send(XrInput::MovePanel {
             panel_id: *panel_id,
             pose: panel.saved_pose,
@@ -208,17 +202,16 @@ fn finish_resize(
     panels: &mut PanelImages,
     input: &crate::bridge::InputSender,
     resizing_panel: &mut Option<PanelId>,
-    geometry: Option<PanelGeometry>,
-    edges: [bool; 4],
+    density: Option<f32>,
     requested_size: Option<(i32, i32)>,
 ) -> Result<()> {
     if let Some(panel_id) = resizing_panel.take() {
-        if let Some((geometry, (width, height))) = geometry.zip(requested_size) {
+        if let Some((density, (width, height))) = density.zip(requested_size) {
             input.send(XrInput::ResizePanel {
                 panel_id,
                 width,
                 height,
-                anchor: Some((geometry, edges)),
+                pixels_per_degree: Some(density),
             })?;
         }
         save_dodge_targets_except(panels, input, Some(panel_id))?;
@@ -233,6 +226,21 @@ fn smooth_pose(current: PanelPose, target: PanelPose, factor: f32) -> PanelPose 
         yaw: current.yaw + angle_delta(current.yaw, target.yaw) * factor,
         pitch: current.pitch + (target.pitch - current.pitch) * factor,
         width_m: current.width_m + (target.width_m - current.width_m) * factor,
+    }
+}
+
+fn restore_panel_distance(
+    current: PanelPose,
+    player: glam::Vec3,
+    distance: f32,
+    size: smithay::utils::Size<i32, smithay::utils::Logical>,
+    density: f32,
+) -> PanelPose {
+    let offset = current.center - player;
+    let direction = offset.try_normalize().unwrap_or(glam::Vec3::NEG_Z);
+    PanelPose {
+        width_m: PanelPose::width_for_pixel_density(size.w.max(1) as f32, distance, density),
+        ..PanelPose::looking_from_to(player + direction * distance, player)
     }
 }
 
@@ -266,10 +274,15 @@ fn cursor_pose(
     let direction = ray.direction.try_normalize()?;
     let ray = Ray3 { direction, ..ray };
     let nearest = panels
-        .filter_map(|geometry| geometry.intersect(ray).map(|hit| (geometry.pose, hit)))
+        .filter_map(|geometry| {
+            geometry
+                .trace(ray, 0.0)
+                .filter(|hit| hit.on_content)
+                .map(|hit| (geometry.pose, hit))
+        })
         .min_by(|(_, first), (_, second)| first.distance_m.total_cmp(&second.distance_m));
     if let Some((pose, hit)) = nearest {
-        let center = ray.origin + direction * hit.distance_m;
+        let center = hit.position;
         *sphere_radius = center.distance(player);
         return Some(PanelPose {
             center,
@@ -481,19 +494,15 @@ pub fn run(
                 .parse::<u32>()
                 .context("SPACETOP_MAX_PANEL_SIZE must be a positive integer")
         })
-        .unwrap_or(Ok(4096))?;
-    let limits = PanelLimits {
-        max_width: device_limit.min(cap).min(i32::MAX as u32),
-        max_height: device_limit.min(cap).min(i32::MAX as u32),
-        max_layers: u32::MAX,
-    };
+        .unwrap_or(Ok(crate::panel::DEFAULT_MAX_PANEL_SIZE))?;
+    let max_panel_size = device_limit.min(cap).min(i32::MAX as u32);
     ensure!(
-        limits.max_width > 0 && limits.max_height > 0 && graphics.max_layer_count > 0,
+        max_panel_size > 0 && graphics.max_layer_count > 0,
         "invalid Vulkan panel limits, no OpenXR projection layer, or zero SPACETOP_MAX_PANEL_SIZE"
     );
     eprintln!(
         "Vulkan panel limits: {}x{}, one stereo projection layer",
-        limits.max_width, limits.max_height
+        max_panel_size, max_panel_size
     );
     let formats = session.enumerate_swapchain_formats()?;
     let format = panel_swapchain_format(&formats)?;
@@ -539,7 +548,7 @@ pub fn run(
     input
         .send(XrInput::GpuDevice {
             render_node,
-            limits,
+            max_panel_size,
         })
         .context("request GPU compositing")?;
     let space =
@@ -731,9 +740,9 @@ pub fn run(
     let mut grab_direction_offset = glam::Vec2::ZERO;
     let mut maximize_layout_dirty = false;
     let mut resizing_panel = None;
-    let mut resize_geometry = None;
-    let mut resize_initial_size = (0_i32, 0_i32);
-    let mut resize_initial_hit = glam::Vec2::ZERO;
+    let mut resize_density = None;
+    let mut resize_previous_ray = None;
+    let mut resize_size = glam::Vec2::ZERO;
     let mut resize_edges = [false; 4];
     let mut resize_requested_size = None;
     let mut cursor_close_panel = None;
@@ -889,7 +898,7 @@ pub fn run(
             if let PanelUpdate::Removed { panel_id } = update {
                 maximize_layout_dirty |= panel_frames
                     .get(panel_id)
-                    .is_some_and(|panel| panel.mode.is_maximized());
+                    .is_some_and(|panel| panel.state.maximized);
                 timings.measure("mixed/panel-retire", Duration::ZERO, || {
                     panel_frames.remove(panel_id);
                 });
@@ -901,7 +910,7 @@ pub fn run(
                     active_fullscreen_panel = panel_frames
                         .iter()
                         .rev()
-                        .find(|(_, panel)| panel.mode.is_fullscreen())
+                        .find(|(_, panel)| panel.state.fullscreen)
                         .map(|(id, _)| *id);
                     if active_fullscreen_panel.is_none() {
                         for panel in panel_frames.values_mut() {
@@ -918,7 +927,7 @@ pub fn run(
                     panel_id,
                     dmabuf,
                     geometry,
-                    mode,
+                    state,
                 } => {
                     let shared = timings
                         .measure("gpu/dmabuf-import", Duration::ZERO, || {
@@ -929,8 +938,8 @@ pub fn run(
                     ensure!(
                         size.w > 0
                             && size.h > 0
-                            && size.w as u32 <= limits.max_width
-                            && size.h as u32 <= limits.max_height,
+                            && size.w as u32 <= max_panel_size
+                            && size.h as u32 <= max_panel_size,
                         "window image exceeds negotiated Vulkan limits"
                     );
                     let texture = timings.measure("gpu/panel-texture", Duration::ZERO, || {
@@ -938,53 +947,81 @@ pub fn run(
                     })?;
                     timings.measure("gpu/panel-replace", Duration::ZERO, || {
                         if let Some(panel) = panel_frames.get_mut(&panel_id) {
-                            let fullscreen_changed =
-                                panel.mode.is_fullscreen() != mode.is_fullscreen();
-                            let maximized_changed =
-                                panel.mode.is_maximized() != mode.is_maximized();
-                            if maximized_changed && mode.is_maximized() {
-                                panel.maximize_restore_width = Some(panel.saved_pose.width_m);
+                            let fullscreen_changed = panel.state.fullscreen != state.fullscreen;
+                            let maximized_changed = panel.state.maximized != state.maximized;
+                            let layout_changed =
+                                fullscreen_changed || (!state.fullscreen && maximized_changed);
+                            if layout_changed {
+                                panel.history.save(
+                                    panel.state,
+                                    PanelPastState {
+                                        distance: panel
+                                            .geometry
+                                            .pose
+                                            .center
+                                            .distance(grab_player_position),
+                                        size: panel.geometry.logical_size,
+                                    },
+                                );
                             }
                             reconcile_panel_geometry(
                                 &mut panel.geometry,
                                 &mut panel.saved_pose,
                                 &mut panel.temporary_pose,
                                 geometry,
-                                panel.resize_pending
-                                    && panel.mode.is_fullscreen() == mode.is_fullscreen(),
-                                panel.mode.is_maximized() || mode.is_maximized(),
+                                panel.resize_pending && panel.state.fullscreen == state.fullscreen,
+                                false,
                             );
+                            if layout_changed {
+                                let distance = panel
+                                    .history
+                                    .get(state)
+                                    .map(|past| past.distance)
+                                    .unwrap_or_else(|| {
+                                        panel.geometry.pose.center.distance(grab_player_position)
+                                    });
+                                let pose = restore_panel_distance(
+                                    panel.geometry.pose,
+                                    grab_player_position,
+                                    distance,
+                                    geometry.logical_size,
+                                    config.window.pixels_per_degree,
+                                );
+                                panel.geometry.pose = pose;
+                                panel.saved_pose = pose;
+                                panel.temporary_pose = pose;
+                                panel.resize_pending = false;
+                                reset_grab_baseline_after_unmaximize(
+                                    grabbed_panel,
+                                    panel_id,
+                                    pose.width_m,
+                                    distance,
+                                    &mut grab_initial_width,
+                                    &mut grab_initial_radius,
+                                );
+                                if grabbed_panel == Some(panel_id) {
+                                    grab_radius = distance;
+                                }
+                            }
                             panel.texture = texture;
-                            panel.mode = mode;
+                            panel.state = state;
                             if maximized_changed {
                                 maximize_layout_dirty = true;
-                                if mode.is_maximized() {
+                                if state.maximized {
                                     resizing_panel = None;
-                                    resize_geometry = None;
+                                    resize_density = None;
                                     resize_requested_size = None;
-                                } else if let Some(width) = panel.maximize_restore_width.take() {
-                                    panel.saved_pose.width_m = width;
-                                    panel.temporary_pose.width_m = width;
-                                    panel.geometry.pose.width_m = width;
-                                    reset_grab_baseline_after_unmaximize(
-                                        grabbed_panel,
-                                        panel_id,
-                                        width,
-                                        grab_radius,
-                                        &mut grab_initial_width,
-                                        &mut grab_initial_radius,
-                                    );
                                 }
                             }
                             if fullscreen_changed {
                                 panel.fullscreen_anchor_pose = None;
-                                if mode.is_fullscreen() {
+                                if state.fullscreen {
                                     active_fullscreen_panel = Some(panel_id);
                                 } else if active_fullscreen_panel == Some(panel_id) {
                                     active_fullscreen_panel = panel_frames
                                         .iter()
                                         .rev()
-                                        .find(|(_, candidate)| candidate.mode.is_fullscreen())
+                                        .find(|(_, candidate)| candidate.state.fullscreen)
                                         .map(|(id, _)| *id);
                                     if active_fullscreen_panel.is_none() {
                                         for panel in panel_frames.values_mut() {
@@ -993,10 +1030,10 @@ pub fn run(
                                         }
                                     }
                                 }
-                                if mode.is_fullscreen() {
+                                if state.fullscreen {
                                     grabbed_panel = None;
                                     resizing_panel = None;
-                                    resize_geometry = None;
+                                    resize_density = None;
                                     resize_requested_size = None;
                                 }
                             }
@@ -1009,18 +1046,16 @@ pub fn run(
                                     saved_pose: geometry.pose,
                                     temporary_pose: geometry.pose,
                                     resize_pending: false,
-                                    mode,
+                                    state,
                                     fullscreen_anchor_pose: None,
-                                    maximize_restore_width: mode
-                                        .is_maximized()
-                                        .then_some(geometry.pose.width_m),
+                                    history: PanelHistory::default(),
                                 },
                             );
-                            if mode.is_fullscreen() {
+                            if state.fullscreen {
                                 active_fullscreen_panel = Some(panel_id);
                             }
                             pending_spawn.insert(panel_id);
-                            if mode.is_maximized() {
+                            if state.maximized {
                                 maximize_layout_dirty = true;
                             }
                         }
@@ -1122,7 +1157,7 @@ pub fn run(
             }
             for panel in panel_frames
                 .values_mut()
-                .filter(|panel| panel.mode.is_maximized())
+                .filter(|panel| panel.state.maximized && !panel.state.fullscreen)
             {
                 let distance = panel.geometry.pose.center.distance(grab_player_position);
                 panel.geometry.pose = PanelGeometry::fit_pose_to_angular_bounds(
@@ -1204,7 +1239,13 @@ pub fn run(
                             active_fullscreen_panel.is_none_or(|fullscreen| **id == fullscreen)
                         })
                         .filter_map(|(id, panel)| {
-                            let hit = panel.geometry.intersect_unbounded(ray)?;
+                            let hit = panel.geometry.trace(
+                                ray,
+                                resize_reach_px.max(config.window.cursor_proximity_radius_px),
+                            )?;
+                            if !hit.on_panel {
+                                return None;
+                            }
                             let width = panel.geometry.logical_size.w as f32;
                             let height = panel.geometry.logical_size.h as f32;
                             let outside_x =
@@ -1259,10 +1300,8 @@ pub fn run(
                                 .filter_map(|(id, panel)| {
                                     panel
                                         .geometry
-                                        .intersect_with_margin_px(
-                                            ray,
-                                            config.window.grab_reach_px(),
-                                        )
+                                        .trace(ray, config.window.grab_reach_px())
+                                        .filter(|hit| hit.on_panel)
                                         .map(|hit| (*id, hit))
                                 })
                                 .min_by(|(_, first), (_, second)| {
@@ -1306,15 +1345,18 @@ pub fn run(
                     && let Some(ray) = cursor_ray
                     && let Some(hit) = panel
                         .geometry
-                        .intersect_with_margin_px(ray, resize_reach_px)
+                        .trace(ray, resize_reach_px)
+                        .filter(|hit| hit.on_panel)
                 {
-                    resize_edges = panel.geometry.resize_edges_from_hit(hit);
+                    resize_edges = hit.on_edges;
                     if resize_edges.into_iter().any(|edge| edge) {
                         resizing_panel = Some(panel_id);
-                        resize_geometry = Some(panel.geometry);
-                        resize_initial_size =
-                            (panel.geometry.logical_size.w, panel.geometry.logical_size.h);
-                        resize_initial_hit = hit.surface_px;
+                        resize_density = Some(panel.geometry.pixels_per_degree());
+                        resize_size = glam::Vec2::new(
+                            panel.geometry.logical_size.w as f32,
+                            panel.geometry.logical_size.h as f32,
+                        );
+                        resize_previous_ray = Some(ray);
                         resize_requested_size = None;
                         if let Some(panel) = panel_frames.get_mut(&panel_id) {
                             panel.resize_pending = true;
@@ -1326,45 +1368,35 @@ pub fn run(
                         &mut panel_frames,
                         &input,
                         &mut resizing_panel,
-                        resize_geometry,
-                        resize_edges,
+                        resize_density,
                         resize_requested_size,
                     )?;
-                    resize_geometry = None;
+                    resize_density = None;
                     resize_requested_size = None;
                 }
                 if trigger.is_active
                     && trigger.current_state
                     && let Some(panel_id) = resizing_panel
-                    && let Some(geometry) = resize_geometry
+                    && let Some(panel) = panel_frames.get(&panel_id)
+                    && let Some(previous_ray) = resize_previous_ray
                     && let Some(ray) = cursor_ray
-                    && let Some(hit) = geometry.intersect_unbounded(ray)
+                    && let Some(new_size) = panel.geometry.resized_size_from_rays(
+                        previous_ray,
+                        ray,
+                        resize_size,
+                        resize_edges,
+                    )
                 {
-                    let width = if resize_edges[0] {
-                        resize_initial_size.0 as f32 - (hit.surface_px.x - resize_initial_hit.x)
-                    } else if resize_edges[1] {
-                        resize_initial_size.0 as f32 + (hit.surface_px.x - resize_initial_hit.x)
-                    } else {
-                        resize_initial_size.0 as f32
-                    };
-                    let height = if resize_edges[2] {
-                        resize_initial_size.1 as f32 - (hit.surface_px.y - resize_initial_hit.y)
-                    } else if resize_edges[3] {
-                        resize_initial_size.1 as f32 + (hit.surface_px.y - resize_initial_hit.y)
-                    } else {
-                        resize_initial_size.1 as f32
-                    };
-                    let new_size = (
-                        width.round().max(1.0) as i32,
-                        height.round().max(1.0) as i32,
-                    );
+                    resize_previous_ray = Some(ray);
+                    resize_size = new_size;
+                    let new_size = (resize_size.x.round() as i32, resize_size.y.round() as i32);
                     if resize_requested_size != Some(new_size) {
                         resize_requested_size = Some(new_size);
                         let _ = input.try_send(XrInput::ResizePanel {
                             panel_id,
                             width: new_size.0,
                             height: new_size.1,
-                            anchor: Some((geometry, resize_edges)),
+                            pixels_per_degree: resize_density,
                         });
                     }
                 }
@@ -1502,11 +1534,10 @@ pub fn run(
                 &mut panel_frames,
                 &input,
                 &mut resizing_panel,
-                resize_geometry,
-                resize_edges,
+                resize_density,
                 resize_requested_size,
             )?;
-            resize_geometry = None;
+            resize_density = None;
             resize_requested_size = None;
             cursor_close_panel = None;
         }
@@ -1519,11 +1550,10 @@ pub fn run(
                 &mut panel_frames,
                 &input,
                 &mut resizing_panel,
-                resize_geometry,
-                resize_edges,
+                resize_density,
                 resize_requested_size,
             )?;
-            resize_geometry = None;
+            resize_density = None;
             resize_requested_size = None;
             if pointer_tracked {
                 input.send(XrInput::PointerLost { time_ms })?;
@@ -1580,7 +1610,7 @@ pub fn run(
                 panel.geometry.pose =
                     smooth_pose(panel.geometry.pose, panel.temporary_pose, smoothing);
             }
-            if panel.mode.is_maximized() && Some(*panel_id) != active_fullscreen_panel {
+            if panel.state.maximized && Some(*panel_id) != active_fullscreen_panel {
                 let distance = panel.geometry.pose.center.distance(grab_player_position);
                 panel.geometry.pose = PanelGeometry::fit_pose_to_angular_bounds(
                     panel.geometry.pose,

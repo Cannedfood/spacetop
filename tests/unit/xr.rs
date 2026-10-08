@@ -10,15 +10,13 @@ fn resize_release_reliably_sends_the_final_size_when_motion_queue_is_full() {
         pose: PanelPose::looking_from_to(glam::Vec3::new(0.0, 0.0, -1.6), glam::Vec3::ZERO),
         logical_size: (100, 50).into(),
     };
-    let edges = [false, true, false, true];
     let panel_id = crate::panel::PanelId::new(7);
     let mut resizing_panel = Some(panel_id);
     finish_resize(
         &mut PanelImages::new(),
         &input,
         &mut resizing_panel,
-        Some(geometry),
-        edges,
+        Some(geometry.pixels_per_degree()),
         Some((140, 90)),
     )
     .unwrap();
@@ -34,14 +32,14 @@ fn resize_release_reliably_sends_the_final_size_when_motion_queue_is_full() {
         panel_id,
         width,
         height,
-        anchor,
+        pixels_per_degree,
     } = event
     else {
         panic!("resize release must send the final request");
     };
     assert_eq!(panel_id, crate::panel::PanelId::new(7));
     assert_eq!((width, height), (140, 90));
-    assert_eq!(anchor, Some((geometry, edges)));
+    assert_eq!(pixels_per_degree, Some(geometry.pixels_per_degree()));
     assert!(receiver.try_recv().is_err());
 }
 
@@ -54,7 +52,7 @@ fn resize_snapshot_uses_committed_pose_without_animation() {
     let mut saved = current.pose;
     let mut temporary = current.pose;
     let committed = PanelGeometry {
-        pose: current.resized_pose_from_edges((120, 70).into(), [false, true, false, true], 32.0),
+        pose: current.resized_pose((120, 70).into(), current.pixels_per_degree()),
         logical_size: (120, 70).into(),
     };
     reconcile_panel_geometry(
@@ -124,6 +122,23 @@ fn unmaximizing_a_grabbed_window_resets_its_drag_size_baseline() {
     assert_eq!(
         PanelPose::width_for_distance(initial_width, initial_radius, 2.5),
         1.0
+    );
+}
+
+#[test]
+fn restoring_distance_keeps_current_direction_not_historical_position() {
+    let player = glam::Vec3::new(0.3, 1.6, 0.2);
+    let current = PanelPose::looking_from_to(player + glam::Vec3::new(1.0, 0.5, -2.0), player);
+    let restored = restore_panel_distance(current, player, 1.2, (800, 600).into(), 32.0);
+    assert!((restored.center.distance(player) - 1.2).abs() < 1.0e-5);
+    assert!(
+        (restored.center - player)
+            .normalize()
+            .dot((current.center - player).normalize())
+            > 0.99999
+    );
+    assert!(
+        (restored.width_m - PanelPose::width_for_pixel_density(800.0, 1.2, 32.0)).abs() < 1.0e-6
     );
 }
 

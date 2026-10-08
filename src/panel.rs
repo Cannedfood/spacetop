@@ -17,45 +17,28 @@ impl PanelId {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct PanelLimits {
-    pub max_width: u32,
-    pub max_height: u32,
-    pub max_layers: u32,
-}
+pub const DEFAULT_MAX_PANEL_SIZE: u32 = 4096;
 
-impl Default for PanelLimits {
-    fn default() -> Self {
-        Self {
-            max_width: 4096,
-            max_height: 4096,
-            max_layers: 16,
-        }
-    }
-}
-
-impl PanelLimits {
-    pub fn capture_size(
-        self,
-        logical_size: Size<i32, smithay::utils::Logical>,
-        buffer_scale: i32,
-        display_scale: f32,
-    ) -> (Size<i32, smithay::utils::Buffer>, f64) {
-        let requested_scale = if buffer_scale > 1 {
-            (buffer_scale as f64).max(display_scale as f64)
-        } else {
-            display_scale as f64
-        };
-        let scale = (self.max_width as f64 / logical_size.w as f64)
-            .min(self.max_height as f64 / logical_size.h as f64)
-            .min(requested_scale);
-        let size = (
-            (logical_size.w as f64 * scale).round().max(1.0) as i32,
-            (logical_size.h as f64 * scale).round().max(1.0) as i32,
-        )
-            .into();
-        (size, scale)
-    }
+pub fn capture_size(
+    max_panel_size: u32,
+    logical_size: Size<i32, smithay::utils::Logical>,
+    buffer_scale: i32,
+    display_scale: f32,
+) -> (Size<i32, smithay::utils::Buffer>, f64) {
+    let requested_scale = if buffer_scale > 1 {
+        (buffer_scale as f64).max(display_scale as f64)
+    } else {
+        display_scale as f64
+    };
+    let scale = (max_panel_size as f64 / logical_size.w as f64)
+        .min(max_panel_size as f64 / logical_size.h as f64)
+        .min(requested_scale);
+    let size = (
+        (logical_size.w as f64 * scale).round().max(1.0) as i32,
+        (logical_size.h as f64 * scale).round().max(1.0) as i32,
+    )
+        .into();
+    (size, scale)
 }
 
 /// A ray in the OpenXR reference space selected by the client.
@@ -177,6 +160,41 @@ pub struct PanelGeometry {
     pub logical_size: Size<i32, smithay::utils::Logical>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelPastState {
+    pub distance: f32,
+    pub size: Size<i32, smithay::utils::Logical>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PanelHistory {
+    regular: Option<PanelPastState>,
+    maximized: Option<PanelPastState>,
+    fullscreen: Option<PanelPastState>,
+}
+
+impl PanelHistory {
+    pub fn get(self, state: crate::bridge::PanelState) -> Option<PanelPastState> {
+        if state.fullscreen {
+            self.fullscreen
+        } else if state.maximized {
+            self.maximized
+        } else {
+            self.regular
+        }
+    }
+
+    pub fn save(&mut self, state: crate::bridge::PanelState, past: PanelPastState) {
+        *if state.fullscreen {
+            &mut self.fullscreen
+        } else if state.maximized {
+            &mut self.maximized
+        } else {
+            &mut self.regular
+        } = Some(past);
+    }
+}
+
 /// Return collision-free target poses, preserving the depth of every panel.
 /// Fixed panels anchor the layout; movable panels are placed at the closest
 /// available horizontal position to their saved pose.
@@ -289,26 +307,13 @@ pub struct PanelHit {
     pub uv: [f32; 2],
     pub surface_px: Vec2,
     pub distance_m: f32,
-}
-
-#[derive(Clone, Copy)]
-struct PixelMargin {
-    horizontal_px: f32,
-    vertical_px: f32,
+    pub position: Vec3,
+    pub on_panel: bool,
+    pub on_content: bool,
+    pub on_edges: [bool; 4],
 }
 
 impl PanelGeometry {
-    pub(crate) fn resize_edges_from_hit(self, hit: PanelHit) -> [bool; 4] {
-        let width = self.logical_size.w as f32;
-        let height = self.logical_size.h as f32;
-        [
-            hit.surface_px.x <= 0.0,
-            hit.surface_px.x >= width,
-            hit.surface_px.y <= 0.0,
-            hit.surface_px.y >= height,
-        ]
-    }
-
     pub fn fit_pose_to_angular_bounds(
         pose: PanelPose,
         logical_size: Size<i32, smithay::utils::Logical>,
@@ -328,77 +333,69 @@ impl PanelGeometry {
 
     pub fn size_for_angular_bounds(
         self,
-        distance: f32,
+        _distance: f32,
         pixels_per_degree: f32,
         max_width_degrees: f32,
         max_height_degrees: f32,
     ) -> (i32, i32) {
-        let distance = distance.max(f32::EPSILON);
-        let pose = Self::fit_pose_to_angular_bounds(
-            self.pose,
-            self.logical_size,
-            distance,
-            max_width_degrees,
-            max_height_degrees,
-        );
-        let width_degrees = 2.0 * (pose.width_m / (2.0 * distance)).atan().to_degrees();
-        let width = (width_degrees * pixels_per_degree.max(f32::EPSILON))
+        let width_angle = max_width_degrees.clamp(0.001, 170.0);
+        let height_angle = max_height_degrees.clamp(0.001, 170.0);
+        let width = (width_angle * pixels_per_degree.max(f32::EPSILON))
             .round()
             .max(1.0) as i32;
-        let aspect = self.logical_size.w.max(1) as f32 / self.logical_size.h.max(1) as f32;
-        let height = (width as f32 / aspect).round().max(1.0) as i32;
+        let height = (width as f32 * (height_angle.to_radians() * 0.5).tan()
+            / (width_angle.to_radians() * 0.5).tan())
+        .round()
+        .max(1.0) as i32;
         (width, height)
     }
 
-    pub fn resized_pose_from_edges(
+    pub fn pixels_per_degree(self) -> f32 {
+        let distance = self.pose.center.length().max(f32::EPSILON);
+        let angle = 2.0 * (self.pose.width_m / (2.0 * distance)).atan().to_degrees();
+        self.logical_size.w.max(1) as f32 / angle.max(f32::EPSILON)
+    }
+
+    pub fn resized_pose(
         self,
         new_size: Size<i32, smithay::utils::Logical>,
-        resize_edges: [bool; 4],
-        pixels_per_degree: f32,
+        density: f32,
     ) -> PanelPose {
-        let initial_width = self.logical_size.w.max(1) as f32;
-        let initial_height = self.logical_size.h.max(1) as f32;
-        let new_width = new_size.w.max(1) as f32;
-        let new_height = new_size.h.max(1) as f32;
-        if new_size == self.logical_size {
-            return self.pose;
-        }
-        let distance = self.pose.center.length().max(f32::EPSILON);
-        let initial_angle_degrees =
-            2.0 * (self.pose.width_m / (2.0 * distance)).atan().to_degrees();
-        let measured_pixels_per_degree = initial_width / initial_angle_degrees.max(f32::EPSILON);
-        let capture_scale = pixels_per_degree.max(f32::EPSILON) / measured_pixels_per_degree;
-        let width_m = PanelPose::width_for_pixel_density(
-            new_width * capture_scale,
-            distance,
-            pixels_per_degree,
-        );
-        let height_m = width_m * new_height / new_width;
-        let initial_height_m = self.pose.width_m * initial_height / initial_width;
-        let horizontal_direction = if resize_edges[1] {
-            1.0
-        } else if resize_edges[0] {
-            -1.0
-        } else {
-            0.0
-        };
-        let vertical_direction = if resize_edges[2] {
-            1.0
-        } else if resize_edges[3] {
-            -1.0
-        } else {
-            0.0
-        };
-        let center_offset = Vec3::new(
-            horizontal_direction * (width_m - self.pose.width_m) * 0.5,
-            vertical_direction * (height_m - initial_height_m) * 0.5,
-            0.0,
-        );
         PanelPose {
-            center: self.pose.center + self.pose.orientation() * center_offset,
-            width_m,
+            width_m: PanelPose::width_for_pixel_density(
+                new_size.w.max(1) as f32,
+                self.pose.center.length(),
+                density,
+            ),
             ..self.pose
         }
+    }
+
+    pub fn resized_size_from_rays(
+        self,
+        previous: Ray3,
+        current: Ray3,
+        requested_size: Vec2,
+        edges: [bool; 4],
+    ) -> Option<Vec2> {
+        let delta = self.trace(current, 0.0)?.surface_px - self.trace(previous, 0.0)?.surface_px;
+        let directions = Vec2::new(
+            if edges[0] {
+                -1.0
+            } else if edges[1] {
+                1.0
+            } else {
+                0.0
+            },
+            if edges[2] {
+                -1.0
+            } else if edges[3] {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        Some((requested_size + 2.0 * delta * directions).max(Vec2::ONE))
     }
 
     pub fn from_bounds(
@@ -443,38 +440,10 @@ impl PanelGeometry {
     /// Intersect a ray with this panel. Returns `None` for parallel, behind-ray,
     /// or out-of-bounds intersections.
     pub fn intersect(&self, ray: Ray3) -> Option<PanelHit> {
-        self.intersect_with_margin(ray, 0.0)
+        self.trace(ray, 0.0).filter(|hit| hit.on_content)
     }
 
-    /// Intersect the panel and its resize grab margin, measured as a fraction of its size.
-    pub fn intersect_with_margin(&self, ray: Ray3, margin: f32) -> Option<PanelHit> {
-        let margin = margin.max(0.0);
-        self.intersect_at(
-            ray,
-            Some(PixelMargin {
-                horizontal_px: self.logical_size.w as f32 * margin,
-                vertical_px: self.logical_size.h as f32 * margin,
-            }),
-        )
-    }
-
-    /// Intersect the panel and its grab margin, measured in logical pixels.
-    pub fn intersect_with_margin_px(&self, ray: Ray3, margin_px: f32) -> Option<PanelHit> {
-        let margin_px = margin_px.max(0.0);
-        self.intersect_at(
-            ray,
-            Some(PixelMargin {
-                horizontal_px: margin_px,
-                vertical_px: margin_px,
-            }),
-        )
-    }
-
-    pub fn intersect_unbounded(&self, ray: Ray3) -> Option<PanelHit> {
-        self.intersect_at(ray, None)
-    }
-
-    fn intersect_at(&self, ray: Ray3, margin: Option<PixelMargin>) -> Option<PanelHit> {
+    pub fn trace(&self, ray: Ray3, reach_px: f32) -> Option<PanelHit> {
         let pixel_width = self.logical_size.w;
         let pixel_height = self.logical_size.h;
         let physical_width = self.pose.width_m;
@@ -509,19 +478,25 @@ impl PanelGeometry {
         let u = local_x / physical_width + 0.5;
         let v = 0.5 - local_y / physical_height;
         let surface_px = Vec2::new(u * pixel_width as f32, v * pixel_height as f32);
-        if let Some(margin) = margin
-            && (surface_px.x < -margin.horizontal_px
-                || surface_px.x > pixel_width as f32 + margin.horizontal_px
-                || surface_px.y < -margin.vertical_px
-                || surface_px.y > pixel_height as f32 + margin.vertical_px)
-        {
+        if !world_hit.is_finite() || !surface_px.is_finite() {
             return None;
         }
+        let size = Vec2::new(pixel_width as f32, pixel_height as f32);
+        let outside = (-surface_px).max(surface_px - size).max(Vec2::ZERO);
 
         Some(PanelHit {
             uv: [u, v],
             surface_px,
-            distance_m: distance,
+            distance_m: distance * ray.direction.length(),
+            position: world_hit,
+            on_panel: outside.max_element() <= reach_px.max(0.0),
+            on_content: (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v),
+            on_edges: [
+                surface_px.x <= 0.0,
+                surface_px.x >= pixel_width as f32,
+                surface_px.y <= 0.0,
+                surface_px.y >= pixel_height as f32,
+            ],
         })
     }
 }

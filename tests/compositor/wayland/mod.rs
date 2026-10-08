@@ -34,16 +34,12 @@ fn gpu_capture_preserves_moved_and_resized_panel_size() {
 
     let geometry = app.compositor.panels[0].geometry.unwrap();
     assert_eq!(geometry.logical_size, (80, 40).into());
-    let pose = geometry.resized_pose_from_edges(
-        (100, 60).into(),
-        [false, true, false, true],
-        app.compositor.window_config.pixels_per_degree,
-    );
+    let pose = geometry.resized_pose((100, 60).into(), geometry.pixels_per_degree());
     app.compositor.handle_xr_input(crate::XrInput::ResizePanel {
         panel_id,
         width: 120,
         height: 70,
-        anchor: Some((geometry, [false, true, false, true])),
+        pixels_per_degree: Some(geometry.pixels_per_degree()),
     });
     assert_eq!(app.compositor.panels[0].geometry, Some(geometry));
     super::client::pump(
@@ -86,7 +82,7 @@ fn gpu_capture_preserves_moved_and_resized_panel_size() {
         panel_id,
         width: 140,
         height: 90,
-        anchor: Some((geometry, [false, true, false, true])),
+        pixels_per_degree: Some(geometry.pixels_per_degree()),
     });
     assert_eq!(app.compositor.panels[0].geometry.unwrap().pose, pose);
     for (width, height) in [(120, 70), (125, 75), (130, 80)] {
@@ -115,11 +111,7 @@ fn gpu_capture_preserves_moved_and_resized_panel_size() {
         assert_eq!(actual.logical_size, (width - 20, height - 10).into());
         assert_eq!(
             actual.pose,
-            geometry.resized_pose_from_edges(
-                actual.logical_size,
-                [false, true, false, true],
-                app.compositor.window_config.pixels_per_degree,
-            )
+            geometry.resized_pose(actual.logical_size, geometry.pixels_per_degree(),)
         );
     }
 }

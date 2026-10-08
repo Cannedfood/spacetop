@@ -12,7 +12,7 @@ use std::{
     },
 };
 
-use crate::panel::{PanelGeometry, PanelId, PanelLimits, PanelPose, Ray3};
+use crate::panel::{PanelGeometry, PanelId, PanelPose, Ray3};
 
 #[derive(Debug)]
 pub enum XrInput {
@@ -55,11 +55,11 @@ pub enum XrInput {
         panel_id: PanelId,
         width: i32,
         height: i32,
-        anchor: Option<(PanelGeometry, [bool; 4])>,
+        pixels_per_degree: Option<f32>,
     },
     GpuDevice {
         render_node: std::path::PathBuf,
-        limits: PanelLimits,
+        max_panel_size: u32,
     },
     ConfigReloaded {
         window: Box<crate::config::WindowConfig>,
@@ -120,21 +120,11 @@ impl InputSender {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PanelMode {
-    Regular,
-    Maximized,
-    FullScreen,
-}
-
-impl PanelMode {
-    pub fn is_fullscreen(self) -> bool {
-        self == Self::FullScreen
-    }
-
-    pub fn is_maximized(self) -> bool {
-        self == Self::Maximized
-    }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PanelState {
+    pub minimized: bool,
+    pub maximized: bool,
+    pub fullscreen: bool,
 }
 
 #[derive(Debug)]
@@ -143,7 +133,7 @@ pub enum PanelUpdate {
         panel_id: PanelId,
         dmabuf: Dmabuf,
         geometry: PanelGeometry,
-        mode: PanelMode,
+        state: PanelState,
     },
     Removed {
         panel_id: PanelId,

@@ -16,7 +16,7 @@ use smithay::{
 
 use crate::{
     Compositor, WindowPanel,
-    bridge::{PanelMode, PanelUpdate},
+    bridge::{PanelState, PanelUpdate},
     panel::PanelPose,
     panel_surface::PanelSurface,
 };
@@ -127,12 +127,10 @@ impl Compositor {
             return;
         }
         self.output.enter(&surface);
-        let mode = if window.is_fullscreen() {
-            PanelMode::FullScreen
-        } else if window.is_maximized() {
-            PanelMode::Maximized
-        } else {
-            PanelMode::Regular
+        let state = PanelState {
+            fullscreen: window.is_fullscreen(),
+            maximized: window.is_maximized(),
+            minimized: window.is_minimized(),
         };
         let pose = (0..=self.panels.len())
             .map(|slot| {
@@ -151,10 +149,10 @@ impl Compositor {
             },
             pose,
             geometry: None,
-            mode,
-            maximize_restore_size: None,
+            state,
+            history: crate::panel::PanelHistory::default(),
             pose_is_explicit: false,
-            resize_anchor: None,
+            resize_density: None,
             id: self.next_panel_id,
             bounds: Rectangle::default(),
         });
@@ -300,16 +298,10 @@ impl XwmHandler for Compositor {
                         && candidate.window_id() == window.window_id()
             )
         });
-        if let Some(index) = index
-            && self.panels[index].mode.is_maximized()
-            && let Err(error) = self.request_panel_maximized(index, false)
-        {
-            eprintln!("failed to restore maximized X11 window before fullscreen: {error:#}");
-            return;
-        } else if window.is_maximized()
-            && let Err(error) = window.set_maximized(false)
-        {
-            eprintln!("failed to clear X11 maximize state: {error}");
+        if let Some(index) = index {
+            if let Err(error) = self.request_panel_fullscreen(index, true) {
+                eprintln!("failed to fullscreen X11 window: {error:#}");
+            }
             return;
         }
         if let Err(error) = window.set_fullscreen(true) {
@@ -324,6 +316,15 @@ impl XwmHandler for Compositor {
         }
     }
     fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(index) = self.panels.iter().position(|panel| {
+            matches!(&panel.surface,
+            PanelSurface::X11 { window: candidate, .. } if candidate == &window)
+        }) {
+            if let Err(error) = self.request_panel_fullscreen(index, false) {
+                eprintln!("failed to restore fullscreen X11 window: {error:#}");
+            }
+            return;
+        }
         if let Err(error) = window.set_fullscreen(false) {
             eprintln!("failed to clear X11 fullscreen state: {error}");
             return;

@@ -88,11 +88,11 @@ impl Compositor {
                 panel_id,
                 width,
                 height,
-                anchor,
+                pixels_per_degree,
             } => {
                 if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == panel_id) {
-                    if let Some(anchor) = anchor {
-                        panel.resize_anchor = Some(anchor);
+                    if let Some(density) = pixels_per_degree {
+                        panel.resize_density = Some(density);
                         panel.pose_is_explicit = true;
                     }
                     match &panel.surface {
@@ -138,7 +138,7 @@ impl Compositor {
                 {
                     geometry.pose = pose;
                     panel.pose_is_explicit = true;
-                    panel.resize_anchor = None;
+                    panel.resize_density = None;
                     if let Some(root_size) =
                         smithay::backend::renderer::utils::with_renderer_surface_state(
                             panel.surface.wl_surface(),
@@ -153,8 +153,8 @@ impl Compositor {
             }
             XrInput::ToggleMaximize { panel_id } => {
                 if let Some(index) = self.panels.iter().position(|panel| panel.id == panel_id) {
-                    let result = self
-                        .request_panel_maximized(index, !self.panels[index].mode.is_maximized());
+                    let result =
+                        self.request_panel_maximized(index, !self.panels[index].state.maximized);
                     if let Err(error) = result {
                         self.fatal_error = Some(error);
                     }
@@ -177,9 +177,9 @@ impl Compositor {
             }
             XrInput::GpuDevice {
                 render_node,
-                limits,
+                max_panel_size,
             } => {
-                self.panel_limits = limits;
+                self.max_panel_size = max_panel_size;
                 self.configure_gpu(&render_node)
             }
             XrInput::ConfigReloaded { window } => {
@@ -227,26 +227,93 @@ impl Compositor {
         index: usize,
         maximized: bool,
     ) -> anyhow::Result<()> {
-        let restore_size = self.panels[index].maximize_restore_size.or_else(|| {
-            self.panels[index]
-                .geometry
-                .map(|geometry| (geometry.logical_size.w, geometry.logical_size.h))
-        });
-        let size = if maximized {
-            self.maximized_panel_size(index)
-        } else {
-            self.panels[index].maximize_restore_size
-        };
-        self.panels[index]
-            .surface
-            .set_maximized(maximized, size)
-            .context("failed to set window maximize state")?;
-        self.panels[index].maximize_restore_size = if maximized { restore_size } else { None };
-        if maximized {
-            self.panels[index].mode = PanelMode::Maximized;
-        } else if self.panels[index].mode.is_maximized() {
-            self.panels[index].mode = PanelMode::Regular;
+        let mut state = self.panels[index].state;
+        state.maximized = maximized;
+        self.request_panel_state(index, state)
+    }
+
+    pub(super) fn request_panel_fullscreen(
+        &mut self,
+        index: usize,
+        fullscreen: bool,
+    ) -> anyhow::Result<()> {
+        let mut state = self.panels[index].state;
+        state.fullscreen = fullscreen;
+        self.request_panel_state(index, state)
+    }
+
+    pub(super) fn request_panel_state(
+        &mut self,
+        index: usize,
+        state: PanelState,
+    ) -> anyhow::Result<()> {
+        let previous_state = self.panels[index].state;
+        if previous_state == state {
+            return Ok(());
         }
+        let layout_changed = previous_state.fullscreen != state.fullscreen
+            || (!state.fullscreen && previous_state.maximized != state.maximized);
+        if layout_changed && let Some(geometry) = self.panels[index].geometry {
+            let size = Self::surface_geometry(self.panels[index].surface.wl_surface()).size;
+            self.panels[index].history.save(
+                previous_state,
+                panel::PanelPastState {
+                    distance: geometry.pose.center.length(),
+                    size,
+                },
+            );
+        }
+        let past = layout_changed
+            .then(|| self.panels[index].history.get(state))
+            .flatten();
+        let size = past.map(|state| (state.size.w, state.size.h)).or_else(|| {
+            if !layout_changed {
+                return None;
+            }
+            let geometry = self.panels[index].geometry?;
+            if state.fullscreen {
+                Some(geometry.size_for_angular_bounds(
+                    geometry.pose.center.length(),
+                    self.window_config.pixels_per_degree,
+                    self.window_config.fullscreen_max_width_degrees,
+                    self.window_config.fullscreen_max_height_degrees,
+                ))
+            } else if state.maximized {
+                self.maximized_panel_size(index)
+            } else {
+                None
+            }
+        });
+        if previous_state.fullscreen != state.fullscreen {
+            self.panels[index]
+                .surface
+                .set_fullscreen(state.fullscreen, size)?;
+        }
+        if previous_state.maximized != state.maximized {
+            self.panels[index]
+                .surface
+                .set_maximized(state.maximized, size)?;
+        }
+        if let Some(past) = past
+            && let Some(geometry) = self.panels[index].geometry.as_mut()
+        {
+            let radius = geometry.pose.center.length().max(f32::EPSILON);
+            geometry.pose.center *= past.distance / radius;
+            let geometry = *geometry;
+            if let Some(root_size) = smithay::backend::renderer::utils::with_renderer_surface_state(
+                self.panels[index].surface.wl_surface(),
+                |state| state.surface_size(),
+            )
+            .flatten()
+            {
+                self.panels[index].pose = geometry.root_pose(root_size, self.panels[index].bounds);
+            }
+        }
+        if layout_changed {
+            self.panels[index].resize_density = None;
+            self.panels[index].pose_is_explicit = false;
+        }
+        self.panels[index].state = state;
         self.invalidate_panel(index);
         Ok(())
     }
@@ -322,7 +389,7 @@ impl Compositor {
             dmabuf_global: None,
             next_panel_id: crate::panel::PanelId::new(1),
             frame_sender,
-            panel_limits: panel::PanelLimits::default(),
+            max_panel_size: panel::DEFAULT_MAX_PANEL_SIZE,
             window_config: window.clone(),
             active_panel: None,
             fatal_error: None,
@@ -427,24 +494,25 @@ impl Compositor {
             .flatten();
 
         let was_mapped = self.panels[index].geometry.is_some();
-        self.panels[index].mode = match &self.panels[index].surface {
+        self.panels[index].state = match &self.panels[index].surface {
             PanelSurface::Wayland(surface) => {
                 let states = &surface.current_state().states;
-                if states.contains(
-                    smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
-                ) {
-                    PanelMode::FullScreen
-                } else if states.contains(
-                    smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
-                ) {
-                    PanelMode::Maximized
-                } else {
-                    PanelMode::Regular
+                PanelState {
+                    fullscreen: states.contains(
+                        smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
+                    ),
+                    maximized: states.contains(
+                        smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
+                    ),
+                    minimized: self.panels[index].state.minimized,
                 }
             }
-            PanelSurface::X11 { window, .. } if window.is_fullscreen() => PanelMode::FullScreen,
-            PanelSurface::X11 { window, .. } if window.is_maximized() => PanelMode::Maximized,
-            PanelSurface::X11 { .. } | PanelSurface::Popup(_) => PanelMode::Regular,
+            PanelSurface::X11 { window, .. } => PanelState {
+                fullscreen: window.is_fullscreen(),
+                maximized: window.is_maximized(),
+                minimized: window.is_minimized(),
+            },
+            PanelSurface::Popup(_) => PanelState::default(),
         };
         if logical_size.is_none() && was_mapped {
             self.frame_sender.publish(PanelUpdate::Removed {
@@ -470,12 +538,10 @@ impl Compositor {
             self.panels[index].bounds = bounds;
             let mut geometry =
                 PanelGeometry::from_bounds(self.panels[index].pose, logical_size, bounds);
-            if let Some((anchor, edges)) = self.panels[index].resize_anchor {
-                geometry.pose = anchor.resized_pose_from_edges(
-                    bounds.size,
-                    edges,
-                    self.window_config.pixels_per_degree,
-                );
+            if let Some(density) = self.panels[index].resize_density
+                && let Some(previous) = self.panels[index].geometry
+            {
+                geometry.pose = previous.resized_pose(bounds.size, density);
                 self.panels[index].pose = geometry.root_pose(logical_size, bounds);
             }
             geometry
@@ -589,16 +655,8 @@ impl Compositor {
         let Some(renderer) = self.gpu_renderer.as_mut() else {
             return Ok(());
         };
-        anyhow::ensure!(
-            self.panels
-                .iter()
-                .filter(|panel| panel.geometry.is_some())
-                .count()
-                <= self.panel_limits.max_layers as usize,
-            "OpenXR supports at most {} mapped window layers",
-            self.panel_limits.max_layers
-        );
-        let (size, scale) = self.panel_limits.capture_size(
+        let (size, scale) = panel::capture_size(
+            self.max_panel_size,
             geometry.logical_size,
             buffer_scale,
             self.window_config.display_scale,
@@ -625,7 +683,7 @@ impl Compositor {
             panel_id,
             dmabuf,
             geometry,
-            mode: self.panels[index].mode,
+            state: self.panels[index].state,
         });
         for (surface, _) in surfaces {
             self.complete_frame_callbacks(&surface);
@@ -675,7 +733,7 @@ impl Compositor {
         let fullscreen_panel = self
             .panels
             .iter()
-            .find(|panel| panel.mode.is_fullscreen())
+            .find(|panel| panel.state.fullscreen)
             .map(|panel| panel.id);
         let hit = self
             .panels
@@ -684,7 +742,10 @@ impl Compositor {
             .filter(|panel| panel.surface.alive())
             .filter_map(|panel| {
                 let geometry = self.input_geometry(panel)?;
-                let hit = geometry.intersect(ray)?;
+                let hit = geometry.trace(ray, self.window_config.grab_reach_px())?;
+                if !hit.on_content {
+                    return None;
+                }
                 let point = Point::from((hit.surface_px.x as f64, hit.surface_px.y as f64))
                     + panel.bounds.loc.to_f64();
                 let index = self
@@ -801,7 +862,7 @@ impl Compositor {
         let fullscreen_panel = self
             .panels
             .iter()
-            .find(|panel| panel.mode.is_fullscreen())
+            .find(|panel| panel.state.fullscreen)
             .map(|panel| panel.id);
         let nearest = self
             .panels
@@ -810,14 +871,12 @@ impl Compositor {
             .filter(|panel| panel.surface.alive())
             .filter_map(|panel| {
                 let geometry = self.input_geometry(panel)?;
-                geometry
-                    .intersect(ray)
-                    .map(|hit| (geometry.pose, hit.distance_m))
+                geometry.intersect(ray).map(|hit| (geometry.pose, hit))
             })
-            .min_by(|(_, first), (_, second)| first.total_cmp(second));
-        if let Some((pose, distance)) = nearest {
+            .min_by(|(_, first), (_, second)| first.distance_m.total_cmp(&second.distance_m));
+        if let Some((pose, hit)) = nearest {
             return Some(PanelPose {
-                center: ray.origin + ray.direction * distance,
+                center: hit.position,
                 width_m: 0.021,
                 ..pose
             });

@@ -22,11 +22,31 @@ fn has_toplevel_state(states: &[u8], expected_state: u32) -> bool {
 }
 
 #[test]
+fn mouse_cursor_uses_world_hit_for_unnormalized_ray() {
+    let app = WaylandApp::new(None);
+    let geometry = app.compositor.panels[0].geometry.unwrap();
+    let ray = Ray3 {
+        origin: Vec3::ZERO,
+        direction: geometry.pose.center * 2.0,
+    };
+    let cursor = app.compositor.mouse_cursor_pose(ray).unwrap();
+    assert!((cursor.center - geometry.pose.center).length() < 1.0e-5);
+}
+
+#[test]
 fn fullscreen_requests_toggle_compositor_panel_state() {
     let mut app = super::fixture::WaylandApp::new(None);
+    let geometry = app.compositor.panels[0].geometry.unwrap();
+    let config = &app.compositor.window_config;
+    let expected_size = geometry.size_for_angular_bounds(
+        geometry.pose.center.length(),
+        config.pixels_per_degree,
+        config.fullscreen_max_width_degrees,
+        config.fullscreen_max_height_degrees,
+    );
     assert_eq!(
-        app.compositor.panels[0].mode,
-        crate::bridge::PanelMode::Regular
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState::default()
     );
 
     app.toplevel.set_fullscreen(None);
@@ -46,9 +66,13 @@ fn fullscreen_requests_toggle_compositor_panel_state() {
         &app.connection,
     );
     assert_eq!(
-        app.compositor.panels[0].mode,
-        crate::bridge::PanelMode::FullScreen
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState {
+            fullscreen: true,
+            ..Default::default()
+        }
     );
+    assert_eq!(app.client.toplevel_configures.last(), Some(&expected_size));
 
     app.toplevel.unset_fullscreen();
     pump(
@@ -67,17 +91,98 @@ fn fullscreen_requests_toggle_compositor_panel_state() {
         &app.connection,
     );
     assert_eq!(
-        app.compositor.panels[0].mode,
-        crate::bridge::PanelMode::Regular
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState::default()
     );
+    assert_eq!(
+        app.client.toplevel_configures.last(),
+        Some(&(geometry.logical_size.w, geometry.logical_size.h))
+    );
+}
+
+#[test]
+fn fullscreen_exit_restores_maximized_size_and_distance_but_not_position() {
+    use crate::bridge::PanelState;
+    let mut app = WaylandApp::new(None);
+    app.compositor.request_panel_maximized(0, true).unwrap();
+    app.compositor.request_panel_fullscreen(0, true).unwrap();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    let states = app.client.toplevel_states.last().unwrap();
+    assert!(has_maximized_state(states));
+    assert!(has_fullscreen_state(states));
+    app.surface.commit();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert!(app.compositor.panels[0].state.maximized);
+    assert!(app.compositor.panels[0].state.fullscreen);
+    app.compositor.panels[0].history.save(
+        PanelState {
+            maximized: true,
+            ..Default::default()
+        },
+        crate::panel::PanelPastState {
+            distance: 2.5,
+            size: (1200, 800).into(),
+        },
+    );
+    let panel_id = app.compositor.panels[0].id;
+    let mut pose = app.compositor.panels[0].geometry.unwrap().pose;
+    pose.center = Vec3::new(1.0, 0.5, -1.0);
+    app.compositor
+        .handle_xr_input(crate::XrInput::MovePanel { panel_id, pose });
+    app.toplevel.unset_fullscreen();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert_eq!(
+        app.compositor.panels[0].state,
+        PanelState {
+            maximized: true,
+            ..Default::default()
+        }
+    );
+    assert_eq!(app.client.toplevel_configures.last(), Some(&(1200, 800)));
+    assert!(has_maximized_state(
+        app.client.toplevel_states.last().unwrap()
+    ));
+    assert!(!has_fullscreen_state(
+        app.client.toplevel_states.last().unwrap()
+    ));
+    let restored = app.compositor.panels[0].geometry.unwrap().pose;
+    assert!((restored.center.length() - 2.5).abs() < 1.0e-5);
+    assert!(restored.center.normalize().dot(pose.center.normalize()) > 0.99999);
+    app.compositor.request_panel_maximized(0, false).unwrap();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert_eq!(app.client.toplevel_configures.last(), Some(&(100, 50)));
 }
 
 #[test]
 fn xdg_maximize_requests_update_client_state_and_surface_size() {
     let mut app = super::fixture::WaylandApp::new(None);
     assert_eq!(
-        app.compositor.panels[0].mode,
-        crate::bridge::PanelMode::Regular
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState::default()
     );
     let original_size = app.compositor.panels[0].geometry.unwrap().logical_size;
 
@@ -98,8 +203,11 @@ fn xdg_maximize_requests_update_client_state_and_surface_size() {
         &app.connection,
     );
     assert_eq!(
-        app.compositor.panels[0].mode,
-        crate::bridge::PanelMode::Maximized
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState {
+            maximized: true,
+            ..Default::default()
+        }
     );
     assert!(has_maximized_state(
         app.client.toplevel_states.last().unwrap()
@@ -123,8 +231,8 @@ fn xdg_maximize_requests_update_client_state_and_surface_size() {
         &app.connection,
     );
     assert_eq!(
-        app.compositor.panels[0].mode,
-        crate::bridge::PanelMode::Regular
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState::default()
     );
     assert!(!has_maximized_state(
         app.client.toplevel_states.last().unwrap()
@@ -144,8 +252,11 @@ fn xr_maximize_notifies_client_and_restores_surface_size() {
     app.compositor
         .handle_xr_input(crate::XrInput::ToggleMaximize { panel_id });
     assert_eq!(
-        app.compositor.panels[0].mode,
-        crate::bridge::PanelMode::Maximized
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState {
+            maximized: true,
+            ..Default::default()
+        }
     );
     pump(
         &mut app.display,
@@ -168,8 +279,8 @@ fn xr_maximize_notifies_client_and_restores_surface_size() {
     app.compositor
         .handle_xr_input(crate::XrInput::ToggleMaximize { panel_id });
     assert_eq!(
-        app.compositor.panels[0].mode,
-        crate::bridge::PanelMode::Regular
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState::default()
     );
     pump(
         &mut app.display,
@@ -192,7 +303,7 @@ fn xr_maximize_notifies_client_and_restores_surface_size() {
 }
 
 #[test]
-fn maximizing_fullscreen_window_exits_fullscreen() {
+fn maximizing_fullscreen_window_preserves_fullscreen() {
     let mut app = super::fixture::WaylandApp::new(None);
     app.toplevel.set_fullscreen(None);
     pump(
@@ -211,8 +322,11 @@ fn maximizing_fullscreen_window_exits_fullscreen() {
         &app.connection,
     );
     assert_eq!(
-        app.compositor.panels[0].mode,
-        crate::bridge::PanelMode::FullScreen
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState {
+            fullscreen: true,
+            ..Default::default()
+        }
     );
 
     let panel_id = app.compositor.panels[0].id;
@@ -226,12 +340,80 @@ fn maximizing_fullscreen_window_exits_fullscreen() {
         &app.connection,
     );
     assert_eq!(
-        app.compositor.panels[0].mode,
-        crate::bridge::PanelMode::Maximized
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState {
+            maximized: true,
+            fullscreen: true,
+            ..Default::default()
+        }
     );
     let states = app.client.toplevel_states.last().unwrap();
     assert!(has_maximized_state(states));
-    assert!(!has_fullscreen_state(states));
+    assert!(has_fullscreen_state(states));
+}
+
+#[test]
+fn unmaximizing_fullscreen_window_preserves_fullscreen_and_restores_regular_size() {
+    let mut app = WaylandApp::new(None);
+    let original_size = app.compositor.panels[0].geometry.unwrap().logical_size;
+    app.compositor.request_panel_maximized(0, true).unwrap();
+    app.compositor.request_panel_fullscreen(0, true).unwrap();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    let fullscreen_size = *app.client.toplevel_configures.last().unwrap();
+    let fullscreen_pose = app.compositor.panels[0].geometry.unwrap().pose;
+
+    app.toplevel.unset_maximized();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    app.surface.commit();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert!(!app.compositor.panels[0].state.maximized);
+    assert!(app.compositor.panels[0].state.fullscreen);
+    let states = app.client.toplevel_states.last().unwrap();
+    assert!(!has_maximized_state(states));
+    assert!(has_fullscreen_state(states));
+    assert_eq!(
+        app.client.toplevel_configures.last(),
+        Some(&fullscreen_size)
+    );
+    assert_eq!(
+        app.compositor.panels[0].geometry.unwrap().pose,
+        fullscreen_pose
+    );
+
+    app.toplevel.unset_fullscreen();
+    pump(
+        &mut app.display,
+        &mut app.compositor,
+        &mut app.queue,
+        &mut app.client,
+        &app.connection,
+    );
+    assert_eq!(
+        app.compositor.panels[0].state,
+        crate::bridge::PanelState::default()
+    );
+    assert_eq!(
+        app.client.toplevel_configures.last(),
+        Some(&(original_size.w, original_size.h))
+    );
 }
 
 #[test]
@@ -330,14 +512,20 @@ fn panel_bounds_use_wayland_window_geometry() {
 
 #[test]
 fn presented_window_geometry_controls_pointer_coordinates() {
-    for mode in [
-        crate::bridge::PanelMode::Maximized,
-        crate::bridge::PanelMode::FullScreen,
+    for state in [
+        crate::bridge::PanelState {
+            maximized: true,
+            ..Default::default()
+        },
+        crate::bridge::PanelState {
+            fullscreen: true,
+            ..Default::default()
+        },
     ] {
         let mut app = WaylandApp::new(None);
         let panel_id = app.compositor.panels[0].id;
         let committed = app.compositor.panels[0].geometry.unwrap();
-        app.compositor.panels[0].mode = mode;
+        app.compositor.panels[0].state = state;
         let mut presented = committed;
         presented.pose.width_m *= 3.0;
         presented.pose.center += Vec3::new(0.3, 0.2, 0.0);
@@ -414,7 +602,7 @@ fn resize_panel_uses_wayland_window_geometry_size() {
             panel_id,
             width: requested.0,
             height: requested.1,
-            anchor: None,
+            pixels_per_degree: None,
         });
         pump(
             &mut app.display,
@@ -499,7 +687,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
                 panel_id,
                 dmabuf,
                 geometry,
-                mode,
+                state,
             } = receiver.try_recv().unwrap()
             else {
                 panic!("mapped window must publish its own GPU image");
@@ -507,7 +695,7 @@ pub(super) fn exercise(app: &mut WaylandApp) {
             assert_eq!(panel_id, second_id);
             assert_eq!(geometry.pose, second_pose);
             assert_eq!(geometry.logical_size, expected_size.into());
-            assert_eq!(mode, crate::bridge::PanelMode::Regular);
+            assert_eq!(state, crate::bridge::PanelState::default());
             let shared = crate::gpu::SharedImage::import(
                 &vulkan.instance,
                 &vulkan.device,
@@ -532,18 +720,6 @@ pub(super) fn exercise(app: &mut WaylandApp) {
         }
     };
     check_green_frame((800, 400));
-    if vulkan.is_some() {
-        let layer_limit = compositor.panel_limits.max_layers;
-        compositor.panel_limits.max_layers = 1;
-        assert!(
-            compositor
-                .capture_panel(1)
-                .unwrap_err()
-                .to_string()
-                .contains("at most 1 mapped window")
-        );
-        compositor.panel_limits.max_layers = layer_limit;
-    }
     assert!(compositor.dispatch_ray(
         Ray3 {
             origin: Vec3::ZERO,
