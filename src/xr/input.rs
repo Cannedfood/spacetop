@@ -65,19 +65,6 @@ pub(super) struct ControllerState {
     resize_edges: [bool; 4],
 }
 
-pub(super) struct ControllerFrame<'a> {
-    pub session: &'a xr::Session<xr::Vulkan>,
-    pub space: &'a xr::Space,
-    pub frame_state: &'a xr::FrameState,
-    pub gaze_ray: Option<Ray3>,
-    pub player: glam::Vec3,
-    pub active_fullscreen_panel: Option<PanelId>,
-    pub config: &'a AppConfig,
-    pub input: &'a crate::bridge::InputSender,
-    pub timings: &'a mut crate::timing::Timings,
-    pub panels: &'a mut PanelImages,
-}
-
 impl ControllerState {
     pub(super) fn new(distance: f32) -> Self {
         Self {
@@ -112,19 +99,20 @@ impl ControllerState {
         self.maximize_right_chord_pressed = false;
     }
 
-    pub(super) fn update(&mut self, actions: &Actions, frame: ControllerFrame<'_>) -> Result<()> {
-        let ControllerFrame {
-            session,
-            space,
-            frame_state,
-            gaze_ray,
-            player,
-            active_fullscreen_panel,
-            config,
-            input,
-            timings,
-            panels,
-        } = frame;
+    pub(super) fn update(
+        &mut self,
+        actions: &Actions,
+        session: &xr::Session<xr::Vulkan>,
+        space: &xr::Space,
+        frame_state: &xr::FrameState,
+        gaze_ray: Option<Ray3>,
+        player: glam::Vec3,
+        active_fullscreen_panel: Option<PanelId>,
+        config: &AppConfig,
+        input: &crate::bridge::InputSender,
+        timings: &mut crate::timing::Timings,
+        panels: &mut PanelImages,
+    ) -> Result<()> {
         let right_hand = actions.right_hand;
         let left_hand = actions.left_hand;
         timings.measure("openxr/sync-actions", Duration::ZERO, || {

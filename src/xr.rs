@@ -235,21 +235,17 @@ pub fn run(
             mouse_cursor_state = Some(cursor);
         }
         let updates = frames.drain();
-        panels::PanelUpdates {
-            images: &mut panel_frames,
-            active_fullscreen_panel: &mut active_fullscreen_panel,
-            pending_spawn: &mut pending_spawn,
-            maximize_layout_dirty: &mut maximize_layout_dirty,
-        }
-        .apply(
+        panels::apply_updates(
+            &mut panel_frames,
+            &mut active_fullscreen_panel,
+            &mut pending_spawn,
+            &mut maximize_layout_dirty,
             updates,
-            panels::PanelImport {
-                instance: &vk_instance,
-                device: &device,
-                physical_device,
-                scene: &scene,
-                max_panel_size,
-            },
+            &vk_instance,
+            &device,
+            physical_device,
+            &scene,
+            max_panel_size,
             &mut controller,
             grab_player_position,
             &config,
@@ -387,18 +383,16 @@ pub fn run(
         }
         controller.update(
             &actions,
-            input::ControllerFrame {
-                session: &session,
-                space: &space,
-                frame_state: &frame_state,
-                gaze_ray,
-                player: grab_player_position,
-                active_fullscreen_panel,
-                config: &config,
-                input: &input,
-                timings: &mut timings,
-                panels: &mut panel_frames,
-            },
+            &session,
+            &space,
+            &frame_state,
+            gaze_ray,
+            grab_player_position,
+            active_fullscreen_panel,
+            &config,
+            &input,
+            &mut timings,
+            &mut panel_frames,
         )?;
         let active_panel = controller.grabbed_panel.or(controller.resizing_panel);
         if let Some(panel_id) = active_panel

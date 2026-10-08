@@ -3,6 +3,9 @@ name = "spacelauncher"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 freedesktop-desktop-entry = "0.8"
 iced = { version = "0.14", features = ["advanced", "image", "svg"] }

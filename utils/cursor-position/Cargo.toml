@@ -3,5 +3,8 @@ name = "cursor-position"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 iced = { version = "0.14", features = ["advanced", "canvas", "image", "svg"] }

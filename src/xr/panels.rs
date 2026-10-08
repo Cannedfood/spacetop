@@ -13,208 +13,187 @@ pub(super) struct XrPanel {
 
 pub(super) type PanelImages = std::collections::BTreeMap<PanelId, XrPanel>;
 
-pub(super) struct PanelUpdates<'a> {
-    pub images: &'a mut PanelImages,
-    pub active_fullscreen_panel: &'a mut Option<PanelId>,
-    pub pending_spawn: &'a mut std::collections::BTreeSet<PanelId>,
-    pub maximize_layout_dirty: &'a mut bool,
-}
-
-pub(super) struct PanelImport<'a> {
-    pub instance: &'a ash::Instance,
-    pub device: &'a ash::Device,
-    pub physical_device: vk::PhysicalDevice,
-    pub scene: &'a SceneRenderer,
-    pub max_panel_size: u32,
-}
-
-impl PanelUpdates<'_> {
-    pub(super) fn apply(
-        self,
-        updates: Vec<PanelUpdate>,
-        gpu: PanelImport<'_>,
-        controller: &mut input::ControllerState,
-        player: glam::Vec3,
-        config: &AppConfig,
-        timings: &mut crate::timing::Timings,
-    ) -> Result<()> {
-        let Self {
-            images,
-            active_fullscreen_panel,
-            pending_spawn,
-            maximize_layout_dirty,
-        } = self;
-        for update in &updates {
-            if let PanelUpdate::Removed { panel_id } = update {
-                *maximize_layout_dirty |= images
-                    .get(panel_id)
-                    .is_some_and(|panel| panel.state.maximized);
-                timings.measure("mixed/panel-retire", Duration::ZERO, || {
-                    images.remove(panel_id);
-                });
-                pending_spawn.remove(panel_id);
-                if controller.grabbed_panel == Some(*panel_id) {
-                    controller.grabbed_panel = None;
-                }
-                if *active_fullscreen_panel == Some(*panel_id) {
-                    *active_fullscreen_panel = images
-                        .iter()
-                        .rev()
-                        .find(|(_, panel)| panel.state.fullscreen)
-                        .map(|(id, _)| *id);
-                    if active_fullscreen_panel.is_none() {
-                        for panel in images.values_mut() {
-                            panel.geometry.pose = panel.saved_pose;
-                            panel.temporary_pose = panel.saved_pose;
-                        }
+pub(super) fn apply_updates(
+    images: &mut PanelImages,
+    active_fullscreen_panel: &mut Option<PanelId>,
+    pending_spawn: &mut std::collections::BTreeSet<PanelId>,
+    maximize_layout_dirty: &mut bool,
+    updates: Vec<PanelUpdate>,
+    instance: &ash::Instance,
+    device: &ash::Device,
+    physical_device: vk::PhysicalDevice,
+    scene: &SceneRenderer,
+    max_panel_size: u32,
+    controller: &mut input::ControllerState,
+    player: glam::Vec3,
+    config: &AppConfig,
+    timings: &mut crate::timing::Timings,
+) -> Result<()> {
+    for update in &updates {
+        if let PanelUpdate::Removed { panel_id } = update {
+            *maximize_layout_dirty |= images
+                .get(panel_id)
+                .is_some_and(|panel| panel.state.maximized);
+            timings.measure("mixed/panel-retire", Duration::ZERO, || {
+                images.remove(panel_id);
+            });
+            pending_spawn.remove(panel_id);
+            if controller.grabbed_panel == Some(*panel_id) {
+                controller.grabbed_panel = None;
+            }
+            if *active_fullscreen_panel == Some(*panel_id) {
+                *active_fullscreen_panel = images
+                    .iter()
+                    .rev()
+                    .find(|(_, panel)| panel.state.fullscreen)
+                    .map(|(id, _)| *id);
+                if active_fullscreen_panel.is_none() {
+                    for panel in images.values_mut() {
+                        panel.geometry.pose = panel.saved_pose;
+                        panel.temporary_pose = panel.saved_pose;
                     }
                 }
             }
         }
-        for command in updates {
-            match command {
-                PanelUpdate::GpuFrame {
-                    panel_id,
-                    dmabuf,
-                    geometry,
-                    state,
-                } => {
-                    let shared = timings
-                        .measure("gpu/dmabuf-import", Duration::ZERO, || {
-                            SharedImage::import(
-                                gpu.instance,
-                                gpu.device,
-                                gpu.physical_device,
-                                dmabuf,
-                            )
-                        })
-                        .context("mandatory GPU DMA-BUF import failed")?;
-                    let size = shared.dmabuf.size();
-                    ensure!(
-                        size.w > 0
-                            && size.h > 0
-                            && size.w as u32 <= gpu.max_panel_size
-                            && size.h as u32 <= gpu.max_panel_size,
-                        "window image exceeds negotiated Vulkan limits"
-                    );
-                    let texture = timings.measure("gpu/panel-texture", Duration::ZERO, || {
-                        PanelTexture::new(gpu.scene, shared)
-                    })?;
-                    timings.measure("gpu/panel-replace", Duration::ZERO, || {
-                        if let Some(panel) = images.get_mut(&panel_id) {
-                            let fullscreen_changed = panel.state.fullscreen != state.fullscreen;
-                            let maximized_changed = panel.state.maximized != state.maximized;
-                            let layout_changed =
-                                fullscreen_changed || (!state.fullscreen && maximized_changed);
-                            if layout_changed {
-                                panel.history.save(
-                                    panel.state,
-                                    PanelPastState {
-                                        distance: panel.geometry.pose.center.distance(player),
-                                        size: panel.geometry.logical_size,
-                                    },
-                                );
-                            }
-                            reconcile_panel_geometry(
-                                &mut panel.geometry,
-                                &mut panel.saved_pose,
-                                &mut panel.temporary_pose,
-                                geometry,
-                                panel.resize_pending && panel.state.fullscreen == state.fullscreen,
-                                false,
-                            );
-                            if layout_changed {
-                                let distance = panel
-                                    .history
-                                    .get(state)
-                                    .map(|past| past.distance)
-                                    .unwrap_or_else(|| panel.geometry.pose.center.distance(player));
-                                let pose = restore_panel_distance(
-                                    panel.geometry.pose,
-                                    player,
-                                    distance,
-                                    geometry.logical_size,
-                                    config.window.pixels_per_degree,
-                                );
-                                panel.geometry.pose = pose;
-                                panel.saved_pose = pose;
-                                panel.temporary_pose = pose;
-                                panel.resize_pending = false;
-                                reset_grab_baseline_after_unmaximize(
-                                    controller.grabbed_panel,
-                                    panel_id,
-                                    pose.width_m,
-                                    distance,
-                                    &mut controller.grab_initial_width,
-                                    &mut controller.grab_initial_radius,
-                                );
-                                if controller.grabbed_panel == Some(panel_id) {
-                                    controller.grab_radius = distance;
-                                }
-                            }
-                            panel.texture = texture;
-                            panel.state = state;
-                            if maximized_changed {
-                                *maximize_layout_dirty = true;
-                                if state.maximized {
-                                    controller.resizing_panel = None;
-                                    controller.resize_density = None;
-                                    controller.resize_requested_size = None;
-                                }
-                            }
-                            if fullscreen_changed {
-                                panel.fullscreen_anchor_pose = None;
-                                if state.fullscreen {
-                                    *active_fullscreen_panel = Some(panel_id);
-                                } else if *active_fullscreen_panel == Some(panel_id) {
-                                    *active_fullscreen_panel = images
-                                        .iter()
-                                        .rev()
-                                        .find(|(_, candidate)| candidate.state.fullscreen)
-                                        .map(|(id, _)| *id);
-                                    if active_fullscreen_panel.is_none() {
-                                        for panel in images.values_mut() {
-                                            panel.geometry.pose = panel.saved_pose;
-                                            panel.temporary_pose = panel.saved_pose;
-                                        }
-                                    }
-                                }
-                                if state.fullscreen {
-                                    controller.grabbed_panel = None;
-                                    controller.resizing_panel = None;
-                                    controller.resize_density = None;
-                                    controller.resize_requested_size = None;
-                                }
-                            }
-                        } else {
-                            images.insert(
-                                panel_id,
-                                XrPanel {
-                                    texture,
-                                    geometry,
-                                    saved_pose: geometry.pose,
-                                    temporary_pose: geometry.pose,
-                                    resize_pending: false,
-                                    state,
-                                    fullscreen_anchor_pose: None,
-                                    history: PanelHistory::default(),
+    }
+    for command in updates {
+        match command {
+            PanelUpdate::GpuFrame {
+                panel_id,
+                dmabuf,
+                geometry,
+                state,
+            } => {
+                let shared = timings
+                    .measure("gpu/dmabuf-import", Duration::ZERO, || {
+                        SharedImage::import(instance, device, physical_device, dmabuf)
+                    })
+                    .context("mandatory GPU DMA-BUF import failed")?;
+                let size = shared.dmabuf.size();
+                ensure!(
+                    size.w > 0
+                        && size.h > 0
+                        && size.w as u32 <= max_panel_size
+                        && size.h as u32 <= max_panel_size,
+                    "window image exceeds negotiated Vulkan limits"
+                );
+                let texture = timings.measure("gpu/panel-texture", Duration::ZERO, || {
+                    PanelTexture::new(scene, shared)
+                })?;
+                timings.measure("gpu/panel-replace", Duration::ZERO, || {
+                    if let Some(panel) = images.get_mut(&panel_id) {
+                        let fullscreen_changed = panel.state.fullscreen != state.fullscreen;
+                        let maximized_changed = panel.state.maximized != state.maximized;
+                        let layout_changed =
+                            fullscreen_changed || (!state.fullscreen && maximized_changed);
+                        if layout_changed {
+                            panel.history.save(
+                                panel.state,
+                                PanelPastState {
+                                    distance: panel.geometry.pose.center.distance(player),
+                                    size: panel.geometry.logical_size,
                                 },
                             );
-                            if state.fullscreen {
-                                *active_fullscreen_panel = Some(panel_id);
-                            }
-                            pending_spawn.insert(panel_id);
-                            if state.maximized {
-                                *maximize_layout_dirty = true;
+                        }
+                        reconcile_panel_geometry(
+                            &mut panel.geometry,
+                            &mut panel.saved_pose,
+                            &mut panel.temporary_pose,
+                            geometry,
+                            panel.resize_pending && panel.state.fullscreen == state.fullscreen,
+                            false,
+                        );
+                        if layout_changed {
+                            let distance = panel
+                                .history
+                                .get(state)
+                                .map(|past| past.distance)
+                                .unwrap_or_else(|| panel.geometry.pose.center.distance(player));
+                            let pose = restore_panel_distance(
+                                panel.geometry.pose,
+                                player,
+                                distance,
+                                geometry.logical_size,
+                                config.window.pixels_per_degree,
+                            );
+                            panel.geometry.pose = pose;
+                            panel.saved_pose = pose;
+                            panel.temporary_pose = pose;
+                            panel.resize_pending = false;
+                            reset_grab_baseline_after_unmaximize(
+                                controller.grabbed_panel,
+                                panel_id,
+                                pose.width_m,
+                                distance,
+                                &mut controller.grab_initial_width,
+                                &mut controller.grab_initial_radius,
+                            );
+                            if controller.grabbed_panel == Some(panel_id) {
+                                controller.grab_radius = distance;
                             }
                         }
-                    });
-                }
-                PanelUpdate::Removed { .. } => {}
+                        panel.texture = texture;
+                        panel.state = state;
+                        if maximized_changed {
+                            *maximize_layout_dirty = true;
+                            if state.maximized {
+                                controller.resizing_panel = None;
+                                controller.resize_density = None;
+                                controller.resize_requested_size = None;
+                            }
+                        }
+                        if fullscreen_changed {
+                            panel.fullscreen_anchor_pose = None;
+                            if state.fullscreen {
+                                *active_fullscreen_panel = Some(panel_id);
+                            } else if *active_fullscreen_panel == Some(panel_id) {
+                                *active_fullscreen_panel = images
+                                    .iter()
+                                    .rev()
+                                    .find(|(_, candidate)| candidate.state.fullscreen)
+                                    .map(|(id, _)| *id);
+                                if active_fullscreen_panel.is_none() {
+                                    for panel in images.values_mut() {
+                                        panel.geometry.pose = panel.saved_pose;
+                                        panel.temporary_pose = panel.saved_pose;
+                                    }
+                                }
+                            }
+                            if state.fullscreen {
+                                controller.grabbed_panel = None;
+                                controller.resizing_panel = None;
+                                controller.resize_density = None;
+                                controller.resize_requested_size = None;
+                            }
+                        }
+                    } else {
+                        images.insert(
+                            panel_id,
+                            XrPanel {
+                                texture,
+                                geometry,
+                                saved_pose: geometry.pose,
+                                temporary_pose: geometry.pose,
+                                resize_pending: false,
+                                state,
+                                fullscreen_anchor_pose: None,
+                                history: PanelHistory::default(),
+                            },
+                        );
+                        if state.fullscreen {
+                            *active_fullscreen_panel = Some(panel_id);
+                        }
+                        pending_spawn.insert(panel_id);
+                        if state.maximized {
+                            *maximize_layout_dirty = true;
+                        }
+                    }
+                });
             }
+            PanelUpdate::Removed { .. } => {}
         }
-        Ok(())
     }
+    Ok(())
 }
 
 pub(super) fn reconcile_panel_geometry(

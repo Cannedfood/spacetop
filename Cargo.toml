@@ -9,6 +9,12 @@ members = [".", "utils/spacelauncher", "utils/spacetop-config", "utils/spacesett
 default-members = ["."]
 resolver = "3"
 
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = "1"
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }

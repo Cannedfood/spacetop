@@ -863,7 +863,6 @@ fn color_swatch(color: Color) -> Element<'static, Message> {
     .into()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn slider_row<'a>(
     label: &'a str,
     value: f32,
